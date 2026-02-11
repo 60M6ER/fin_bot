@@ -29,13 +29,13 @@ databaseChangeLog:
                   name: api_key
                   type: text
                   constraints:
-                    nullable: false
+                    nullable: true
 
               - column:
                   name: api_secret
                   type: text
                   constraints:
-                    nullable: false
+                    nullable: true
 
               - column:
                   name: passphrase

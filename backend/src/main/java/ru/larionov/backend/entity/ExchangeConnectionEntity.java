@@ -27,10 +27,10 @@ public class ExchangeConnectionEntity {
     @Column(name = "name", nullable = false, length = 128)
     private String name;
 
-    @Column(name = "api_key", nullable = false, columnDefinition = "text")
+    @Column(name = "api_key", columnDefinition = "text")
     private String apiKey;
 
-    @Column(name = "api_secret", nullable = false, columnDefinition = "text")
+    @Column(name = "api_secret", columnDefinition = "text")
     private String apiSecret;
 
     @Column(name = "passphrase", columnDefinition = "text")

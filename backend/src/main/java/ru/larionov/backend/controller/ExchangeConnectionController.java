@@ -1,14 +1,17 @@
 package ru.larionov.backend.controller;
 
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.util.UriComponentsBuilder;
 import ru.larionov.backend.dto.ExchangeConnectionCreateRequest;
 import ru.larionov.backend.dto.ExchangeConnectionDetailDto;
 import ru.larionov.backend.dto.ExchangeConnectionListItemDto;
+import ru.larionov.backend.enums.ExchangeType;
 import ru.larionov.backend.service.ExchangeConnectionService;
-
 import java.net.URI;
 import java.util.List;
 import java.util.UUID;
@@ -21,8 +24,8 @@ public class ExchangeConnectionController {
     private final ExchangeConnectionService service;
 
     @GetMapping
-    public List<ExchangeConnectionListItemDto> list() {
-        return service.list();
+    public Page<ExchangeConnectionListItemDto> list(Pageable pageable) {
+        return service.list(pageable);
     }
 
     @GetMapping("/{id}")
@@ -30,12 +33,15 @@ public class ExchangeConnectionController {
         return service.get(id);
     }
 
+    @GetMapping("/types")
+    public List<ExchangeType> getExchangeTypes() {
+        return service.getExchangeTypes();
+    }
+
     @PostMapping
-    public ResponseEntity<Void> create(@RequestBody ExchangeConnectionCreateRequest req,
-                                       UriComponentsBuilder ucb) {
+    public ResponseEntity<UUID> create(@RequestBody ExchangeConnectionCreateRequest req) {
         UUID id = service.create(req);
-        URI location = ucb.path("/api/v1/exchange-connections/{id}").build(id);
-        return ResponseEntity.created(location).build();
+        return ResponseEntity.status(HttpStatus.CREATED).body(id);
     }
 
     @DeleteMapping("/{id}")

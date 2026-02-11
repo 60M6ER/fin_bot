@@ -1,12 +1,15 @@
 package ru.larionov.backend.service;
 
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import ru.larionov.backend.dto.ExchangeConnectionCreateRequest;
 import ru.larionov.backend.dto.ExchangeConnectionDetailDto;
 import ru.larionov.backend.dto.ExchangeConnectionListItemDto;
 import ru.larionov.backend.entity.ExchangeConnectionEntity;
+import ru.larionov.backend.enums.ExchangeType;
 import ru.larionov.backend.exception.NotFoundException;
 import ru.larionov.backend.repository.ExchangeConnectionRepository;
 
@@ -20,16 +23,19 @@ public class ExchangeConnectionService {
 
     private final ExchangeConnectionRepository repo;
 
-    public List<ExchangeConnectionListItemDto> list() {
-        return repo.findAll().stream()
-                .map(this::toListItem)
-                .toList();
+    public Page<ExchangeConnectionListItemDto> list(Pageable pageable) {
+        return repo.findAll(pageable)
+                .map(this::toListItem);
     }
 
     public ExchangeConnectionDetailDto get(UUID id) {
         ExchangeConnectionEntity e = repo.findById(id)
                 .orElseThrow(() -> new NotFoundException("Exchange connection not found: " + id));
         return toDetail(e);
+    }
+
+    public List<ExchangeType> getExchangeTypes() {
+        return List.of(ExchangeType.values());
     }
 
     @Transactional
@@ -40,7 +46,7 @@ public class ExchangeConnectionService {
                 .apiKey(req.apiKey().trim())
                 .apiSecret(req.apiSecret().trim())
                 .passphrase(req.passphrase() == null ? null : req.passphrase().trim())
-                .active(true)
+                .active(false)
                 .build();
 
         repo.save(e);

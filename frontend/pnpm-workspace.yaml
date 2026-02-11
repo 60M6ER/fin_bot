@@ -1,0 +1,4 @@
+# https://pnpm.io/settings
+shamefullyHoist: true
+packages:
+  - '.'
