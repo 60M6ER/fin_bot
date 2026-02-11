@@ -1,0 +1,90 @@
+databaseChangeLog:
+  - changeSet:
+      id: 020-bot
+      author: boris
+      changes:
+        - createTable:
+            tableName: bot
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+
+              - column:
+                  name: name
+                  type: varchar(128)
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: exchange_connection_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: strategy_type
+                  type: varchar(64)
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: strategy_config
+                  type: jsonb
+                  defaultValueComputed: '''{}''::jsonb'
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: symbol
+                  type: varchar(64)
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: timeframe
+                  type: varchar(32)
+
+              - column:
+                  name: status
+                  type: varchar(32)
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: is_enabled
+                  type: boolean
+                  defaultValueBoolean: true
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: CURRENT_TIMESTAMP
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: updated_at
+                  type: timestamp with time zone
+                  defaultValueComputed: CURRENT_TIMESTAMP
+                  constraints:
+                    nullable: false
+
+        - addForeignKeyConstraint:
+            baseTableName: bot
+            baseColumnNames: exchange_connection_id
+            referencedTableName: exchange_connection
+            referencedColumnNames: id
+            constraintName: fk_bot_exchange_connection
+
+        - createIndex:
+            tableName: bot
+            indexName: idx_bot_exchange_connection
+            columns:
+              - column:
+                  name: exchange_connection_id

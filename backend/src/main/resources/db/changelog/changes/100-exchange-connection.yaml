@@ -1,0 +1,70 @@
+databaseChangeLog:
+  - changeSet:
+      id: 010-exchange-connection
+      author: boris
+      changes:
+        - createTable:
+            tableName: exchange_connection
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+
+              - column:
+                  name: exchange
+                  type: varchar(32)
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: name
+                  type: varchar(128)
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: api_key
+                  type: text
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: api_secret
+                  type: text
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: passphrase
+                  type: text
+
+              - column:
+                  name: is_active
+                  type: boolean
+                  defaultValueBoolean: true
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: CURRENT_TIMESTAMP
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: updated_at
+                  type: timestamp with time zone
+                  defaultValueComputed: CURRENT_TIMESTAMP
+                  constraints:
+                    nullable: false
+
+        - createIndex:
+            tableName: exchange_connection
+            indexName: idx_exchange_connection_exchange
+            columns:
+              - column:
+                  name: exchange
