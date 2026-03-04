@@ -5,11 +5,10 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import ru.larionov.backend.dto.ExchangeConnectionCreateRequest;
-import ru.larionov.backend.dto.ExchangeConnectionDetailDto;
-import ru.larionov.backend.dto.ExchangeConnectionListItemDto;
+import ru.larionov.backend.dto.*;
 import ru.larionov.backend.entity.ExchangeConnectionEntity;
 import ru.larionov.backend.enums.ExchangeType;
+import ru.larionov.backend.enums.RuntimeState;
 import ru.larionov.backend.exception.NotFoundException;
 import ru.larionov.backend.repository.ExchangeConnectionRepository;
 
@@ -43,9 +42,10 @@ public class ExchangeConnectionService {
         ExchangeConnectionEntity e = ExchangeConnectionEntity.builder()
                 .exchange(req.exchange())
                 .name(req.name().trim())
-                .apiKey(req.apiKey().trim())
-                .apiSecret(req.apiSecret().trim())
-                .passphrase(req.passphrase() == null ? null : req.passphrase().trim())
+                .apiKey(null)
+                .apiSecret(null)
+                .passphrase(null)
+                .sandboxEnabled(false)
                 .active(false)
                 .build();
 
@@ -61,12 +61,51 @@ public class ExchangeConnectionService {
         repo.deleteById(id);
     }
 
+    @Transactional
+    public void updateName(ExchangeUpdateNameDto updateNameDto) {
+        ExchangeConnectionEntity e = repo.findById(updateNameDto.id())
+                .orElseThrow(() -> new NotFoundException("Exchange connection not found: " + updateNameDto.id()));
+        if (updateNameDto.name() == null || updateNameDto.name().isBlank()) {
+            throw new IllegalArgumentException("name must not be blank");
+        }
+        e.setName(updateNameDto.name().trim());
+        repo.save(e);
+    }
+
+    @Transactional
+    public void setSandboxEnabled(ExchangeSetSandboxEnabledDto sandboxEnabledDto) {
+        ExchangeConnectionEntity e = repo.findById(sandboxEnabledDto.id())
+                .orElseThrow(() -> new NotFoundException("Exchange connection not found: " + sandboxEnabledDto.id()));
+        e.setSandboxEnabled(sandboxEnabledDto.enabled());
+        repo.save(e);
+    }
+
+    @Transactional
+    public void updateCredentials(ExchangeUpdateCredentialsDto updateCredentialsDto) {
+        ExchangeConnectionEntity e = repo.findById(updateCredentialsDto.id())
+                .orElseThrow(() -> new NotFoundException("Exchange connection not found: " + updateCredentialsDto.id()));
+
+        e.setApiKey(normalizeNullable(updateCredentialsDto.apiKey()));
+        e.setApiSecret(normalizeNullable(updateCredentialsDto.apiSecret()));
+        e.setPassphrase(normalizeNullable(updateCredentialsDto.passphrase()));
+
+        repo.save(e);
+    }
+
+    private String normalizeNullable(String v) {
+        if (v == null) return null;
+        String t = v.trim();
+        return t.isBlank() ? null : t;
+    }
+
     private ExchangeConnectionListItemDto toListItem(ExchangeConnectionEntity e) {
         return new ExchangeConnectionListItemDto(
                 e.getId(),
                 e.getExchange(),
                 e.getName(),
-                e.isActive()
+                e.isActive(),
+                RuntimeState.INACTIVE,
+                ""
         );
     }
 
@@ -77,6 +116,7 @@ public class ExchangeConnectionService {
                 e.getExchange(),
                 e.getName(),
                 e.isActive(),
+                e.isSandboxEnabled(),
                 masked,
                 e.getApiSecret() != null && !e.getApiSecret().isBlank(),
                 e.getPassphrase() != null && !e.getPassphrase().isBlank(),

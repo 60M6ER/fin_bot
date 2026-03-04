@@ -20,12 +20,15 @@
 
 <script setup>
 import { ref } from 'vue'
-import axios from 'axios'
+import { apiClient, getErrorMessage } from 'src/services/apiClient'
 
 const bots = ref([])
 
 const loadBots = async () => {
-  const response = await axios.get('/api/v1/bots')
-  bots.value = response.data
+  try {
+    bots.value = await apiClient.get('/api/v1/bots')
+  } catch (e) {
+    console.error(getErrorMessage(e, 'Не удалось загрузить ботов'))
+  }
 }
 </script>

@@ -36,6 +36,9 @@ public class ExchangeConnectionEntity {
     @Column(name = "passphrase", columnDefinition = "text")
     private String passphrase;
 
+    @Column(name = "sandbox_enabled", nullable = false)
+    private boolean sandboxEnabled;
+
     @Column(name = "is_active", nullable = false)
     private boolean active;
 

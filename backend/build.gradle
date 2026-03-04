@@ -37,6 +37,8 @@ dependencies {
     testImplementation 'org.springframework.boot:spring-boot-starter-liquibase-test'
     testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    implementation 'ru.tinkoff.piapi:java-sdk-core:1.44.1'
+    implementation "org.telegram:telegrambots-spring-boot-starter:6.9.7.1"
 }
 
 tasks.named('test') {

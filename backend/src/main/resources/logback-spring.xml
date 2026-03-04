@@ -1,0 +1,15 @@
+<configuration>
+
+<!-- Подключаем стандартные настройки Spring Boot, включая CONSOLE аппендер -->
+<include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+<include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+
+<appender name="TELEGRAM"
+          class="ru.larionov.backend.telegram.service.TelegramLogAppender"/>
+
+<root level="INFO">
+    <appender-ref ref="CONSOLE"/>
+    <appender-ref ref="TELEGRAM"/>
+</root>
+
+</configuration>

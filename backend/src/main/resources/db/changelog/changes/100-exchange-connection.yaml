@@ -42,6 +42,13 @@ databaseChangeLog:
                   type: text
 
               - column:
+                  name: sandbox_enabled
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+
+              - column:
                   name: is_active
                   type: boolean
                   defaultValueBoolean: true

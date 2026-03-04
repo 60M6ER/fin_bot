@@ -10,6 +10,7 @@ public record ExchangeConnectionDetailDto(
         ExchangeType exchange,
         String name,
         boolean active,
+        boolean sandboxEnabled,
         String apiKeyMasked,
         boolean hasSecret,
         boolean hasPassphrase,

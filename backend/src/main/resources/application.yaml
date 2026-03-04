@@ -20,5 +20,10 @@ spring:
     change-log: classpath:db/changelog/db.changelog-master.yaml
     enabled: true
 
+telegram:
+  bot:
+    token: ${TELEGRAM_BOT_TOKEN:6219525923:AAF0OQFG_T2Xm-p_p_bsMdynKs4yXnHrXnE}
+    username: ${TELEGRAM_BOT_USERNAME:BombersHomeBot}
+
 server:
   port: 8080

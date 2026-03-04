@@ -24,3 +24,12 @@
 
   </q-layout>
 </template>
+
+<script setup>
+import { provide } from 'vue'
+import { toast } from 'boot/notify'
+
+// Ensure toast is available via inject('toast') for all nested pages/components.
+// (Boot file already registers it globally; this is an extra safety net and makes the dependency explicit at the layout level.)
+provide('toast', toast)
+</script>

@@ -1,0 +1,38 @@
+databaseChangeLog:
+  - changeSet:
+      id: 2026-02-16_telegram_chat
+      author: boris
+      changes:
+        - createTable:
+            tableName: telegram_chat
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: chat_id
+                  type: bigint
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: username
+                  type: varchar(64)
+              - column:
+                  name: first_name
+                  type: varchar(128)
+              - column:
+                  name: last_name
+                  type: varchar(128)
+              - column:
+                  name: created_at
+                  type: timestamp
+                  constraints:
+                    nullable: false
+        - addDefaultValue:
+            tableName: telegram_chat
+            columnName: created_at
+            defaultValueComputed: CURRENT_TIMESTAMP

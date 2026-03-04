@@ -70,11 +70,30 @@
 
           <div class="row items-center q-gutter-sm">
             <q-btn
+              v-if="detail"
+              dense
+              color="primary"
+              :label="detail.active ? 'Остановить' : 'Запустить'"
+              :loading="actionLoading || desiredActive !== null"
+              :disable="detailLoading || actionLoading || desiredActive !== null"
+              @click="doActivateDeactivate"
+            />
+
+            <q-btn
+              dense
+              flat
+              icon="refresh"
+              :disable="!detail || detailLoading || runtimeLoading"
+              :loading="runtimeLoading"
+              @click="loadRuntime(detail?.id)"
+            />
+
+            <q-btn
               dense
               flat
               icon="delete"
               color="negative"
-              :disable="!detail || detailLoading"
+              :disable="!detail || detailLoading || actionLoading || desiredActive !== null"
               @click="confirmDelete = true"
             />
           </div>
@@ -94,9 +113,36 @@
           <div v-else-if="detail" class="q-pa-md">
             <q-card flat bordered>
               <q-card-section>
-                <div class="text-h6">{{ detail.name || 'Без названия' }}</div>
+                <div class="row items-center q-col-gutter-sm">
+                  <div class="col">
+                    <q-input
+                      v-model="editName"
+                      dense
+                      outlined
+                      label="Имя подключения"
+                      :disable="nameSaving"
+                      maxlength="120"
+                    />
+                  </div>
+                  <div class="col-auto">
+                    <q-btn
+                      v-if="isNameDirty"
+                      dense
+                      round
+                      icon="check"
+                      color="positive"
+                      :loading="nameSaving"
+                      :disable="nameSaving"
+                      @click="saveName"
+                    />
+                  </div>
+                </div>
                 <div class="text-caption text-grey">
                   {{ detail.exchange }} · {{ detail.active ? 'Активно' : 'Выключено' }}
+                </div>
+                <div class="text-caption text-grey q-mt-xs">
+                  Runtime: <span class="mono">{{ runtime?.state || '—' }}</span>
+                  <span v-if="runtime?.lastError" class="q-ml-sm text-negative">{{ runtime.lastError }}</span>
                 </div>
                 <div class="text-caption text-grey q-mt-xs">
                   ID: <span class="mono">{{ detail.id }}</span>
@@ -108,8 +154,20 @@
               <q-card-section class="q-gutter-md">
                 <div class="row q-col-gutter-md">
                   <div class="col-12 col-md-6">
-                    <div class="text-caption text-grey">API Key</div>
-                    <div class="mono">{{ detail.apiKeyMasked || '—' }}</div>
+                    <div class="row items-center justify-between">
+                      <div>
+                        <div class="text-caption text-grey">API Key</div>
+                        <div class="mono">{{ detail.apiKeyMasked || '—' }}</div>
+                      </div>
+                      <q-btn
+                        dense
+                        flat
+                        icon="edit"
+                        label="Ключи"
+                        :disable="!detail || credentialsSaving"
+                        @click="openCredentialsDialog"
+                      />
+                    </div>
                   </div>
 
                   <div class="col-12 col-md-3">
@@ -128,6 +186,22 @@
                       :color="detail.hasPassphrase ? 'positive' : 'grey-6'"
                       outline
                     />
+                  </div>
+
+                  <div class="col-12 col-md-6">
+                    <div class="text-caption text-grey">Песочница</div>
+                    <div class="row items-center q-gutter-sm">
+                      <q-toggle
+                        v-model="sandboxEnabled"
+                        :disable="sandboxSaving || !detail"
+                        @update:model-value="onSandboxToggle"
+                      />
+                      <q-badge
+                        :label="sandboxEnabled ? 'Включена' : 'Выключена'"
+                        :color="sandboxEnabled ? 'primary' : 'grey-6'"
+                        outline
+                      />
+                    </div>
                   </div>
 
                   <div class="col-12 col-md-6">
@@ -195,6 +269,59 @@
       </q-card>
     </q-dialog>
 
+    <!-- CREDENTIALS dialog -->
+    <q-dialog v-model="credentialsDialog">
+      <q-card style="min-width: 560px">
+        <q-card-section class="row items-center justify-between">
+          <div class="text-subtitle1">Ключи доступа</div>
+          <q-btn dense flat round icon="close" v-close-popup />
+        </q-card-section>
+
+        <q-separator />
+
+        <q-card-section class="q-gutter-md">
+          <q-input
+            v-model="credentialsForm.apiKey"
+            label="API Key / Token"
+            outlined
+            dense
+            :disable="credentialsSaving"
+          />
+
+          <q-input
+            v-model="credentialsForm.apiSecret"
+            label="API Secret"
+            outlined
+            dense
+            :disable="credentialsSaving"
+          />
+
+          <q-input
+            v-model="credentialsForm.passphrase"
+            label="Passphrase"
+            outlined
+            dense
+            :disable="credentialsSaving"
+          />
+
+          <div class="text-caption text-grey">
+            Поля не обязательны. Можно сохранить пустые значения.
+          </div>
+        </q-card-section>
+
+        <q-card-actions align="right" class="q-pa-md">
+          <q-btn flat label="Отмена" v-close-popup :disable="credentialsSaving" />
+          <q-btn
+            color="primary"
+            label="Сохранить"
+            :loading="credentialsSaving"
+            :disable="credentialsSaving || !detail"
+            @click="saveCredentials"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
     <!-- delete confirm -->
     <q-dialog v-model="confirmDelete">
       <q-card style="min-width: 420px">
@@ -223,9 +350,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, reactive } from 'vue'
-import { api } from 'boot/axios'
-import { Notify } from 'quasar'
+import { ref, computed, onMounted, reactive, onBeforeUnmount, inject } from 'vue'
+import { apiClient, getErrorMessage } from 'src/services/apiClient'
+
+const toast = inject('toast')
 
 const list = ref([])
 const listLoading = ref(false)
@@ -233,6 +361,124 @@ const listLoading = ref(false)
 const selectedId = ref(null)
 const detail = ref(null)
 const detailLoading = ref(false)
+
+// runtime status (in-memory state on backend)
+const runtime = ref(null)
+const runtimeLoading = ref(false)
+const actionLoading = ref(false)
+const desiredActive = ref(null) // true/false while we wait runtime to reach target
+
+let runtimePollTimer = null
+let runtimeErrorNotified = false
+
+function clearRuntimePoll () {
+  if (runtimePollTimer) {
+    clearInterval(runtimePollTimer)
+    runtimePollTimer = null
+  }
+  runtimeErrorNotified = false
+}
+
+
+function normalizeStatus (s) {
+  return String(s || '').toUpperCase()
+}
+
+function isRuntimeActive (rt) {
+  const st = normalizeStatus(rt?.state)
+  // tolerate different enums/strings
+  return ['ACTIVE', 'RUNNING', 'CONNECTED', 'ONLINE', 'STARTED'].includes(st)
+}
+
+function isRuntimeInactive (rt) {
+  const st = normalizeStatus(rt?.state)
+  return ['INACTIVE', 'STOPPED', 'DISCONNECTED', 'OFFLINE', 'IDLE'].includes(st)
+}
+
+async function loadRuntime (id) {
+  if (!id) return
+  runtimeLoading.value = true
+  try {
+    runtime.value = await apiClient.get(`/api/v1/exchange-connections/${id}/runtime`)
+  } finally {
+    runtimeLoading.value = false
+  }
+}
+
+async function waitRuntimeToTarget (id, targetActive) {
+  desiredActive.value = targetActive
+  clearRuntimePoll()
+
+  // immediate refresh
+  await loadRuntime(id)
+
+  const startedAt = Date.now()
+  const timeoutMs = 60_000
+  const periodMs = 1500
+
+  runtimePollTimer = setInterval(async () => {
+    try {
+      await loadRuntime(id)
+
+      // if runtime reports an error, notify once (and stop waiting)
+      const errText = runtime.value?.lastError
+      if (errText && !runtimeErrorNotified) {
+        runtimeErrorNotified = true
+        clearRuntimePoll()
+        desiredActive.value = null
+        toast?.err(errText, { timeout: 6000 })
+        return
+      }
+
+      const ok = targetActive ? isRuntimeActive(runtime.value) : isRuntimeInactive(runtime.value)
+      if (ok) {
+        clearRuntimePoll()
+        desiredActive.value = null
+        toast?.ok(targetActive ? 'Биржа успешно запущена' : 'Биржа успешно остановлена')
+        return
+      }
+
+      if (Date.now() - startedAt > timeoutMs) {
+        clearRuntimePoll()
+        desiredActive.value = null
+        toast?.warn('Не дождались подтверждения статуса в runtime (таймаут)')
+      }
+    } catch (e) {
+      console.log(e)
+      // keep polling (avoid spamming)
+    }
+  }, periodMs)
+}
+
+async function doActivateDeactivate () {
+  const id = detail.value?.id
+  if (!id) return
+
+  const targetActive = !detail.value.active
+
+  actionLoading.value = true
+  try {
+    if (targetActive) {
+      await apiClient.post(`/api/v1/exchange-connections/${id}/activate`)
+      toast?.info('Команда запуска отправлена')
+    } else {
+      await apiClient.post(`/api/v1/exchange-connections/${id}/deactivate`)
+      toast?.info('Команда остановки отправлена')
+    }
+
+    // refresh detail (DB target flag might change) and wait for runtime to converge
+    await loadDetail(id)
+    await waitRuntimeToTarget(id, targetActive)
+
+    // refresh list badges
+    await loadList()
+  } catch (e) {
+    // try to show server-provided error text if possible
+    toast?.err(getErrorMessage(e, 'Не удалось выполнить действие'))
+  } finally {
+    actionLoading.value = false
+  }
+}
 
 const confirmDelete = ref(false)
 const deleteLoading = ref(false)
@@ -253,6 +499,30 @@ const canCreate = computed(() => {
   return !!ex && name.length > 0 && !createLoading.value
 })
 
+// Inline name edit
+const editName = ref('')
+const originalName = ref('')
+const nameSaving = ref(false)
+
+// Sandbox toggle
+const sandboxEnabled = ref(false)
+const sandboxSaving = ref(false)
+
+// Credentials dialog
+const credentialsDialog = ref(false)
+const credentialsSaving = ref(false)
+const credentialsForm = reactive({
+  apiKey: '',
+  apiSecret: '',
+  passphrase: ''
+})
+
+const isNameDirty = computed(() => {
+  const a = (editName.value || '').trim()
+  const b = (originalName.value || '').trim()
+  return a !== b
+})
+
 onMounted(async () => {
   await Promise.all([
     loadTypes(),
@@ -260,10 +530,14 @@ onMounted(async () => {
   ])
 })
 
+onBeforeUnmount(() => {
+  clearRuntimePoll()
+})
+
 async function loadList () {
   listLoading.value = true
   try {
-    const { data } = await api.get('/api/v1/exchange-connections', {
+    const data = await apiClient.get('/api/v1/exchange-connections', {
       params: { page: 0, size: 100, sort: 'createdAt,desc' }
     })
 
@@ -285,15 +559,30 @@ async function loadList () {
 async function select (id) {
   if (!id || selectedId.value === id) return
   selectedId.value = id
-  await loadDetail(id)
+  desiredActive.value = null
+  clearRuntimePoll()
+  // Reset inline edit/sandbox state
+  editName.value = ''
+  originalName.value = ''
+  sandboxEnabled.value = false
+  await Promise.all([
+    loadDetail(id),
+    loadRuntime(id)
+  ])
 }
 
 async function loadDetail (id) {
   detailLoading.value = true
   detail.value = null
   try {
-    const { data } = await api.get(`/api/v1/exchange-connections/${id}`)
-    detail.value = data
+    detail.value = await apiClient.get(`/api/v1/exchange-connections/${id}`)
+    // Sync inline name edit and sandbox toggle state
+    originalName.value = detail.value?.name || ''
+    editName.value = originalName.value
+    sandboxEnabled.value = !!detail.value?.sandboxEnabled
+    if (selectedId.value === id) {
+      await loadRuntime(id)
+    }
   } finally {
     detailLoading.value = false
   }
@@ -304,8 +593,12 @@ async function doDelete () {
   if (!detail.value?.id) return
   deleteLoading.value = true
   try {
-    await api.delete(`/api/v1/exchange-connections/${detail.value.id}`)
+    await apiClient.delete(`/api/v1/exchange-connections/${detail.value.id}`)
     confirmDelete.value = false
+
+    clearRuntimePoll()
+    desiredActive.value = null
+    runtime.value = null
 
     selectedId.value = null
     detail.value = null
@@ -328,7 +621,7 @@ async function openCreate () {
 async function loadTypes () {
   typesLoading.value = true
   try {
-    const { data } = await api.get('/api/v1/exchange-connections/types')
+    const data = await apiClient.get('/api/v1/exchange-connections/types')
     exchangeTypes.value = Array.isArray(data) ? data : []
   } finally {
     typesLoading.value = false
@@ -342,13 +635,10 @@ async function doCreate () {
   try {
     const payload = {
       exchange: createForm.exchange,
-      name: createForm.name.trim(),
-      apiKey: '',
-      apiSecret: '',
-      passphrase: null
+      name: createForm.name.trim()
     }
 
-    const { data: id } = await api.post('/api/v1/exchange-connections', payload)
+    const id = await apiClient.post('/api/v1/exchange-connections', payload)
 
     createDialog.value = false
 
@@ -359,9 +649,88 @@ async function doCreate () {
     await select(id)
 
   } catch (e) {
-    Notify.create({ type: 'negative', message: 'Не удалось создать подключение' + e })
+    toast?.err(getErrorMessage(e, 'Не удалось создать подключение'))
   } finally {
     createLoading.value = false
+  }
+}
+
+// Inline name save
+async function saveName () {
+  const id = detail.value?.id
+  if (!id) return
+
+  nameSaving.value = true
+  try {
+    const payload = {
+      id,
+      name: (editName.value || '').trim()
+    }
+
+    await apiClient.patch(`/api/v1/exchange-connections/${id}/name`, payload)
+    toast?.ok('Успешно сохранено')
+
+    // refresh detail + list
+    await loadDetail(id)
+    await loadList()
+  } catch (e) {
+    toast?.err(getErrorMessage(e, 'Не удалось сохранить'))
+  } finally {
+    nameSaving.value = false
+  }
+}
+
+async function onSandboxToggle (val) {
+  const id = detail.value?.id
+  if (!id) return
+
+  const prev = !val
+  sandboxSaving.value = true
+  try {
+    const payload = { id, enabled: !!val }
+    await apiClient.patch(`/api/v1/exchange-connections/${id}/sandbox`, payload)
+    toast?.ok('Успешно сохранено')
+
+    await loadDetail(id)
+    await loadList()
+  } catch (e) {
+    // revert UI toggle
+    sandboxEnabled.value = prev
+    toast?.err(getErrorMessage(e, 'Не удалось сохранить'))
+  } finally {
+    sandboxSaving.value = false
+  }
+}
+
+function openCredentialsDialog () {
+  credentialsForm.apiKey = ''
+  credentialsForm.apiSecret = ''
+  credentialsForm.passphrase = ''
+  credentialsDialog.value = true
+}
+
+async function saveCredentials () {
+  const id = detail.value?.id
+  if (!id) return
+
+  credentialsSaving.value = true
+  try {
+    const payload = {
+      id,
+      apiKey: credentialsForm.apiKey,
+      apiSecret: credentialsForm.apiSecret,
+      passphrase: credentialsForm.passphrase
+    }
+
+    await apiClient.put(`/api/v1/exchange-connections/${id}/credentials`, payload)
+    toast?.ok('Успешно сохранено')
+
+    credentialsDialog.value = false
+    await loadDetail(id)
+  } catch (e) {
+    toast?.err(getErrorMessage(e, 'Не удалось сохранить'))
+  } finally {
+    credentialsSaving.value = false
   }
 }
 
