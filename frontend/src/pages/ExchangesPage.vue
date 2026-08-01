@@ -41,16 +41,27 @@
                   {{ item.name || 'Без названия' }}
                 </q-item-label>
                 <q-item-label caption>
-                  {{ item.exchange }} · {{ item.active ? 'Активно' : 'Выключено' }}
+                  {{ item.exchange }} · {{ item.active ? 'должно работать' : 'остановлено' }}
                 </q-item-label>
               </q-item-section>
 
               <q-item-section side>
-                <q-badge
-                  :label="item.active ? 'ON' : 'OFF'"
-                  :color="item.active ? 'positive' : 'grey-6'"
-                  outline
-                />
+                <div class="row items-center q-gutter-xs">
+                  <!-- Подключение, которое должно работать, но не работает: идут повторы -->
+                  <q-icon
+                    v-if="item.active && !isRuntimeActive(item.runtimeState)"
+                    name="sync_problem"
+                    color="warning"
+                    size="xs"
+                  >
+                    <q-tooltip>Должно работать, но не поднято — идут повторные попытки</q-tooltip>
+                  </q-icon>
+                  <q-badge
+                    :color="stateColor(item.runtimeState)"
+                    :label="stateLabel(item.runtimeState)"
+                    outline
+                  />
+                </div>
               </q-item-section>
             </q-item>
 
@@ -141,7 +152,14 @@
                   {{ detail.exchange }} · {{ detail.active ? 'Активно' : 'Выключено' }}
                 </div>
                 <div class="text-caption text-grey q-mt-xs">
-                  Runtime: <span class="mono">{{ runtime?.state || '—' }}</span>
+                  Желаемое состояние:
+                  <q-badge
+                    :color="detail.active ? 'primary' : 'grey-6'"
+                    :label="detail.active ? 'должно работать' : 'остановлено'"
+                    outline
+                  />
+                  <span class="q-ml-sm">Runtime:</span>
+                  <q-badge :color="stateColor(runtime?.state)" :label="stateLabel(runtime?.state)" outline />
                   <span v-if="runtime?.lastError" class="q-ml-sm text-negative">{{ runtime.lastError }}</span>
                 </div>
                 <div class="text-caption text-grey q-mt-xs">
@@ -214,6 +232,156 @@
                     <div class="mono">{{ formatInstant(detail.updatedAt) }}</div>
                   </div>
                 </div>
+              </q-card-section>
+            </q-card>
+
+            <!-- Живость стримов -->
+            <q-card flat bordered class="q-mt-md">
+              <q-card-section class="row items-center justify-between">
+                <div class="text-subtitle2">Потоковые данные</div>
+                <q-badge
+                  :color="streams.supported ? 'primary' : 'grey-6'"
+                  :label="streams.supported ? 'поддерживается' : 'нет подключения'"
+                  outline
+                />
+              </q-card-section>
+
+              <q-separator />
+
+              <q-list separator>
+                <q-item v-for="s in streamRows" :key="s.key">
+                  <q-item-section>
+                    <q-item-label>{{ s.title }}</q-item-label>
+                    <q-item-label caption>
+                      Последнее событие: {{ s.lastEvent }}
+                      <span v-if="s.reconnects > 0"> · переподключений: {{ s.reconnects }}</span>
+                    </q-item-label>
+                    <q-item-label v-if="s.error" caption class="text-negative">{{ s.error }}</q-item-label>
+                  </q-item-section>
+                  <q-item-section side>
+                    <q-badge
+                      :color="s.connected ? 'positive' : 'grey-6'"
+                      :label="s.connected ? 'подключён' : 'нет'"
+                      outline
+                    />
+                  </q-item-section>
+                </q-item>
+              </q-list>
+
+              <q-card-section class="text-caption text-grey">
+                Стрим не отменяет сверку: за время разрыва события теряются безвозвратно,
+                поэтому после каждого переподключения состояние пересинхронизируется запросом.
+              </q-card-section>
+            </q-card>
+
+            <!-- Счёт и параметры тарифа -->
+            <q-card flat bordered class="q-mt-md">
+              <q-card-section class="row items-center justify-between">
+                <div class="text-subtitle2">Счёт и параметры</div>
+                <q-btn
+                  dense
+                  flat
+                  label="Обновить счета"
+                  icon="sync"
+                  :loading="accountsLoading"
+                  :disable="!isRuntimeActive(runtime?.state)"
+                  @click="loadAccounts(detail.id)"
+                />
+              </q-card-section>
+
+              <q-separator />
+
+              <q-card-section class="q-gutter-md">
+                <q-banner v-if="!isRuntimeActive(runtime?.state)" dense class="bg-grey-2" rounded>
+                  <template #avatar>
+                    <q-icon name="info" color="grey-7" />
+                  </template>
+                  Список счетов приходит от биржи — запустите подключение, чтобы выбрать счёт.
+                </q-banner>
+
+                <q-select
+                  v-model="settingsForm.accountId"
+                  :options="accountOptions"
+                  option-value="value"
+                  option-label="label"
+                  emit-value
+                  map-options
+                  label="Торговый счёт"
+                  outlined
+                  dense
+                  clearable
+                  :disable="settingsSaving || detail.active"
+                  hint="Пусто — подойдёт, только если счёт единственный"
+                />
+
+                <q-input
+                  v-model.number="settingsForm.commissionPercent"
+                  label="Комиссия за сделку, %"
+                  outlined
+                  dense
+                  type="number"
+                  step="0.001"
+                  min="0"
+                  :disable="settingsSaving || detail.active"
+                  hint="Ваш тариф за одну сторону. «Инвестор» ≈ 0.3, «Трейдер» ≈ 0.05"
+                />
+
+                <div class="text-caption text-grey">
+                  От этой ставки зависит проверка безубытка шага сетки: бот откажется
+                  стартовать, если шаг не окупает комиссию за оборот
+                  (сейчас {{ roundTripPercent }}%).
+                </div>
+
+                <div v-if="detail.active" class="text-caption text-grey">
+                  Параметры активного подключения менять нельзя — остановите его.
+                </div>
+
+                <div class="row justify-end">
+                  <q-btn
+                    color="primary"
+                    label="Сохранить"
+                    :loading="settingsSaving"
+                    :disable="settingsSaving || detail.active"
+                    @click="saveSettings"
+                  />
+                </div>
+              </q-card-section>
+            </q-card>
+
+            <!-- Боты этого подключения: видно, что остановит его выключение -->
+            <q-card flat bordered class="q-mt-md">
+              <q-card-section class="row items-center justify-between">
+                <div class="text-subtitle2">Боты этого подключения</div>
+                <q-badge :label="connectionBots.length" color="grey-7" outline />
+              </q-card-section>
+
+              <q-separator />
+
+              <q-list separator>
+                <q-item v-for="b in connectionBots" :key="b.id" clickable to="/bots">
+                  <q-item-section>
+                    <q-item-label>{{ b.name }}</q-item-label>
+                    <q-item-label caption>{{ b.strategyType }}</q-item-label>
+                  </q-item-section>
+                  <q-item-section side>
+                    <q-badge
+                      :color="stateColor(b.runtime && b.runtime.state)"
+                      :label="stateLabel(b.runtime && b.runtime.state)"
+                      outline
+                    />
+                  </q-item-section>
+                </q-item>
+
+                <q-item v-if="connectionBots.length === 0">
+                  <q-item-section class="text-grey">
+                    На этом подключении ботов нет
+                  </q-item-section>
+                </q-item>
+              </q-list>
+
+              <q-card-section v-if="runningBotsCount > 0 && detail.active" class="text-caption text-orange-9">
+                <q-icon name="warning" size="xs" class="q-mr-xs" />
+                Остановка подключения остановит {{ runningBotsCount }} работающих бот(ов).
               </q-card-section>
             </q-card>
           </div>
@@ -352,8 +520,115 @@
 <script setup>
 import { ref, computed, onMounted, reactive, onBeforeUnmount, inject } from 'vue'
 import { apiClient, getErrorMessage } from 'src/services/apiClient'
+import { stateColor, stateLabel, isRuntimeActive, isRuntimeInactive } from 'src/services/runtimeState'
 
 const toast = inject('toast')
+
+// Живость стримов
+const streams = ref({ supported: false, marketData: null, orders: null })
+
+const streamRows = computed(() => {
+  const rows = [
+    { key: 'marketData', title: 'Рыночные данные', health: streams.value.marketData },
+    { key: 'orders', title: 'Состояния ордеров', health: streams.value.orders }
+  ]
+  return rows.map(r => ({
+    key: r.key,
+    title: r.title,
+    connected: !!(r.health && r.health.connected),
+    reconnects: (r.health && r.health.reconnectCount) || 0,
+    error: r.health && r.health.lastError,
+    lastEvent: r.health && r.health.lastEventAt ? formatInstant(r.health.lastEventAt) : 'не было'
+  }))
+})
+
+async function loadStreams (id) {
+  if (!id) {
+    streams.value = { supported: false, marketData: null, orders: null }
+    return
+  }
+  try {
+    streams.value = await apiClient.get(`/api/v1/exchange-connections/${id}/streams`)
+  } catch (e) {
+    console.debug(e)
+  }
+}
+
+// Счёт и параметры тарифа
+const accounts = ref([])
+const accountsLoading = ref(false)
+const settingsSaving = ref(false)
+const settingsForm = reactive({ accountId: null, commissionPercent: 0.3 })
+
+const accountOptions = computed(() =>
+  accounts.value.map(a => ({
+    value: a.id,
+    label: `${a.name || 'Без названия'} · ${a.id}${a.sandbox ? ' (песочница)' : ''}`
+  }))
+)
+
+const roundTripPercent = computed(() => {
+  const rate = Number(settingsForm.commissionPercent) || 0
+  return (rate * 2).toFixed(3)
+})
+
+async function loadAccounts (id) {
+  if (!id) {
+    accounts.value = []
+    return
+  }
+  accountsLoading.value = true
+  try {
+    accounts.value = await apiClient.get(`/api/v1/exchange-connections/${id}/accounts`)
+  } catch (e) {
+    // Подключение может быть не активно — это ожидаемо, не шумим.
+    accounts.value = []
+    console.debug(e)
+  } finally {
+    accountsLoading.value = false
+  }
+}
+
+async function saveSettings () {
+  const id = detail.value?.id
+  if (!id) return
+
+  settingsSaving.value = true
+  try {
+    // В UI проценты, в API — доля: так понятнее человеку и однозначнее машине.
+    const rate = (Number(settingsForm.commissionPercent) || 0) / 100
+    await apiClient.patch(`/api/v1/exchange-connections/${id}/settings`, {
+      id,
+      accountId: settingsForm.accountId,
+      settings: { ...(detail.value.settings || {}), commissionRate: rate }
+    })
+    toast?.ok('Успешно сохранено')
+    await loadDetail(id)
+  } catch (e) {
+    toast?.err(getErrorMessage(e, 'Не удалось сохранить'))
+  } finally {
+    settingsSaving.value = false
+  }
+}
+
+// Боты выбранного подключения — чтобы перед остановкой было видно, кого это заденет.
+const connectionBots = ref([])
+const runningBotsCount = computed(
+  () => connectionBots.value.filter(b => isRuntimeActive(b.runtime && b.runtime.state)).length
+)
+
+async function loadConnectionBots (id) {
+  if (!id) {
+    connectionBots.value = []
+    return
+  }
+  try {
+    connectionBots.value = await apiClient.get(`/api/v1/exchange-connections/${id}/bots`)
+  } catch (e) {
+    connectionBots.value = []
+    console.debug(e)
+  }
+}
 
 const list = ref([])
 const listLoading = ref(false)
@@ -380,26 +655,14 @@ function clearRuntimePoll () {
 }
 
 
-function normalizeStatus (s) {
-  return String(s || '').toUpperCase()
-}
-
-function isRuntimeActive (rt) {
-  const st = normalizeStatus(rt?.state)
-  // tolerate different enums/strings
-  return ['ACTIVE', 'RUNNING', 'CONNECTED', 'ONLINE', 'STARTED'].includes(st)
-}
-
-function isRuntimeInactive (rt) {
-  const st = normalizeStatus(rt?.state)
-  return ['INACTIVE', 'STOPPED', 'DISCONNECTED', 'OFFLINE', 'IDLE'].includes(st)
-}
-
 async function loadRuntime (id) {
   if (!id) return
   runtimeLoading.value = true
   try {
     runtime.value = await apiClient.get(`/api/v1/exchange-connections/${id}/runtime`)
+    // Статусы ботов и стримов меняются вместе со статусом подключения — тянем тем же тиком.
+    await loadConnectionBots(id)
+    await loadStreams(id)
   } finally {
     runtimeLoading.value = false
   }
@@ -430,7 +693,8 @@ async function waitRuntimeToTarget (id, targetActive) {
         return
       }
 
-      const ok = targetActive ? isRuntimeActive(runtime.value) : isRuntimeInactive(runtime.value)
+      const st = runtime.value?.state
+      const ok = targetActive ? isRuntimeActive(st) : isRuntimeInactive(st)
       if (ok) {
         clearRuntimePoll()
         desiredActive.value = null
@@ -567,7 +831,8 @@ async function select (id) {
   sandboxEnabled.value = false
   await Promise.all([
     loadDetail(id),
-    loadRuntime(id)
+    loadRuntime(id),
+    loadConnectionBots(id)
   ])
 }
 
@@ -580,8 +845,16 @@ async function loadDetail (id) {
     originalName.value = detail.value?.name || ''
     editName.value = originalName.value
     sandboxEnabled.value = !!detail.value?.sandboxEnabled
+
+    settingsForm.accountId = detail.value?.accountId || null
+    // В API доля, в UI проценты.
+    settingsForm.commissionPercent = Number(
+      ((detail.value?.settings?.commissionRate ?? 0.003) * 100).toFixed(4)
+    )
+
     if (selectedId.value === id) {
       await loadRuntime(id)
+      await loadAccounts(id)
     }
   } finally {
     detailLoading.value = false

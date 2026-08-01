@@ -12,6 +12,10 @@ const routes = [
         path: '/exchanges',
         component: () => import('pages/ExchangesPage.vue')
       },
+      {
+        path: '/settings',
+        component: () => import('pages/SettingsPage.vue')
+      },
     ]
   },
 

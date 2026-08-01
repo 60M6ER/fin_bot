@@ -2,6 +2,8 @@ package ru.larionov.backend.entity;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 import ru.larionov.backend.enums.StrategyType;
 
 import java.time.Instant;
@@ -28,9 +30,21 @@ public class BotEntity {
     private StrategyType strategyType;
 
     /**
+     * Подключение, на котором работает бот.
+     * Единственный источник правды о связи: в strategy_config его дублировать нельзя,
+     * иначе каскад запуска и конфиг стратегии разъедутся.
+     */
+    @Column(name = "exchange_connection_id", nullable = false)
+    private UUID exchangeConnectionId;
+
+    /**
      * Храним JSON как строку (быстрый старт).
      * В БД колонка jsonb; строка должна быть валидным JSON.
+     *
+     * JdbcTypeCode(JSON) обязателен: без него Hibernate биндит String как varchar,
+     * и Postgres отвергает вставку в jsonb без явного каста.
      */
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "strategy_config", nullable = false, columnDefinition = "jsonb")
     private String strategyConfig;
 

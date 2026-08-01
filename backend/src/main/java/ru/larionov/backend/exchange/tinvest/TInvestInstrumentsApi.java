@@ -1,5 +1,6 @@
 package ru.larionov.backend.exchange.tinvest;
 
+import lombok.extern.slf4j.Slf4j;
 import ru.larionov.backend.exchange.api.InstrumentsApi;
 import ru.larionov.backend.exchange.api.enums.InstrumentKind;
 import ru.larionov.backend.exchange.api.model.id.InstrumentId;
@@ -17,8 +18,15 @@ import java.util.Set;
  * T-Invest implementation of InstrumentsApi.
  *
  * This class adapts Tinkoff gRPC DTOs to our domain model.
+ *
+ * Ограничение: поддерживаются только акции. Это осознанный объём (сетка торгует
+ * акциями с лотностью 1), но запрос других типов НЕ отдаёт молча пустой список —
+ * см. {@link #list(InstrumentsQuery)}.
  */
+@Slf4j
 public class TInvestInstrumentsApi implements InstrumentsApi {
+
+    private static final Set<InstrumentKind> SUPPORTED_KINDS = Set.of(InstrumentKind.SHARE);
 
     private final TInvestExchangeClient client;
 
@@ -26,6 +34,13 @@ public class TInvestInstrumentsApi implements InstrumentsApi {
         this.client = Objects.requireNonNull(client);
     }
 
+    /**
+     * Умеет искать только акции.
+     *
+     * Раньше запрос облигаций или валют возвращал пустой список без единого слова —
+     * вызывающий не мог отличить «ничего не нашлось» от «это не поддерживается».
+     * Теперь неподдерживаемый тип — явная ошибка.
+     */
     @Override
     public List<InstrumentBrief> list(InstrumentsQuery query) {
         Objects.requireNonNull(query);
@@ -33,6 +48,16 @@ public class TInvestInstrumentsApi implements InstrumentsApi {
         List<InstrumentBrief> result = new ArrayList<>();
 
         Set<InstrumentKind> kinds = query.kinds();
+        if (kinds != null && !kinds.isEmpty()) {
+            List<InstrumentKind> unsupported = kinds.stream()
+                    .filter(k -> !SUPPORTED_KINDS.contains(k))
+                    .toList();
+            if (!unsupported.isEmpty()) {
+                throw new UnsupportedOperationException(
+                        "Адаптер T-Invest пока умеет искать только акции, запрошено: " + unsupported);
+            }
+        }
+
         boolean needShares = (kinds == null || kinds.isEmpty() || kinds.contains(InstrumentKind.SHARE));
 
         if (needShares) {

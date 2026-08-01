@@ -1,0 +1,36 @@
+databaseChangeLog:
+  - changeSet:
+      id: 040-app-setting
+      author: boris
+      comment: >
+        Настройки всей программы: токен Telegram и глобальный стоп-кран торговли.
+        Раньше токен жил в application.yaml (и попал в git), а стоп-крана не было вовсе.
+        Колонки названы setting_key/setting_value, чтобы не спорить с ключевыми словами SQL.
+      changes:
+        - createTable:
+            tableName: app_setting
+            columns:
+              - column:
+                  name: setting_key
+                  type: varchar(128)
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+
+              - column:
+                  name: setting_value
+                  type: text
+
+              - column:
+                  name: is_secret
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: updated_at
+                  type: timestamp with time zone
+                  defaultValueComputed: CURRENT_TIMESTAMP
+                  constraints:
+                    nullable: false

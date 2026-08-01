@@ -2,6 +2,8 @@ package ru.larionov.backend.entity;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 import ru.larionov.backend.enums.ExchangeType;
 
 import java.time.Instant;
@@ -39,6 +41,18 @@ public class ExchangeConnectionEntity {
     @Column(name = "sandbox_enabled", nullable = false)
     private boolean sandboxEnabled;
 
+    /**
+     * Конкретный брокерский счёт, на котором торгуем.
+     * Раньше код брал accounts.get(0) — для реальных денег это недопустимо.
+     */
+    @Column(name = "account_id", length = 64)
+    private String accountId;
+
+    /** Пер-биржевые параметры (ставка комиссии, настройки стримов) как JSON-строка. */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "settings", nullable = false, columnDefinition = "jsonb")
+    private String settings;
+
     @Column(name = "is_active", nullable = false)
     private boolean active;
 
@@ -54,10 +68,18 @@ public class ExchangeConnectionEntity {
         Instant now = Instant.now();
         if (createdAt == null) createdAt = now;
         updatedAt = now;
+        normalizeSettings();
     }
 
     @PreUpdate
     void preUpdate() {
         updatedAt = Instant.now();
+        normalizeSettings();
+    }
+
+    private void normalizeSettings() {
+        if (settings == null || settings.isBlank()) {
+            settings = "{}";
+        }
     }
 }

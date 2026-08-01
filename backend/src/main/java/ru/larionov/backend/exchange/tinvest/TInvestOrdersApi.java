@@ -124,6 +124,39 @@ public class TInvestOrdersApi implements OrdersApi {
         }
     }
 
+    /**
+     * Состояние по нашему clientOrderId — через OrderIdType.ORDER_ID_TYPE_REQUEST.
+     * Именно это позволяет после оборванной постановки узнать судьбу ордера,
+     * не имея биржевого идентификатора, и не выставить дубль.
+     */
+    @Override
+    public Optional<ru.larionov.backend.exchange.api.model.order.OrderState> getByClientOrderId(
+            AccountId accountId, ClientOrderId clientOrderId) {
+        Objects.requireNonNull(accountId, "accountId");
+        Objects.requireNonNull(clientOrderId, "clientOrderId");
+
+        GetOrderStateRequest request = GetOrderStateRequest.newBuilder()
+                .setAccountId(accountId.value())
+                .setOrderId(clientOrderId.value())
+                .setOrderIdType(OrderIdType.ORDER_ID_TYPE_REQUEST)
+                .build();
+
+        try {
+            ru.tinkoff.piapi.contract.v1.OrderState s = client.ordersStub()
+                    .callSyncMethod(
+                            OrdersServiceGrpc.getGetOrderStateMethod(),
+                            stub -> stub.getOrderState(request)
+                    );
+            return Optional.of(mapOrderState(accountId, s));
+        } catch (StatusRuntimeException e) {
+            if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
+                // Ордера с таким clientOrderId у биржи нет — значит его не приняли.
+                return Optional.empty();
+            }
+            throw e;
+        }
+    }
+
     @Override
     public List<ru.larionov.backend.exchange.api.model.order.OrderState> listOpen(AccountId accountId, InstrumentId instrumentId) {
         Objects.requireNonNull(accountId, "accountId");
@@ -211,10 +244,14 @@ public class TInvestOrdersApi implements OrdersApi {
 
         OrderSide side = mapSideBack(s.getDirection());
 
+        // Фактическую комиссию считаем по сделкам, а не здесь: в состоянии ордера
+        // её нет, а подставлять оценку туда, где ожидается факт, — врать в журнал.
         OrderFee fee = null;
 
         Instant createdAt = toInstant(s.getOrderDate());
-        Instant updatedAt = createdAt;
+        // Раньше updatedAt слепо равнялся createdAt, из-за чего исполненный час назад
+        // ордер выглядел неизменившимся с момента постановки.
+        Instant updatedAt = Instant.now();
 
         return new ru.larionov.backend.exchange.api.model.order.OrderState(
                 orderId,
@@ -268,9 +305,21 @@ public class TInvestOrdersApi implements OrdersApi {
         };
     }
 
+    /**
+     * ВНИМАНИЕ: аргумент игнорируется, и это не упущение, а свойство площадки.
+     *
+     * В контракте T-Invest 1.49.3 есть только UNSPECIFIED, DAY, FILL_AND_KILL и
+     * FILL_OR_KILL — GTC отсутствует. Любая лимитная заявка живёт ровно одну
+     * торговую сессию и умирает на её закрытии.
+     *
+     * От этого зависит вся конструкция сетки: она обязана переставлять себя при
+     * каждом открытии торгов, а не полагаться на то, что вчерашние заявки ещё стоят.
+     * Триггером служит событие торгового статуса из стрима.
+     *
+     * FILL_AND_KILL / FILL_OR_KILL сознательно не поддерживаем: сетка ставит
+     * пассивные заявки и ждёт исполнения, а эти режимы означают противоположное.
+     */
     private static ru.tinkoff.piapi.contract.v1.TimeInForceType mapTif(TimeInForce tif) {
-        // В нашем домене пока оставили только GTC.
-        // В Tinkoff нет GTC, поэтому маппим его в DAY.
         return TimeInForceType.TIME_IN_FORCE_DAY;
     }
 

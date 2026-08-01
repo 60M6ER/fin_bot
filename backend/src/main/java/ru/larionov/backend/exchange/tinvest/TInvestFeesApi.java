@@ -15,17 +15,17 @@ public class TInvestFeesApi implements FeesApi {
         this.client = client;
     }
 
-    // Временно хардкодим комиссию 0.05% (0.0005)
-    // Позже можно заменить на реальный вызов API тарифов
-    private static final BigDecimal DEFAULT_RATE = new BigDecimal("0.0005");
-
+    /**
+     * Ставка берётся из настроек подключения (тариф пользователя), а не хардкодится:
+     * от неё зависит проверка безубытка шага сетки, и ошибка здесь означает
+     * торговлю, которая не окупает издержки.
+     *
+     * API тарифов T-Invest не отдаёт ставку дёшево, поэтому её задаёт пользователь.
+     * maker и taker у брокера совпадают, в отличие от криптобирж.
+     */
     @Override
     public FeeInfo getFeeInfo(AccountId accountId, InstrumentId instrumentId) {
-        // Пока не учитываем тип счета, инструмент или тариф
-        // Для MVP возвращаем одинаковую комиссию maker/taker
-        return new FeeInfo(
-                DEFAULT_RATE,
-                DEFAULT_RATE
-        );
+        BigDecimal rate = client.commissionRate();
+        return new FeeInfo(rate, rate);
     }
 }

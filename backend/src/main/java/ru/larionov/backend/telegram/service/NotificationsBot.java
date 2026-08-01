@@ -1,23 +1,26 @@
 package ru.larionov.backend.telegram.service;
 
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
-import ru.larionov.backend.telegram.config.TelegramBotProperties;
 
+/**
+ * Бот уведомлений. Создаётся через TelegramConfig, а не как @Component:
+ * токен приходит из настроек в БД, доступных только после поднятия JPA.
+ */
 @Slf4j
-@Component
 public class NotificationsBot extends TelegramLongPollingBot {
 
-    private final TelegramBotProperties props;
+    private final String token;
+    private final String username;
     private final TelegramChatService chatService;
 
-    public NotificationsBot(TelegramBotProperties props, TelegramChatService chatService) {
-        super(props.token());
-        this.props = props;
+    public NotificationsBot(String token, String username, TelegramChatService chatService) {
+        super(token);
+        this.token = token;
+        this.username = username;
         this.chatService = chatService;
     }
 
@@ -59,11 +62,11 @@ public class NotificationsBot extends TelegramLongPollingBot {
 
     @Override
     public String getBotUsername() {
-        return props.username();
+        return username;
     }
 
     @Override
     public String getBotToken() {
-        return props.token();
+        return token;
     }
 }

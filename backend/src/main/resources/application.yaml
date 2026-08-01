@@ -2,9 +2,9 @@ spring:
   application:
     name: backend
   datasource:
-    url: jdbc:postgresql://localhost:5435/trading_bot
-    username: trading_bot
-    password: trading_bot
+    url: ${DB_URL:jdbc:postgresql://localhost:5435/trading_bot}
+    username: ${DB_USERNAME:trading_bot}
+    password: ${DB_PASSWORD:trading_bot}
     driver-class-name: org.postgresql.Driver
 
   jpa:
@@ -20,10 +20,18 @@ spring:
     change-log: classpath:db/changelog/db.changelog-master.yaml
     enabled: true
 
+app:
+  # Ключ шифрования секретов в БД (ключи брокера, токен Telegram).
+  # Если не задан — значения хранятся открытым текстом, приложение предупредит об этом при старте.
+  # Принимается base64 32 байт либо произвольная парольная фраза.
+  secret-key: ${APP_SECRET_KEY:}
+
 telegram:
   bot:
-    token: ${TELEGRAM_BOT_TOKEN:6219525923:AAF0OQFG_T2Xm-p_p_bsMdynKs4yXnHrXnE}
-    username: ${TELEGRAM_BOT_USERNAME:BombersHomeBot}
+    # Только первичное заполнение чистой базы. Рабочее значение живёт в таблице app_setting
+    # и задаётся на странице «Настройки» — раньше рабочий токен лежал прямо здесь и уехал в git.
+    token: ${TELEGRAM_BOT_TOKEN:}
+    username: ${TELEGRAM_BOT_USERNAME:}
 
 server:
   port: 8080

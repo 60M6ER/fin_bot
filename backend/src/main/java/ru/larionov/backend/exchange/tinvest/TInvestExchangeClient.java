@@ -9,9 +9,12 @@ import ru.ttech.piapi.core.connector.ConnectorConfiguration;
 import ru.ttech.piapi.core.connector.ServiceStubFactory;
 import ru.ttech.piapi.core.connector.resilience.ResilienceConfiguration;
 import ru.ttech.piapi.core.connector.resilience.ResilienceSyncStubWrapper;
+import ru.ttech.piapi.core.connector.streaming.StreamServiceStubFactory;
 
 import java.time.Duration;
 import java.util.Objects;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
 /**
@@ -25,6 +28,17 @@ public final class TInvestExchangeClient implements ExchangeClient {
     private final ConnectorConfiguration connectorConfiguration;
     private final ScheduledExecutorService resilienceExecutor;
     private final ServiceStubFactory unaryServiceFactory;
+
+    private final boolean sandbox;
+    /** Ставка комиссии за одну сторону сделки, из настроек подключения. */
+    private final java.math.BigDecimal commissionRate;
+
+    // Стримы поднимаются лениво и живут до close().
+    private final Object streamLock = new Object();
+    private volatile StreamServiceStubFactory streamStubFactory;
+    private volatile ExecutorService streamCallbackExecutor;
+    private volatile TInvestMarketDataStreamService marketDataStreamService;
+    private volatile TInvestOrdersStreamService ordersStreamService;
 
     // Resilience wrappers for sync unary services (low-level)
     private final ResilienceSyncStubWrapper<InstrumentsServiceGrpc.InstrumentsServiceBlockingStub> instrumentsStub;
@@ -47,8 +61,8 @@ public final class TInvestExchangeClient implements ExchangeClient {
         return new ExchangeMeta(
                 ExchangeType.T_INVEST,
                 true,  // supportsTradingCalendar
-                false, // supportsMarketDataStream (not implemented yet)
-                false, // supportsOrderEventsStream (not implemented yet)
+                true,  // supportsMarketDataStream
+                true,  // supportsOrderEventsStream
                 false, // supportsFutures (not used in MVP)
                 true   // supportsSandbox
         );
@@ -63,11 +77,15 @@ public final class TInvestExchangeClient implements ExchangeClient {
             ResilienceSyncStubWrapper<OrdersServiceGrpc.OrdersServiceBlockingStub> ordersStub,
             ResilienceSyncStubWrapper<OperationsServiceGrpc.OperationsServiceBlockingStub> operationsStub,
             ResilienceSyncStubWrapper<UsersServiceGrpc.UsersServiceBlockingStub> usersStub,
-            ExchangeMeta meta
+            ExchangeMeta meta,
+            boolean sandbox,
+            java.math.BigDecimal commissionRate
     ) {
         this.connectorConfiguration = connectorConfiguration;
         this.resilienceExecutor = resilienceExecutor;
         this.unaryServiceFactory = unaryServiceFactory;
+        this.sandbox = sandbox;
+        this.commissionRate = commissionRate;
 
         this.instrumentsStub = instrumentsStub;
         this.marketDataStub = marketDataStub;
@@ -86,12 +104,20 @@ public final class TInvestExchangeClient implements ExchangeClient {
         this.feesApi = new TInvestFeesApi(this);
     }
 
-    /**
-     * Factory with explicit {@link ExchangeMeta}. Preferred.
-     */
     public static TInvestExchangeClient create(
             ConnectorConfiguration connectorConfiguration,
-            ScheduledExecutorService resilienceExecutor
+            ScheduledExecutorService resilienceExecutor,
+            boolean sandbox
+    ) {
+        return create(connectorConfiguration, resilienceExecutor, sandbox,
+                ru.larionov.backend.exchange.api.model.ExchangeConnectionSettings.DEFAULT_COMMISSION_RATE);
+    }
+
+    public static TInvestExchangeClient create(
+            ConnectorConfiguration connectorConfiguration,
+            ScheduledExecutorService resilienceExecutor,
+            boolean sandbox,
+            java.math.BigDecimal commissionRate
     ) {
         Objects.requireNonNull(connectorConfiguration, "connectorConfiguration");
         Objects.requireNonNull(resilienceExecutor, "resilienceExecutor");
@@ -132,8 +158,19 @@ public final class TInvestExchangeClient implements ExchangeClient {
                 orders,
                 operations,
                 users,
-                defaultMeta()
+                defaultMeta(),
+                sandbox,
+                commissionRate
         );
+    }
+
+    /** Режим песочницы. Раньше это пытались выяснить рефлексией и всегда получали false. */
+    public boolean isSandbox() {
+        return sandbox;
+    }
+
+    public java.math.BigDecimal commissionRate() {
+        return commissionRate;
     }
 
     // ===== Low-level access for package implementations (TInvest*Api) =====
@@ -207,18 +244,143 @@ public final class TInvestExchangeClient implements ExchangeClient {
         return meta;
     }
 
+    /**
+     * Стримы создаются лениво: боту без подписок они не нужны, а каждый —
+     * это живое gRPC-соединение и потоки.
+     */
     @Override
     public java.util.Optional<MarketDataStreamService> marketDataStream() {
-        return java.util.Optional.empty();
+        TInvestMarketDataStreamService local = marketDataStreamService;
+        if (local == null) {
+            synchronized (streamLock) {
+                local = marketDataStreamService;
+                if (local == null) {
+                    local = new TInvestMarketDataStreamService(
+                            streamServiceStubFactory(), streamCallbackExecutor(), resilienceExecutor);
+                    marketDataStreamService = local;
+                }
+            }
+        }
+        return java.util.Optional.of(local);
     }
 
+    @Override
+    public java.util.Optional<OrdersStreamService> ordersStream() {
+        TInvestOrdersStreamService local = ordersStreamService;
+        if (local == null) {
+            synchronized (streamLock) {
+                local = ordersStreamService;
+                if (local == null) {
+                    local = new TInvestOrdersStreamService(streamServiceStubFactory(), resilienceExecutor);
+                    ordersStreamService = local;
+                }
+            }
+        }
+        return java.util.Optional.of(local);
+    }
+
+    /**
+     * Стрим операций вне объёма: позиции даёт ордерный стрим плюс сверка,
+     * а отдельное соединение добавило бы сложность без выигрыша.
+     */
     @Override
     public java.util.Optional<OperationsStreamService> operationsStream() {
         return java.util.Optional.empty();
     }
 
+    /**
+     * Здоровье стримов без побочного эффекта: если стрим ещё не поднимали, отдаём
+     * «отключено», а не создаём соединение. Иначе опрос статуса из UI сам бы
+     * открывал стримы, которые никто не заказывал.
+     */
+    public ru.larionov.backend.exchange.api.model.stream.StreamHealth marketDataStreamHealth() {
+        TInvestMarketDataStreamService local = marketDataStreamService;
+        return local == null
+                ? ru.larionov.backend.exchange.api.model.stream.StreamHealth.disconnected()
+                : local.health();
+    }
+
+    public ru.larionov.backend.exchange.api.model.stream.StreamHealth ordersStreamHealth() {
+        TInvestOrdersStreamService local = ordersStreamService;
+        return local == null
+                ? ru.larionov.backend.exchange.api.model.stream.StreamHealth.disconnected()
+                : local.health();
+    }
+
+    private StreamServiceStubFactory streamServiceStubFactory() {
+        StreamServiceStubFactory local = streamStubFactory;
+        if (local == null) {
+            local = StreamServiceStubFactory.create(unaryServiceFactory);
+            streamStubFactory = local;
+        }
+        return local;
+    }
+
+    /**
+     * Отдельный пул под колбэки стримов. Пул должен расти: SDK запускает
+     * по блокирующему циклу разбора на каждый тип подписки, и на фиксированном
+     * пуле они бы заблокировали друг друга.
+     */
+    private ExecutorService streamCallbackExecutor() {
+        ExecutorService local = streamCallbackExecutor;
+        if (local == null) {
+            local = Executors.newCachedThreadPool(r -> {
+                Thread t = new Thread(r, "tinvest-stream");
+                t.setDaemon(true);
+                return t;
+            });
+            streamCallbackExecutor = local;
+        }
+        return local;
+    }
+
+    /**
+     * Раньше этот метод не переопределялся, а в ExchangeClient он default no-op — поэтому
+     * stop() у хендлера закрывал клиент вхолостую, и gRPC-канал вместе с его потоками
+     * утекал на каждом цикле активации/деактивации подключения.
+     */
     @Override
-    public java.util.Optional<OrdersStreamService> ordersStream() {
-        return java.util.Optional.empty();
+    public void close() {
+        // Порядок важен: сначала снимаем подписки и рвём стримы, потом гасим их пул,
+        // и только затем канал — иначе SDK будет писать в закрытый канал.
+        synchronized (streamLock) {
+            closeQuietly(marketDataStreamService, "market data stream");
+            marketDataStreamService = null;
+
+            closeQuietly(ordersStreamService, "orders stream");
+            ordersStreamService = null;
+
+            streamStubFactory = null;
+
+            ExecutorService ex = streamCallbackExecutor;
+            streamCallbackExecutor = null;
+            if (ex != null) {
+                ex.shutdownNow();
+            }
+        }
+
+        try {
+            io.grpc.ManagedChannel channel = unaryServiceFactory.getChannel();
+            if (channel != null && !channel.isShutdown()) {
+                channel.shutdown();
+                if (!channel.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                    channel.shutdownNow();
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static void closeQuietly(AutoCloseable closeable, String what) {
+        if (closeable == null) {
+            return;
+        }
+        try {
+            closeable.close();
+        } catch (Exception e) {
+            org.slf4j.LoggerFactory.getLogger(TInvestExchangeClient.class)
+                    .warn("Failed to close {}: {}", what, e.getMessage());
+        }
     }
 }

@@ -1,0 +1,23 @@
+databaseChangeLog:
+  - changeSet:
+      id: 041-exchange-connection-settings
+      author: boris
+      comment: >
+        account_id — конкретный брокерский счёт подключения. До этого код брал
+        accounts.get(0), что для реальных денег недопустимо.
+        settings — пер-биржевые параметры: ставка комиссии по тарифу (от неё зависит
+        проверка безубытка шага сетки) и настройки стримов.
+      changes:
+        - addColumn:
+            tableName: exchange_connection
+            columns:
+              - column:
+                  name: account_id
+                  type: varchar(64)
+
+              - column:
+                  name: settings
+                  type: jsonb
+                  defaultValueComputed: "'{}'::jsonb"
+                  constraints:
+                    nullable: false

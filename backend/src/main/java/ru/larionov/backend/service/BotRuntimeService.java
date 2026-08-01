@@ -3,16 +3,22 @@ package ru.larionov.backend.service;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
+import ru.larionov.backend.entity.BotEntity;
+import ru.larionov.backend.enums.BotEventLevel;
+import ru.larionov.backend.enums.BotEventType;
+import ru.larionov.backend.runtime.StrategyBotHandler;
+import ru.larionov.backend.runtime.StrategyBotHandlerFactory;
 import ru.larionov.backend.enums.RuntimeState;
 import ru.larionov.backend.exception.NotFoundException;
 import ru.larionov.backend.model.RuntimeInfo;
-import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.repository.BotRepository;
 import ru.larionov.backend.telegram.service.TelegramNotifyService;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -24,11 +30,17 @@ public class BotRuntimeService {
 
     private final BotRepository repo;
     private final TelegramNotifyService notifyService;
+    private final ObjectProvider<StrategyBotHandlerFactory> handlerFactory;
+    private final BotEventService eventService;
 
     /**
      * Runtime-only state (НЕ хранится в БД):
      * - handlers: активные запущенные боты
      * - runtime: текущий runtime-статус (INACTIVE/ACTIVE/ERROR)
+     *
+     * Важно: runtime-статус и desired-state (BotEntity.active) — разные вещи.
+     * desired-state отражает намерение пользователя и меняется только его командой;
+     * сбой активации отражается в runtime, а не затирает намерение.
      */
     private final ConcurrentHashMap<UUID, BotHandler> handlers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, RuntimeInfo> runtime = new ConcurrentHashMap<>();
@@ -51,60 +63,130 @@ public class BotRuntimeService {
         return runtime.get(botId);
     }
 
+    public boolean isRunning(UUID botId) {
+        return handlers.containsKey(botId);
+    }
+
+    /** Длина очереди событий бота. Растущая очередь означает, что он не успевает. */
+    public int queueSize(UUID botId) {
+        BotHandler h = handlers.get(botId);
+        return h instanceof StrategyBotHandler s ? s.queueSize() : 0;
+    }
+
+    // ==============================
+    // CASCADE FROM CONNECTION
+    // ==============================
+
     /**
-     * Called by ExchangeRuntimeService BEFORE a connection is stopped.
-     * Bots are stopped while connection is still alive so they can gracefully cleanup.
+     * Вызывается ExchangeRuntimeService ПЕРЕД остановкой подключения.
+     * Боты останавливаются пока подключение ещё живо, чтобы успеть корректно завершиться.
      *
-     * Currently we stop all running bots because we do not yet model explicit
-     * connection dependencies inside strategy_config.
+     * Останавливаем только ботов этого подключения: у соседних подключений
+     * свои боты, и они не должны страдать.
      */
     public void onConnectionDeactivating(UUID connectionId) {
-        log.info("Connection deactivating: {}. Stopping running bots (temporary: stop all).", connectionId);
+        List<BotEntity> bots = repo.findAllByExchangeConnectionIdOrderByNameAsc(connectionId);
+
+        List<UUID> running = bots.stream()
+                .map(BotEntity::getId)
+                .filter(handlers::containsKey)
+                .toList();
+
+        if (running.isEmpty()) {
+            log.info("Connection deactivating: {}. No running bots to stop.", connectionId);
+            return;
+        }
+
+        log.info("Connection deactivating: {}. Stopping {} bot(s) of this connection.", connectionId, running.size());
         notifyService.broadcast("""
                 ⚠️ Остановка подключения — останавливаю ботов
-                
+
                 Connection: %s
-                """.formatted(connectionId));
-        for (UUID botId : new ArrayList<>(handlers.keySet())) {
+                Ботов: %d
+                """.formatted(connectionId, running.size()));
+
+        for (UUID botId : running) {
             try {
                 stopRuntimeOnly(botId, "connection deactivating: " + connectionId);
             } catch (Exception e) {
-                log.warn("Failed to stop bot {} during connection deactivating {}: {}", botId, connectionId, e.getMessage(), e);
+                log.warn("Failed to stop bot {} during connection deactivating {}: {}",
+                        botId, connectionId, e.getMessage(), e);
             }
         }
     }
 
     /**
-     * Called by ExchangeRuntimeService AFTER a connection has been activated.
-     * If bots are marked as active (desired state) but were not running,
-     * we attempt to start them now.
-     *
-     * Currently we simply try to activate all bots with isActive=true
-     * that are not already running.
+     * Вызывается ExchangeRuntimeService ПОСЛЕ успешной активации подключения.
+     * Поднимаем ботов именно этого подключения, у которых desired-state = active.
      */
     public void onConnectionActivated(UUID connectionId) {
-        log.info("Connection activated: {}. Checking bots to start.", connectionId);
-        for (BotEntity bot : repo.findAll()) {
-            if (bot.isActive() && !handlers.containsKey(bot.getId())) {
-                try {
-                    activate(bot.getId());
-                } catch (Exception e) {
-                    log.warn("Failed to auto-activate bot {} after connection {} activation: {}",
-                            bot.getId(), connectionId, e.getMessage(), e);
-                }
+        List<BotEntity> bots = repo.findAllByExchangeConnectionIdAndActiveTrueOrderByNameAsc(connectionId);
+
+        if (bots.isEmpty()) {
+            log.info("Connection activated: {}. No active bots to start.", connectionId);
+            return;
+        }
+
+        log.info("Connection activated: {}. Starting {} bot(s).", connectionId, bots.size());
+        for (BotEntity bot : bots) {
+            if (handlers.containsKey(bot.getId())) {
+                continue;
+            }
+            try {
+                start(bot.getId(), false);
+            } catch (Exception e) {
+                log.warn("Failed to auto-start bot {} after connection {} activation: {}",
+                        bot.getId(), connectionId, e.getMessage(), e);
             }
         }
     }
 
+    // ==============================
+    // ACTIVATE / DEACTIVATE
+    // ==============================
+
+    /**
+     * Команда пользователя «запустить бота».
+     * Фиксирует намерение в БД и пытается поднять runtime.
+     */
     public void activate(UUID id) {
         synchronized (lock(id)) {
-            // already started
             if (handlers.containsKey(id)) {
                 return;
             }
 
-            var bot = repo.findById(id)
+            BotEntity bot = repo.findById(id)
                     .orElseThrow(() -> new NotFoundException("Bot not found: " + id));
+
+            // Намерение пользователя фиксируем ДО попытки старта: даже если старт не удастся,
+            // желаемое состояние остаётся active и супервизор повторит попытку.
+            if (!bot.isActive()) {
+                bot.setActive(true);
+                repo.save(bot);
+            }
+
+            start(id, true);
+        }
+    }
+
+    /**
+     * Попытка поднять runtime бота без изменения desired-state.
+     * Используется и каскадом от подключения, и супервизором при повторных попытках.
+     *
+     * @param userInitiated отличает команду пользователя от автоматической попытки —
+     *                      влияет только на то, шумим ли мы в Telegram.
+     */
+    public void start(UUID id, boolean userInitiated) {
+        synchronized (lock(id)) {
+            if (handlers.containsKey(id)) {
+                return;
+            }
+
+            BotEntity bot = repo.findById(id)
+                    .orElseThrow(() -> new NotFoundException("Bot not found: " + id));
+
+            RuntimeState previousState = runtimeInfo(id).state();
+            runtime.put(id, new RuntimeInfo(id, RuntimeState.ACTIVATING, null, Instant.now()));
 
             BotHandler handler = null;
             try {
@@ -114,10 +196,6 @@ public class BotRuntimeService {
                 handlers.put(id, handler);
                 runtime.put(id, new RuntimeInfo(id, RuntimeState.ACTIVE, null, Instant.now()));
 
-                // Persist desired state
-                bot.setActive(true);
-                repo.save(bot);
-
                 notifyService.broadcast("""
                         ✅ Бот активирован
 
@@ -126,42 +204,48 @@ public class BotRuntimeService {
                         Strategy: %s
                         """.formatted(bot.getName(), id, bot.getStrategyType()));
 
-                log.info("Bot activated: id={}, name={}, strategy={}", id, bot.getName(), bot.getStrategyType());
+                log.info("Bot started: id={}, name={}, strategy={}", id, bot.getName(), bot.getStrategyType());
 
             } catch (Exception ex) {
-
-                // best-effort stop
                 if (handler != null) {
                     try {
                         handler.stop();
                     } catch (Exception stopEx) {
-                        log.warn("Bot stop after failed activate failed: id={}, err={}", id, stopEx.getMessage(), stopEx);
+                        log.warn("Bot stop after failed start failed: id={}, err={}", id, stopEx.getMessage(), stopEx);
                     }
                 }
 
                 handlers.remove(id);
                 runtime.put(id, new RuntimeInfo(id, RuntimeState.ERROR, ex.getMessage(), Instant.now()));
 
-                // Persist desired state (если активация не удалась — считаем что desired=false)
-                bot.setActive(false);
-                repo.save(bot);
+                // В журнал бота — чтобы причина осталась в ленте событий, а не только
+                // в runtime-статусе, который перетрётся следующей попыткой.
+                eventService.emit(id, BotEventLevel.ERROR, BotEventType.ERROR,
+                        "Не удалось запустить бота: " + ex.getMessage());
 
-                notifyService.broadcast("""
-                        ❌ Ошибка активации бота
+                // desired-state НЕ трогаем: пользователь хотел, чтобы бот работал.
+                // Иначе одна временная ошибка навсегда выключала бы бота.
 
-                        Bot: %s
-                        ID: %s
-                        Strategy: %s
-                        Error: %s
-                        """.formatted(bot.getName(), id, bot.getStrategyType(), ex.getMessage()));
+                // Шумим только если это новая проблема, иначе супервизор со своими
+                // повторами превратит Telegram в пулемёт.
+                if (userInitiated || previousState != RuntimeState.ERROR) {
+                    notifyService.broadcast("""
+                            ❌ Ошибка запуска бота
 
-                log.error("Bot activation failed: id={}, name={}, strategy={}, err={}", id, bot.getName(), bot.getStrategyType(), ex.getMessage(), ex);
+                            Bot: %s
+                            ID: %s
+                            Strategy: %s
+                            Error: %s
+                            """.formatted(bot.getName(), id, bot.getStrategyType(), ex.getMessage()));
+                }
 
-                // Не пробрасываем — вызывающая сторона уже не обязана падать.
+                log.error("Bot start failed: id={}, name={}, strategy={}, err={}",
+                        id, bot.getName(), bot.getStrategyType(), ex.getMessage(), ex);
             }
         }
     }
 
+    /** Команда пользователя «остановить бота»: снимает намерение и гасит runtime. */
     public void deactivate(UUID id) {
         synchronized (lock(id)) {
             BotHandler handler = handlers.remove(id);
@@ -176,23 +260,25 @@ public class BotRuntimeService {
 
             runtime.put(id, new RuntimeInfo(id, RuntimeState.INACTIVE, null, Instant.now()));
 
-            // Важно: при штатном shutdown не трогаем persisted desired-state в БД.
-            if (!shuttingDown) {
-                var bot = repo.findById(id)
-                        .orElseThrow(() -> new NotFoundException("Bot not found: " + id));
-                bot.setActive(false);
-                repo.save(bot);
-
-                notifyService.broadcast("""
-                        ⛔ Бот остановлен
-
-                        Bot: %s
-                        ID: %s
-                        Strategy: %s
-                        """.formatted(bot.getName(), id, bot.getStrategyType()));
-
-                log.info("Bot deactivated: id={}, name={}", id, bot.getName());
+            // При штатном shutdown не трогаем persisted desired-state в БД.
+            if (shuttingDown) {
+                return;
             }
+
+            BotEntity bot = repo.findById(id)
+                    .orElseThrow(() -> new NotFoundException("Bot not found: " + id));
+            bot.setActive(false);
+            repo.save(bot);
+
+            notifyService.broadcast("""
+                    ⛔ Бот остановлен
+
+                    Bot: %s
+                    ID: %s
+                    Strategy: %s
+                    """.formatted(bot.getName(), id, bot.getStrategyType()));
+
+            log.info("Bot deactivated: id={}, name={}", id, bot.getName());
         }
     }
 
@@ -208,6 +294,7 @@ public class BotRuntimeService {
         }
     }
 
+    /** Остановка runtime без изменения desired-state (каскад от подключения). */
     private void stopRuntimeOnly(UUID botId, String reason) {
         synchronized (lock(botId)) {
             BotHandler handler = handlers.remove(botId);
@@ -222,33 +309,22 @@ public class BotRuntimeService {
         }
     }
 
-    /**
-     * Фабрика хендлеров. Сейчас это каркас: стратегия + JSON-конфиг находятся в bot.
-     * Позже сюда подключим StrategyFactory и реальные реализации.
-     */
-    private BotHandler createHandler(BotEntity bot) {
-        // В текущем каркасе компилируем сервис и оставляем точку расширения.
-        return new NoopBotHandler();
+    public RuntimeInfo runtimeInfo(UUID id) {
+        return runtime.getOrDefault(id, new RuntimeInfo(id, RuntimeState.INACTIVE, null, Instant.now()));
     }
 
     /**
-     * Минимальный runtime-хендлер, чтобы сервис был рабочим каркасом.
-     * Реальные хендлеры будут запускать StrategyEngine/тикер/подписки и т.д.
+     * Собирает реальный движок бота: стратегия, гейтвей, подписки на стримы.
+     *
+     * Фабрика приходит через ObjectProvider, чтобы разорвать цикл зависимостей:
+     * она зависит от ExchangeRuntimeService, а тот — от этого сервиса.
      */
+    private BotHandler createHandler(BotEntity bot) {
+        return handlerFactory.getObject().create(bot, () -> stopRuntimeOnly(bot.getId(), "фатальный сбой движка"));
+    }
+
     public interface BotHandler {
         void start();
         void stop();
-    }
-
-    private static class NoopBotHandler implements BotHandler {
-        @Override
-        public void start() {
-            // no-op
-        }
-
-        @Override
-        public void stop() {
-            // no-op
-        }
     }
 }

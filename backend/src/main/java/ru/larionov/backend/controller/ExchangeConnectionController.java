@@ -6,14 +6,19 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import ru.larionov.backend.dto.ConnectionStreamsDto;
+import ru.larionov.backend.dto.ExchangeAccountDto;
 import ru.larionov.backend.dto.ExchangeConnectionCreateRequest;
 import ru.larionov.backend.dto.ExchangeConnectionDetailDto;
 import ru.larionov.backend.dto.ExchangeConnectionListItemDto;
 import ru.larionov.backend.dto.ExchangeUpdateNameDto;
 import ru.larionov.backend.dto.ExchangeSetSandboxEnabledDto;
 import ru.larionov.backend.dto.ExchangeUpdateCredentialsDto;
+import ru.larionov.backend.dto.ExchangeUpdateSettingsDto;
 import ru.larionov.backend.enums.ExchangeType;
 import ru.larionov.backend.model.RuntimeInfo;
+import ru.larionov.backend.dto.BotListItemDto;
+import ru.larionov.backend.service.BotService;
 import ru.larionov.backend.service.ExchangeConnectionService;
 import ru.larionov.backend.service.ExchangeRuntimeService;
 import java.util.List;
@@ -26,6 +31,7 @@ public class ExchangeConnectionController {
 
     private final ExchangeConnectionService service;
     private final ExchangeRuntimeService runtimeService;
+    private final BotService botService;
 
     @GetMapping
     public Page<ExchangeConnectionListItemDto> list(Pageable pageable) {
@@ -104,5 +110,33 @@ public class ExchangeConnectionController {
     @GetMapping("/runtime")
     public List<RuntimeInfo> runtimeAll() {
         return runtimeService.listRuntime();
+    }
+
+    /** Боты этого подключения: в UI видно, что именно остановит его выключение. */
+    @GetMapping("/{id}/bots")
+    public List<BotListItemDto> bots(@PathVariable UUID id) {
+        return botService.listByConnection(id);
+    }
+
+    /** Живость стримов: подключены ли, когда было последнее событие, сколько было реконнектов. */
+    @GetMapping("/{id}/streams")
+    public ConnectionStreamsDto streams(@PathVariable UUID id) {
+        return service.streams(id);
+    }
+
+    /** Счета, доступные по токену. Требует активного подключения. */
+    @GetMapping("/{id}/accounts")
+    public List<ExchangeAccountDto> accounts(@PathVariable UUID id) {
+        return service.listAccounts(id);
+    }
+
+    @PatchMapping("/{id}/settings")
+    public ResponseEntity<Void> updateSettings(@PathVariable UUID id,
+                                               @RequestBody ExchangeUpdateSettingsDto dto) {
+        if (!id.equals(dto.id())) {
+            throw new IllegalArgumentException("Path id and body id mismatch");
+        }
+        service.updateSettings(dto);
+        return ResponseEntity.noContent().build();
     }
 }

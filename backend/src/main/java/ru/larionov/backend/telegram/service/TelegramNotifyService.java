@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
+import ru.larionov.backend.telegram.config.TelegramSettings;
 import ru.larionov.backend.telegram.repository.TelegramChatRepository;
 
 @Slf4j
@@ -14,8 +15,14 @@ public class TelegramNotifyService {
 
     private final NotificationsBot bot;
     private final TelegramChatRepository chatRepo;
+    private final TelegramSettings settings;
 
     public void broadcast(String text) {
+        if (!settings.usable()) {
+            log.debug("Telegram disabled. Skip broadcast.");
+            return;
+        }
+
         var chats = chatRepo.findAll();
         if (chats.isEmpty()) {
             log.debug("No telegram chats registered. Skip broadcast.");
@@ -35,6 +42,11 @@ public class TelegramNotifyService {
     }
 
     public void sendToChat(long chatId, String text) {
+        if (!settings.usable()) {
+            log.debug("Telegram disabled. Skip sendToChat.");
+            return;
+        }
+
         try {
             bot.execute(SendMessage.builder()
                     .chatId(Long.toString(chatId))
