@@ -274,6 +274,122 @@
               </q-card-section>
             </q-card>
 
+            <!-- Финансовый учет: прибыльность уже считает backend, здесь только отображение -->
+            <q-card flat bordered class="q-mt-md">
+              <q-card-section class="row items-center justify-between">
+                <div class="text-subtitle2">
+                  Доходность
+                  <q-badge
+                    :color="accounting.dryRun ? 'purple' : 'blue-grey'"
+                    :label="accounting.dryRun ? 'бумажный режим' : 'боевой режим'"
+                    outline
+                    class="q-ml-sm"
+                  />
+                </div>
+                <q-btn
+                  dense
+                  flat
+                  round
+                  icon="refresh"
+                  :loading="accountingLoading"
+                  :disable="!detail"
+                  @click="loadAccounting(detail && detail.id)"
+                />
+              </q-card-section>
+
+              <q-separator />
+
+              <q-card-section>
+                <div class="accounting-grid">
+                  <div class="metric-tile">
+                    <div class="metric-label">Реализованный P/L</div>
+                    <div class="metric-value" :class="moneyTone(accounting.realizedPnl)">
+                      {{ formatSignedMoney(accounting.realizedPnl, accounting.currency) }}
+                    </div>
+                  </div>
+                  <div class="metric-tile">
+                    <div class="metric-label">Денежный поток</div>
+                    <div class="metric-value" :class="moneyTone(accounting.cashFlow)">
+                      {{ formatSignedMoney(accounting.cashFlow, accounting.currency) }}
+                    </div>
+                  </div>
+                  <div class="metric-tile">
+                    <div class="metric-label">Открытая себестоимость</div>
+                    <div class="metric-value mono">
+                      {{ formatMoneyWithCurrency(accounting.costBasisOpen, accounting.currency) }}
+                    </div>
+                  </div>
+                  <div class="metric-tile">
+                    <div class="metric-label">Комиссии</div>
+                    <div class="metric-value text-negative">
+                      {{ formatFeeWithCurrency(accounting.paidCommission, accounting.currency) }}
+                    </div>
+                  </div>
+                  <div class="metric-tile">
+                    <div class="metric-label">Открыто лотов</div>
+                    <div class="metric-value mono">{{ accounting.openLots || 0 }}</div>
+                  </div>
+                  <div class="metric-tile">
+                    <div class="metric-label">Средняя входа</div>
+                    <div class="metric-value mono">
+                      {{ formatMoneyWithCurrency(accounting.averageEntryPrice, accounting.currency) }}
+                    </div>
+                  </div>
+                </div>
+              </q-card-section>
+
+              <q-separator />
+
+              <q-markup-table flat dense wrap-cells class="ledger-table">
+                <thead>
+                  <tr>
+                    <th class="text-left">Тип</th>
+                    <th class="text-left">Сторона</th>
+                    <th class="text-right">Цена</th>
+                    <th class="text-right">Лоты</th>
+                    <th class="text-right">Оборот</th>
+                    <th class="text-right">Комиссия</th>
+                    <th class="text-right">Сумма</th>
+                    <th class="text-left">Время</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in ledgerRows" :key="row.seq">
+                    <td>
+                      <q-badge :color="ledgerTypeColor(row.entryType)" :label="ledgerTypeLabel(row.entryType)" outline />
+                    </td>
+                    <td>
+                      <q-badge
+                        v-if="row.side"
+                        :color="row.side === 'BUY' ? 'green-7' : 'red-7'"
+                        :label="row.side === 'BUY' ? 'покупка' : 'продажа'"
+                        outline
+                      />
+                      <span v-else>—</span>
+                    </td>
+                    <td class="text-right mono">{{ formatMoney(row.price) }}</td>
+                    <td class="text-right mono">{{ formatLots(row) }}</td>
+                    <td class="text-right mono">{{ formatMoneyWithCurrency(row.grossAmount, row.currency) }}</td>
+                    <td class="text-right mono">
+                      {{ formatFeeWithCurrency(row.commission, row.currency) }}
+                      <q-icon v-if="row.commissionEstimated" name="schedule" size="14px" class="q-ml-xs text-warning">
+                        <q-tooltip>Комиссия оценочная, будет уточнена после сверки с биржей</q-tooltip>
+                      </q-icon>
+                    </td>
+                    <td class="text-right mono" :class="moneyTone(row.amount)">
+                      {{ formatSignedMoney(row.amount, row.currency) }}
+                    </td>
+                    <td class="mono text-caption">{{ formatInstant(row.ts) }}</td>
+                  </tr>
+                  <tr v-if="ledgerRows.length === 0">
+                    <td colspan="8" class="text-grey">
+                      Записей учета пока нет
+                    </td>
+                  </tr>
+                </tbody>
+              </q-markup-table>
+            </q-card>
+
             <!-- Что бот делает прямо сейчас -->
             <q-card flat bordered class="q-mt-md">
               <q-card-section class="row items-center justify-between">
@@ -302,6 +418,7 @@
                     <th class="text-left">Сторона</th>
                     <th class="text-right">Цена</th>
                     <th class="text-right">Лоты</th>
+                    <th class="text-right">Комиссия</th>
                     <th class="text-left">Статус</th>
                     <th class="text-left">Время</th>
                   </tr>
@@ -318,6 +435,12 @@
                     </td>
                     <td class="text-right mono">{{ formatMoney(o.limitPrice) }}</td>
                     <td class="text-right mono">{{ o.executedLots }}/{{ o.requestedLots }}</td>
+                    <td class="text-right mono">
+                      {{ formatOrderFee(o) }}
+                      <q-icon v-if="o.fee && !o.feeActual" name="schedule" size="14px" class="q-ml-xs text-warning">
+                        <q-tooltip>Комиссия оценочная</q-tooltip>
+                      </q-icon>
+                    </td>
                     <td>
                       <q-badge :color="orderStatusColor(o.status)" :label="orderStatusLabel(o.status)" outline />
                       <q-tooltip v-if="o.lastError">{{ o.lastError }}</q-tooltip>
@@ -325,7 +448,7 @@
                     <td class="mono text-caption">{{ formatInstant(o.updatedAt) }}</td>
                   </tr>
                   <tr v-if="state.orders.length === 0">
-                    <td colspan="6" class="text-grey">Ордеров пока нет</td>
+                    <td colspan="7" class="text-grey">Ордеров пока нет</td>
                   </tr>
                 </tbody>
               </q-markup-table>
@@ -356,7 +479,7 @@
                     <q-item-label caption>
                       <span class="mono">{{ formatInstant(e.ts) }}</span>
                       · {{ eventTypeLabel(e.type) }}
-                      <q-icon v-if="isNotifiableEvent(e.type)" name="send" size="12px" class="q-ml-xs">
+                      <q-icon v-if="eventIsNotifiable(e)" name="send" size="12px" class="q-ml-xs">
                         <q-tooltip>Дублируется в Telegram</q-tooltip>
                       </q-icon>
                     </q-item-label>
@@ -535,6 +658,9 @@ const state = ref({
 })
 const botEvents = ref([])
 const eventLevelFilter = ref('все')
+const accountingLoading = ref(false)
+const accounting = ref(emptyAccounting())
+const ledger = ref([])
 
 const filteredEvents = computed(() =>
   eventLevelFilter.value === 'все'
@@ -542,10 +668,66 @@ const filteredEvents = computed(() =>
     : botEvents.value.filter(e => e.level === eventLevelFilter.value)
 )
 
+const ledgerRows = computed(() => ledger.value.slice(0, 50))
+
+function emptyAccounting () {
+  return {
+    dryRun: false,
+    cashFlow: 0,
+    costBasisOpen: 0,
+    realizedPnl: 0,
+    paidCommission: 0,
+    openLots: 0,
+    averageEntryPrice: null,
+    currency: null
+  }
+}
+
 function formatMoney (value) {
   if (value === null || value === undefined) return '—'
   const n = Number(value)
   return Number.isNaN(n) ? String(value) : n.toLocaleString('ru-RU', { maximumFractionDigits: 4 })
+}
+
+function formatMoneyWithCurrency (value, currency) {
+  const amount = formatMoney(value)
+  return amount === '—' ? amount : `${amount}${currency ? ` ${currency}` : ''}`
+}
+
+function formatFee (value) {
+  if (value === null || value === undefined) return '—'
+  const n = Number(value)
+  return Number.isNaN(n) ? String(value) : n.toLocaleString('ru-RU', { maximumFractionDigits: 9 })
+}
+
+function formatFeeWithCurrency (value, currency) {
+  const amount = formatFee(value)
+  return amount === '—' ? amount : `${amount}${currency ? ` ${currency}` : ''}`
+}
+
+function formatSignedMoney (value, currency) {
+  if (value === null || value === undefined) return '—'
+  const n = Number(value)
+  if (Number.isNaN(n)) return String(value)
+  const prefix = n > 0 ? '+' : ''
+  return `${prefix}${formatMoney(n)}${currency ? ` ${currency}` : ''}`
+}
+
+function moneyTone (value) {
+  const n = Number(value)
+  if (Number.isNaN(n) || n === 0) return 'text-grey-8'
+  return n > 0 ? 'text-positive' : 'text-negative'
+}
+
+function formatOrderFee (order) {
+  if (order?.fee === null || order?.fee === undefined) return '—'
+  return formatFeeWithCurrency(order.fee, order.feeCurrency)
+}
+
+function formatLots (row) {
+  if (row?.lots === null || row?.lots === undefined) return '—'
+  const lotSize = row.lotSize && row.lotSize !== 1 ? ` × ${row.lotSize}` : ''
+  return `${row.lots}${lotSize}`
 }
 
 function orderStatusColor (status) {
@@ -582,17 +764,63 @@ function eventLevelColor (level) {
   }
 }
 
+function eventIsNotifiable (event) {
+  return event?.notifiable ?? isNotifiableEvent(event?.type)
+}
+
+function ledgerTypeLabel (type) {
+  switch (type) {
+    case 'TRADE_BUY': return 'Покупка'
+    case 'TRADE_SELL': return 'Продажа'
+    case 'COMMISSION_CORRECTION': return 'Коррекция комиссии'
+    case 'CYCLE_RESULT': return 'Результат цикла'
+    case 'GRID_REPLACED': return 'Сетка заменена'
+    default: return type || '—'
+  }
+}
+
+function ledgerTypeColor (type) {
+  switch (type) {
+    case 'TRADE_BUY': return 'green-7'
+    case 'TRADE_SELL': return 'red-7'
+    case 'COMMISSION_CORRECTION': return 'warning'
+    case 'CYCLE_RESULT': return 'primary'
+    default: return 'grey-6'
+  }
+}
+
 async function loadState (id) {
   if (!id) return
   try {
-    const [s, ev] = await Promise.all([
+    const [s, ev, acc, led] = await Promise.all([
       apiClient.get(`/api/v1/bots/${id}/state`),
-      apiClient.get(`/api/v1/bots/${id}/events`, { params: { limit: 100 } })
+      apiClient.get(`/api/v1/bots/${id}/events`, { params: { limit: 100 } }),
+      apiClient.get(`/api/v1/bots/${id}/accounting`),
+      apiClient.get(`/api/v1/bots/${id}/ledger`)
     ])
     state.value = s
     botEvents.value = Array.isArray(ev) ? ev : []
+    accounting.value = acc || emptyAccounting()
+    ledger.value = Array.isArray(led) ? led : []
   } catch (e) {
     console.debug(e)
+  }
+}
+
+async function loadAccounting (id) {
+  if (!id) return
+  accountingLoading.value = true
+  try {
+    const [acc, led] = await Promise.all([
+      apiClient.get(`/api/v1/bots/${id}/accounting`),
+      apiClient.get(`/api/v1/bots/${id}/ledger`)
+    ])
+    accounting.value = acc || emptyAccounting()
+    ledger.value = Array.isArray(led) ? led : []
+  } catch (e) {
+    toast?.err(getErrorMessage(e, 'Не удалось загрузить доходность'))
+  } finally {
+    accountingLoading.value = false
   }
 }
 
@@ -874,8 +1102,52 @@ async function doDelete () {
   overflow: auto;
 }
 
+.accounting-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.metric-tile {
+  min-height: 68px;
+  padding: 10px 12px;
+  border: 1px solid var(--q-color-grey-4);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.metric-label {
+  color: #757575;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.metric-value {
+  margin-top: 6px;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.ledger-table {
+  max-height: 320px;
+  overflow: auto;
+}
+
 .events-list {
   max-height: 360px;
   overflow: auto;
+}
+
+@media (max-width: 900px) {
+  .accounting-grid {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .accounting-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

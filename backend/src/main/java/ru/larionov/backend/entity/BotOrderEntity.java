@@ -75,6 +75,22 @@ public class BotOrderEntity {
     @Column(name = "fee", precision = 24, scale = 9)
     private BigDecimal fee;
 
+    @Column(name = "fee_actual", nullable = false)
+    private boolean feeActual;
+
+    @Column(name = "fee_rate", precision = 24, scale = 9)
+    private BigDecimal feeRate;
+
+    @Column(name = "fee_source", length = 32)
+    private String feeSource;
+
+    @Column(name = "fee_currency", length = 16)
+    private String feeCurrency;
+
+    /** Лотность на момент постановки: финансовый журнал не должен зависеть от будущей правки справочника. */
+    @Column(name = "lot_size", nullable = false)
+    private int lotSize;
+
     /** Ордер бумажного режима: в журнале лежит рядом с живыми, но на бирже его нет. */
     @Column(name = "dry_run", nullable = false)
     private boolean dryRun;
@@ -91,6 +107,7 @@ public class BotOrderEntity {
     @PrePersist
     void prePersist() {
         if (id == null) id = UUID.randomUUID();
+        if (lotSize <= 0) lotSize = 1;
         Instant now = Instant.now();
         if (createdAt == null) createdAt = now;
         updatedAt = now;

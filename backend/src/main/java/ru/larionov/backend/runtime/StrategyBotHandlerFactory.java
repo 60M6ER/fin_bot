@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import ru.larionov.backend.entity.BotEntity;
+import ru.larionov.backend.accounting.AccountingService;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
 import ru.larionov.backend.exchange.api.model.id.InstrumentId;
 import ru.larionov.backend.exchange.api.model.instrument.TradingConstraints;
@@ -34,6 +35,7 @@ public class StrategyBotHandlerFactory {
     private final BotOrderRepository orderRepo;
     private final RiskGuard riskGuard;
     private final BotEventService events;
+    private final AccountingService accounting;
     private final TradingScheduler scheduler;
     private final ObjectMapper objectMapper;
 
@@ -69,6 +71,7 @@ public class StrategyBotHandlerFactory {
                 accountId,
                 instrumentId,
                 config.dryRun(),
+                constraints.lot(),
                 config.maxCapital(),
                 config.maxPositionLots(),
                 config.maxOrdersPerDay(),
@@ -76,8 +79,8 @@ public class StrategyBotHandlerFactory {
         );
 
         ExecutionGateway gateway = config.dryRun()
-                ? new PaperExecutionGateway(orderRepo, riskGuard, events)
-                : new LiveExecutionGateway(orderRepo, riskGuard, events, exchangeHandler::client);
+                ? new PaperExecutionGateway(orderRepo, riskGuard, events, accounting)
+                : new LiveExecutionGateway(orderRepo, riskGuard, events, accounting, exchangeHandler::client);
 
         Strategy strategy = strategyFactory.create(bot);
 

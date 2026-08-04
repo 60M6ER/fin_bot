@@ -107,6 +107,12 @@ public final class TInvestExchangeHandler implements ExchangeHandler {
         p.setProperty("token", connection.apiKey());
         p.setProperty("sandbox.enabled", Boolean.toString(connection.sandboxEnabled()));
 
+        // Синхронизация справочника тянет весь список инструментов одним ответом, и вселенная
+        // опционов в дефолтные 16 МБ SDK может не поместиться — тогда gRPC вернёт
+        // RESOURCE_EXHAUSTED вместо данных. Поднимаем лимит: платим только реально
+        // принятым объёмом, буфер такого размера заранее не выделяется.
+        p.setProperty("connection.max-message-size", Integer.toString(64 * 1024 * 1024));
+
         ExchangeConnectionSettings s = connection.settings();
         if (s != null) {
             putIfPositive(p, "stream.inactivity-timeout", s.streamInactivityTimeoutSec());

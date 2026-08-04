@@ -4,6 +4,8 @@
 import { defineConfig } from '#q-app/wrappers'
 
 export default defineConfig((/* ctx */) => {
+  const enableViteChecker = process.env.ENABLE_VITE_CHECKER === 'true'
+
   return {
     // https://v2.quasar.dev/quasar-cli-vite/prefetch-feature
     // preFetch: true,
@@ -61,14 +63,16 @@ export default defineConfig((/* ctx */) => {
       // extendViteConf (viteConf) {},
       // viteVuePluginOptions: {},
 
-      vitePlugins: [
-        ['vite-plugin-checker', {
-          eslint: {
-            lintCommand: 'eslint -c ./eslint.config.js "./src*/**/*.{js,mjs,cjs,vue}"',
-            useFlatConfig: true
-          }
-        }, { server: false }]
-      ]
+      vitePlugins: enableViteChecker
+        ? [
+            ['vite-plugin-checker', {
+              eslint: {
+                lintCommand: 'eslint -c ./eslint.config.js "./src*/**/*.{js,mjs,cjs,vue}"',
+                useFlatConfig: true
+              }
+            }, { server: false }]
+          ]
+        : []
     },
 
     // Full list of options: https://v2.quasar.dev/quasar-cli-vite/quasar-config-file#devserver

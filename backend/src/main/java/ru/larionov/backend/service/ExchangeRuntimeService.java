@@ -4,9 +4,11 @@ import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import ru.larionov.backend.entity.ExchangeConnectionEntity;
+import ru.larionov.backend.model.ExchangeConnectionActivatedEvent;
 import ru.larionov.backend.enums.ExchangeType;
 import ru.larionov.backend.enums.RuntimeState;
 import ru.larionov.backend.exception.NotFoundException;
@@ -17,6 +19,7 @@ import ru.larionov.backend.telegram.service.TelegramNotifyService;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -34,6 +37,7 @@ public class ExchangeRuntimeService {
     private final TelegramNotifyService notifyService;
     private final BotRuntimeService botRuntimeService;
     private final ExchangeConnectionContextResolver contextResolver;
+    private final ApplicationEventPublisher events;
 
     private final ConcurrentHashMap<UUID, ExchangeHandler> handlers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, RuntimeInfo> runtime = new ConcurrentHashMap<>();
@@ -141,6 +145,11 @@ public class ExchangeRuntimeService {
                 // Каскад: хендлер уже в мапе, поэтому require() у ботов отработает.
                 botRuntimeService.onConnectionActivated(id);
 
+                // Подписчики обязаны возвращаться мгновенно: мы всё ещё внутри
+                // synchronized(lock(id)), и долгая работа тут застопорила бы deactivate,
+                // супервизор и остановку приложения.
+                events.publishEvent(new ExchangeConnectionActivatedEvent(id, conn.getExchange()));
+
                 notifyService.broadcast("""
                         ✅ Подключение активировано
 
@@ -238,6 +247,25 @@ public class ExchangeRuntimeService {
 
     public Optional<ExchangeHandler> get(UUID id) {
         return Optional.ofNullable(handlers.get(id));
+    }
+
+    /**
+     * Любое поднятое подключение к указанной бирже.
+     *
+     * Нужно синхронизации справочника: список инструментов одинаков для всех токенов,
+     * поэтому годится любой живой клиент. Боевое предпочитаем песочнице — у песочных
+     * токенов бывает урезанный доступ. Порядок доразрешается по connectionId, чтобы
+     * выбор был детерминированным между вызовами.
+     */
+    public Optional<ExchangeHandler> findRunningByExchange(ExchangeType type) {
+        return handlers.values().stream()
+                .filter(h -> h.exchangeType() == type)
+                .min(Comparator.comparing((ExchangeHandler h) -> isSandbox(h) ? 1 : 0)
+                        .thenComparing(ExchangeHandler::connectionId));
+    }
+
+    private static boolean isSandbox(ExchangeHandler handler) {
+        return handler instanceof TInvestExchangeHandler t && t.context().sandboxEnabled();
     }
 
     public boolean isRunning(UUID id) {

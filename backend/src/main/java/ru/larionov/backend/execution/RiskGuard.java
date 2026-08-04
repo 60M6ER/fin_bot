@@ -56,8 +56,53 @@ public class RiskGuard {
 
         checkOrdersPerMinute(ctx);
         checkOrdersPerDay(ctx);
+        checkNoShort(ctx, intent);
         checkPosition(ctx, intent);
         checkCapital(ctx, intent);
+    }
+
+    /**
+     * Продать можно только то, что действительно куплено.
+     *
+     * Это не настраиваемый лимит, а инвариант: сетка объявлена лонговой, а на счёте
+     * без маржи короткая позиция и не откроется — брокер просто отклонит заявку,
+     * зато с маржой риск перестанет быть ограниченным.
+     *
+     * Проверка живёт здесь, а не в стратегии, именно потому, что должна пережить
+     * ЛЮБУЮ ошибку стратегии. Реальный случай: стратегия недосчитала уже выставленные
+     * продажи и раз за разом добавляла новые — единственным, что это остановило,
+     * оказался лимит частоты, то есть случайность.
+     *
+     * Считаем по журналу: он достоверен, пока сверка не сообщила о расхождении,
+     * а при расхождении бот и так обязан молчать.
+     */
+    private void checkNoShort(BotExecutionContext ctx, PlaceIntent intent) {
+        if (intent.side() != OrderSide.SELL) {
+            return;
+        }
+
+        long position = orderRepo.sumPositionLots(ctx.botId(), ctx.dryRun());
+        long alreadyOffered = openLots(ctx, OrderSide.SELL);
+        long projected = alreadyOffered + intent.lots();
+
+        if (projected > position) {
+            throw new RiskRejectedException(
+                    ("Продажа вышла бы за пределы позиции: в заявках уже %d лот(ов), новая на %d, "
+                            + "а куплено всего %d. Шорт не предусмотрен.")
+                            .formatted(alreadyOffered, intent.lots(), position));
+        }
+    }
+
+    /** Сколько лотов ещё не исполнено в открытых заявках указанной стороны. */
+    private long openLots(BotExecutionContext ctx, OrderSide side) {
+        long lots = 0;
+        for (BotOrderEntity o : orderRepo.findAllByBotIdAndStatusIn(ctx.botId(), OPEN_STATUSES)) {
+            if (o.isDryRun() != ctx.dryRun() || o.getSide() != side) {
+                continue;
+            }
+            lots += o.remainingLots();
+        }
+        return lots;
     }
 
     /** Вызывается ПОСЛЕ успешной постановки: считаем только состоявшиеся заявки. */
@@ -132,7 +177,7 @@ public class RiskGuard {
         }
 
         BigDecimal used = usedCapital(ctx);
-        BigDecimal projected = used.add(intent.notional());
+        BigDecimal projected = used.add(orderNotional(intent.limitPrice(), intent.lots(), ctx.lotSize()));
 
         if (projected.compareTo(limit) > 0) {
             throw new RiskRejectedException(
@@ -150,14 +195,14 @@ public class RiskGuard {
             if (o.isDryRun() != ctx.dryRun() || o.getSide() != OrderSide.BUY || o.getLimitPrice() == null) {
                 continue;
             }
-            reserved = reserved.add(o.getLimitPrice().multiply(BigDecimal.valueOf(o.remainingLots())));
+            reserved = reserved.add(orderNotional(o.getLimitPrice(), o.remainingLots(), o.getLotSize()));
         }
 
         long positionLots = orderRepo.sumPositionLots(ctx.botId(), ctx.dryRun());
         if (positionLots > 0) {
             BigDecimal avg = averageEntryPrice(ctx);
             if (avg != null) {
-                reserved = reserved.add(avg.multiply(BigDecimal.valueOf(positionLots)));
+                reserved = reserved.add(orderNotional(avg, positionLots, ctx.lotSize()));
             }
         }
         return reserved;
@@ -181,5 +226,11 @@ public class RiskGuard {
             lots += o.getExecutedLots();
         }
         return lots == 0 ? null : sum.divide(BigDecimal.valueOf(lots), 9, java.math.RoundingMode.HALF_UP);
+    }
+
+    private static BigDecimal orderNotional(BigDecimal price, long lots, int lotSize) {
+        return price
+                .multiply(BigDecimal.valueOf(lots))
+                .multiply(BigDecimal.valueOf(lotSize <= 0 ? 1 : lotSize));
     }
 }

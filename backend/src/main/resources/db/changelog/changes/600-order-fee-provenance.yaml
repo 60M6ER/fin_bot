@@ -1,0 +1,18 @@
+databaseChangeLog:
+  - changeSet:
+      id: 070-bot-order-fee-provenance
+      author: boris
+      comment: >
+        Комиссия ордера теперь хранит не только сумму, но и качество числа:
+        факт это или оценка, ставка, источник и валюта. Лотность фиксируется
+        в момент постановки, чтобы старые финансовые записи не меняли смысл
+        после обновления справочника инструментов.
+      changes:
+        - addColumn:
+            tableName: bot_order
+            columns:
+              - column: { name: fee_actual, type: boolean, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: fee_rate, type: "numeric(24,9)" }
+              - column: { name: fee_source, type: varchar(32) }
+              - column: { name: fee_currency, type: varchar(16) }
+              - column: { name: lot_size, type: int, defaultValueNumeric: 1, constraints: { nullable: false } }

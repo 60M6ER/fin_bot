@@ -2,6 +2,7 @@ package ru.larionov.backend.execution;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import ru.larionov.backend.accounting.AccountingService;
 import ru.larionov.backend.entity.BotOrderEntity;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
@@ -9,8 +10,11 @@ import ru.larionov.backend.exchange.api.ExchangeClient;
 import ru.larionov.backend.exchange.api.OrdersApi;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 import ru.larionov.backend.exchange.api.enums.TimeInForce;
+import ru.larionov.backend.exchange.api.model.FeeInfo;
+import ru.larionov.backend.exchange.api.model.order.CommissionSource;
 import ru.larionov.backend.exchange.api.model.id.ClientOrderId;
 import ru.larionov.backend.exchange.api.model.id.OrderId;
+import ru.larionov.backend.exchange.api.model.order.OrderFee;
 import ru.larionov.backend.exchange.api.model.order.OrderRequest;
 import ru.larionov.backend.exchange.api.model.order.OrderResponse;
 import ru.larionov.backend.exchange.api.model.order.OrderState;
@@ -44,6 +48,7 @@ public class LiveExecutionGateway implements ExecutionGateway {
     private final BotOrderRepository orderRepo;
     private final RiskGuard riskGuard;
     private final BotEventService events;
+    private final AccountingService accounting;
     /** Клиент берём через поставщика: подключение может быть переподнято под нами. */
     private final Supplier<ExchangeClient> clientSupplier;
 
@@ -75,6 +80,7 @@ public class LiveExecutionGateway implements ExecutionGateway {
                 .requestedLots(intent.lots())
                 .executedLots(0)
                 .limitPrice(intent.limitPrice())
+                .lotSize(ctx.lotSize())
                 .dryRun(false)
                 .build());
 
@@ -90,7 +96,7 @@ public class LiveExecutionGateway implements ExecutionGateway {
                     TimeInForce.GTC // у T-Invest всё равно DAY: GTC в протоколе нет
             ));
 
-            applyState(entity, response.state());
+            persist(ctx, entity, response.state());
             entity.setExchangeOrderId(response.orderId() == null ? null : response.orderId().value());
             if (entity.getStatus() == OrderStatus.PENDING) {
                 entity.setStatus(OrderStatus.NEW);
@@ -177,6 +183,14 @@ public class LiveExecutionGateway implements ExecutionGateway {
                 .toList();
     }
 
+    @Override
+    public List<BotOrderView> recentOrders(UUID botId) {
+        return orderRepo.findTop200ByBotIdOrderByCreatedAtDesc(botId).stream()
+                .filter(o -> !o.isDryRun())
+                .map(BotOrderView::of)
+                .toList();
+    }
+
     // ==============================
     // STREAM EVENT (fast path)
     // ==============================
@@ -200,8 +214,7 @@ public class LiveExecutionGateway implements ExecutionGateway {
         OrderStatus before = entity.getStatus();
         long executedBefore = entity.getExecutedLots();
 
-        applyState(entity, fromStream);
-        orderRepo.save(entity);
+        persist(ctx, entity, fromStream);
 
         emitFillEvents(ctx, entity, before, executedBefore);
         return Optional.of(BotOrderView.of(entity));
@@ -231,7 +244,14 @@ public class LiveExecutionGateway implements ExecutionGateway {
 
     @Override
     public ReconcileResult reconcile(BotExecutionContext ctx) {
-        List<BotOrderEntity> journalOpen = orderRepo.findAllByBotIdAndStatusIn(ctx.botId(), OPEN_STATUSES);
+        Map<UUID, BotOrderEntity> toReconcile = new HashMap<>();
+        for (BotOrderEntity o : orderRepo.findAllByBotIdAndStatusIn(ctx.botId(), OPEN_STATUSES)) {
+            toReconcile.put(o.getId(), o);
+        }
+        for (BotOrderEntity o : orderRepo.findAllByBotIdAndDryRunAndFeeActualFalseAndExecutedLotsGreaterThan(
+                ctx.botId(), false, 0)) {
+            toReconcile.put(o.getId(), o);
+        }
 
         // Что биржа считает живым прямо сейчас.
         Map<String, OrderState> exchangeByClientId = new HashMap<>();
@@ -242,15 +262,14 @@ public class LiveExecutionGateway implements ExecutionGateway {
         }
 
         int resolvedPending = 0;
-        for (BotOrderEntity entity : journalOpen) {
+        for (BotOrderEntity entity : toReconcile.values()) {
             if (entity.isDryRun()) {
                 continue;
             }
 
             OrderState onExchange = exchangeByClientId.remove(entity.getClientOrderId());
             if (onExchange != null) {
-                applyState(entity, onExchange);
-                orderRepo.save(entity);
+                persist(ctx, entity, onExchange);
                 continue;
             }
 
@@ -305,8 +324,7 @@ public class LiveExecutionGateway implements ExecutionGateway {
                     .getByClientOrderId(ctx.accountId(), new ClientOrderId(entity.getClientOrderId()));
 
             if (state.isPresent()) {
-                applyState(entity, state.get());
-                orderRepo.save(entity);
+                persist(ctx, entity, state.get());
                 return true;
             }
 
@@ -325,12 +343,21 @@ public class LiveExecutionGateway implements ExecutionGateway {
         }
     }
 
+    /**
+     * Позиция с биржи, приведённая к ЛОТАМ.
+     *
+     * Брокер отдаёт количество в штуках. Пропущенное деление на размер лота стоило
+     * реальных денег: при лотности 10 позиция в 1 лот выглядела как 10, и стратегия
+     * выставляла продажи на весь этот мнимый объём, то есть продавала втрое больше,
+     * чем купила.
+     */
     private BigDecimal fetchExchangePosition(BotExecutionContext ctx) {
         try {
-            return clientSupplier.get().accounts()
+            BigDecimal shares = clientSupplier.get().accounts()
                     .getPosition(ctx.accountId(), ctx.instrumentId())
                     .map(p -> p.quantity())
                     .orElse(BigDecimal.ZERO);
+            return ctx.sharesToLots(shares);
         } catch (Exception e) {
             log.warn("Не удалось получить позицию с биржи: {}", e.getMessage());
             return null;
@@ -345,16 +372,26 @@ public class LiveExecutionGateway implements ExecutionGateway {
         return clientSupplier.get().orders();
     }
 
+    private void persist(BotExecutionContext ctx, BotOrderEntity entity, OrderState state) {
+        applyState(ctx, entity, state);
+        BotOrderEntity saved = orderRepo.save(entity);
+        accounting.recordOrderState(ctx, saved);
+    }
+
     /** Переносит состояние с биржи в запись журнала, не затирая уже известное. */
-    private static void applyState(BotOrderEntity entity, OrderState state) {
+    private void applyState(BotExecutionContext ctx, BotOrderEntity entity, OrderState state) {
         if (state == null) {
             return;
+        }
+        if (entity.getLotSize() <= 0) {
+            entity.setLotSize(ctx.lotSize());
         }
         if (state.status() != null && state.status() != OrderStatus.UNKNOWN) {
             entity.setStatus(state.status());
         }
         if (state.executedQuantity() != null) {
-            entity.setExecutedLots(state.executedQuantity().longValue());
+            long executed = state.executedQuantity().longValue();
+            entity.setExecutedLots(Math.max(entity.getExecutedLots(), executed));
         }
         if (state.averageExecutedPrice() != null) {
             entity.setAvgPrice(state.averageExecutedPrice());
@@ -362,8 +399,48 @@ public class LiveExecutionGateway implements ExecutionGateway {
         if (state.orderId() != null && state.orderId().value() != null && !state.orderId().value().isBlank()) {
             entity.setExchangeOrderId(state.orderId().value());
         }
-        if (state.fee() != null && state.fee().actual() != null) {
-            entity.setFee(state.fee().actual());
+        applyFee(ctx, entity, state);
+    }
+
+    private void applyFee(BotExecutionContext ctx, BotOrderEntity entity, OrderState state) {
+        OrderFee fee = state.fee();
+        if ((fee == null || fee.amount() == null) && entity.getExecutedLots() > 0 && !entity.isFeeActual()) {
+            fee = estimateFee(ctx, entity);
+        }
+        if (fee == null || fee.amount() == null) {
+            return;
+        }
+
+        // Факт всегда побеждает оценку, оценка факт не затирает.
+        if (entity.isFeeActual() && !fee.actual()) {
+            return;
+        }
+        entity.setFee(fee.amount());
+        entity.setFeeActual(fee.actual());
+        entity.setFeeRate(fee.rate());
+        entity.setFeeSource(fee.source() == null ? null : fee.source().name());
+        entity.setFeeCurrency(fee.currency());
+    }
+
+    private OrderFee estimateFee(BotExecutionContext ctx, BotOrderEntity entity) {
+        try {
+            FeeInfo fees = clientSupplier.get().fees().getFeeInfo(ctx.accountId(), ctx.instrumentId());
+            if (fees == null) {
+                return null;
+            }
+            BigDecimal rate = fees.makerRateFor(entity.getSide());
+            BigDecimal price = entity.getAvgPrice() != null ? entity.getAvgPrice() : entity.getLimitPrice();
+            if (rate == null || price == null) {
+                return null;
+            }
+            BigDecimal amount = price
+                    .multiply(BigDecimal.valueOf(entity.getExecutedLots()))
+                    .multiply(BigDecimal.valueOf(entity.getLotSize() <= 0 ? ctx.lotSize() : entity.getLotSize()))
+                    .multiply(rate);
+            return OrderFee.estimated(rate, amount, null, CommissionSource.BROKER_RATE_ESTIMATE);
+        } catch (Exception e) {
+            log.debug("Не удалось оценить комиссию ордера {}: {}", entity.getClientOrderId(), e.getMessage());
+            return null;
         }
     }
 }

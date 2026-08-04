@@ -3,6 +3,7 @@ package ru.larionov.backend.service;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import ru.larionov.backend.accounting.AccountingService;
 import ru.larionov.backend.dto.*;
 import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.entity.BotOrderEntity;
@@ -40,6 +41,7 @@ public class BotService {
     private final BotRuntimeService botRuntimeService;
     private final ExchangeRuntimeService exchangeRuntimeService;
     private final BotEventService eventService;
+    private final AccountingService accountingService;
     private final ObjectMapper objectMapper;
 
     public List<BotListItemDto> list() {
@@ -78,7 +80,10 @@ public class BotService {
         BigDecimal reserved = BigDecimal.ZERO;
         for (BotOrderEntity o : open) {
             if (o.getSide() == OrderSide.BUY && o.getLimitPrice() != null) {
-                reserved = reserved.add(o.getLimitPrice().multiply(BigDecimal.valueOf(o.remainingLots())));
+                int lotSize = o.getLotSize() <= 0 ? 1 : o.getLotSize();
+                reserved = reserved.add(o.getLimitPrice()
+                        .multiply(BigDecimal.valueOf(o.remainingLots()))
+                        .multiply(BigDecimal.valueOf(lotSize)));
             }
         }
 
@@ -96,6 +101,16 @@ public class BotService {
     public List<BotEventDto> events(UUID id, int limit) {
         requireBot(id);
         return eventService.recent(id, limit).stream().map(BotEventDto::of).toList();
+    }
+
+    public BotAccountingDto accounting(UUID id, Boolean dryRun) {
+        requireBot(id);
+        return accountingService.summary(id, resolveDryRun(id, dryRun));
+    }
+
+    public List<MoneyLedgerDto> ledger(UUID id, Boolean dryRun) {
+        requireBot(id);
+        return accountingService.ledger(id, resolveDryRun(id, dryRun));
     }
 
     /** Боты конкретного подключения — для экрана биржи: видно, что остановит её выключение. */
@@ -253,5 +268,13 @@ public class BotService {
     private RuntimeInfo runtimeOrDefault(UUID id) {
         RuntimeInfo info = botRuntimeService.getRuntime(id);
         return info != null ? info : new RuntimeInfo(id, RuntimeState.INACTIVE, null, Instant.now());
+    }
+
+    private boolean resolveDryRun(UUID id, Boolean dryRun) {
+        if (dryRun != null) {
+            return dryRun;
+        }
+        List<BotOrderEntity> recent = orderRepo.findTop200ByBotIdOrderByCreatedAtDesc(id);
+        return recent.stream().findFirst().map(BotOrderEntity::isDryRun).orElse(false);
     }
 }

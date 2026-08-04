@@ -103,6 +103,12 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
 
         strategy.onStart(context);
 
+        // Результат стартовой сверки обязан дойти до стратегии ДО первого её решения.
+        // Раньше он оставался только в логе: стратегия узнавала о расхождении позиции
+        // лишь на первом сторожевом тике, то есть спустя целый интервал, и всё это время
+        // торговала по журналу, который сверка уже признала неверным.
+        strategy.onReconcile(reconciled);
+
         tickTask = scheduler.scheduleTick(loop::submitTick, tickIntervalSeconds);
 
         events.emit(botId, BotEventLevel.INFO, BotEventType.BOT_STARTED,
@@ -134,7 +140,43 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
         // Очередь дорабатывается: не бросаем бота на полушаге.
         loop.close();
 
-        events.emit(botId, BotEventLevel.INFO, BotEventType.BOT_STOPPED, "Бот остановлен", Map.of());
+        String cancelReport = cancelOutstandingOrders();
+
+        events.emit(botId, BotEventLevel.INFO, BotEventType.BOT_STOPPED,
+                "Бот остановлен. " + cancelReport, Map.of());
+    }
+
+    /**
+     * Снимает заявки бота при остановке.
+     *
+     * Это не удобство, а требование безопасности: остановленный бот не управляет
+     * своими заявками, но на бирже они остаются живыми и могут исполниться в любой
+     * момент до конца сессии — уже без встречных продаж и без учёта лимитов.
+     * Пользователь, нажавший «Остановить», вправе считать, что торговля прекратилась.
+     */
+    private String cancelOutstandingOrders() {
+        try {
+            int open = gateway.openOrders(botId).size();
+            if (open == 0) {
+                return "Активных заявок не было.";
+            }
+
+            int cancelled = gateway.cancelAll(execContext);
+            int left = gateway.openOrders(botId).size();
+
+            if (left > 0) {
+                // Честно сообщаем, а не рапортуем об успехе: незакрытая заявка
+                // на бирже — это деньги, которыми никто не управляет.
+                return "Снято заявок: %d, НЕ удалось снять: %d — проверьте их в приложении брокера."
+                        .formatted(cancelled, left);
+            }
+            return "Снято заявок: %d.".formatted(cancelled);
+
+        } catch (Exception e) {
+            log.error("Bot {}: не удалось снять заявки при остановке: {}", botId, e.getMessage(), e);
+            return "ВНИМАНИЕ: снять заявки не удалось (%s). Проверьте их в приложении брокера."
+                    .formatted(e.getMessage());
+        }
     }
 
     /**
@@ -230,7 +272,7 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
 
         // Сверка ДО того, как стратегия что-то предпримет: за время разрыва
         // ордера могли исполниться, а событий об этом мы не получили.
-        gateway.reconcile(execContext);
+        strategy.onReconcile(gateway.reconcile(execContext));
         strategy.onStreamReconnect();
     }
 

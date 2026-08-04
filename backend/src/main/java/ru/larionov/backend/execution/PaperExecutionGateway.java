@@ -2,6 +2,7 @@ package ru.larionov.backend.execution;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import ru.larionov.backend.accounting.AccountingService;
 import ru.larionov.backend.entity.BotOrderEntity;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
@@ -39,6 +40,7 @@ public class PaperExecutionGateway implements ExecutionGateway {
     private final BotOrderRepository orderRepo;
     private final RiskGuard riskGuard;
     private final BotEventService events;
+    private final AccountingService accounting;
 
     @Override
     public boolean isDryRun() {
@@ -61,6 +63,7 @@ public class PaperExecutionGateway implements ExecutionGateway {
                 .requestedLots(intent.lots())
                 .executedLots(0)
                 .limitPrice(intent.limitPrice())
+                .lotSize(ctx.lotSize())
                 .dryRun(true)
                 .build());
 
@@ -109,6 +112,14 @@ public class PaperExecutionGateway implements ExecutionGateway {
                 .toList();
     }
 
+    @Override
+    public List<BotOrderView> recentOrders(UUID botId) {
+        return orderRepo.findTop200ByBotIdOrderByCreatedAtDesc(botId).stream()
+                .filter(BotOrderEntity::isDryRun)
+                .map(BotOrderView::of)
+                .toList();
+    }
+
     /** В бумажном режиме событий от биржи нет — исполнение рождается из цен. */
     @Override
     public Optional<BotOrderView> applyOrderEvent(BotExecutionContext ctx, OrderState fromStream) {
@@ -139,7 +150,8 @@ public class PaperExecutionGateway implements ExecutionGateway {
             o.setExecutedLots(o.getRequestedLots());
             o.setAvgPrice(o.getLimitPrice());
             o.setStatus(OrderStatus.FILLED);
-            orderRepo.save(o);
+            BotOrderEntity saved = orderRepo.save(o);
+            accounting.recordOrderState(ctx, saved);
 
             events.emit(ctx.botId(), BotEventLevel.INFO, BotEventType.ORDER_FILLED,
                     "[paper] %s исполнено %d по %s".formatted(

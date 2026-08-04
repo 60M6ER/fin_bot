@@ -12,9 +12,11 @@ public record BotEventDto(
         Instant ts,
         BotEventLevel level,
         BotEventType type,
+        boolean notifiable,
         String message
 ) {
     public static BotEventDto of(BotEventEntity e) {
-        return new BotEventDto(e.getId(), e.getTs(), e.getLevel(), e.getType(), e.getMessage());
+        return new BotEventDto(e.getId(), e.getTs(), e.getLevel(), e.getType(),
+                e.getType() != null && e.getType().isNotifiable(), e.getMessage());
     }
 }

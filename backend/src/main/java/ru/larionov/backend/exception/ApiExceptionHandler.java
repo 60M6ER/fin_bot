@@ -5,6 +5,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.time.Instant;
 import java.util.Map;
@@ -28,6 +29,17 @@ public class ApiExceptionHandler {
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, Object>> handleBadRequest(IllegalArgumentException e) {
         return build(HttpStatus.BAD_REQUEST, e.getMessage());
+    }
+
+    /**
+     * Неразбираемое значение query-параметра: ?exchange=NOPE, ?kind=FOO, ?limit=abc.
+     * Без этого обработчика Spring отдавал бы голый 500, и фронт показывал бы
+     * «Ошибка запроса» вместо внятной причины.
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<Map<String, Object>> handleTypeMismatch(MethodArgumentTypeMismatchException e) {
+        return build(HttpStatus.BAD_REQUEST,
+                "Некорректное значение параметра " + e.getName() + ": " + e.getValue());
     }
 
     /** Действие не разрешено в текущем состоянии: бот запущен, подключение активно и т.п. */

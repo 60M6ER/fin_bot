@@ -1,0 +1,42 @@
+package ru.larionov.backend.repository;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import ru.larionov.backend.entity.MoneyLedgerEntity;
+import ru.larionov.backend.enums.LedgerEntryType;
+
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.UUID;
+
+public interface MoneyLedgerRepository extends JpaRepository<MoneyLedgerEntity, Long> {
+
+    List<MoneyLedgerEntity> findAllByBotIdAndDryRunOrderBySeqAsc(UUID botId, boolean dryRun);
+
+    List<MoneyLedgerEntity> findTop200ByBotIdAndDryRunOrderBySeqDesc(UUID botId, boolean dryRun);
+
+    boolean existsByOrderIdAndEntryTypeAndExecutedLotsCum(UUID orderId, LedgerEntryType entryType, Long executedLotsCum);
+
+    @Query("""
+            select coalesce(max(l.executedLotsCum), 0)
+            from MoneyLedgerEntity l
+            where l.orderId = :orderId and l.entryType in :types
+            """)
+    Long maxExecutedLotsCum(@Param("orderId") UUID orderId, @Param("types") List<LedgerEntryType> types);
+
+    @Query("""
+            select coalesce(sum(l.commission), 0)
+            from MoneyLedgerEntity l
+            where l.orderId = :orderId
+              and l.entryType in :types
+            """)
+    BigDecimal sumCommission(@Param("orderId") UUID orderId, @Param("types") List<LedgerEntryType> types);
+
+    @Query("""
+            select coalesce(sum(l.amount), 0)
+            from MoneyLedgerEntity l
+            where l.botId = :botId and l.dryRun = :dryRun and l.affectsCash = true
+            """)
+    BigDecimal cashFlow(@Param("botId") UUID botId, @Param("dryRun") boolean dryRun);
+}

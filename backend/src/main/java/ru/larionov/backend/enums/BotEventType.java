@@ -17,6 +17,9 @@ public enum BotEventType {
     ORDER_CANCELLED(true),
     ORDER_REJECTED(true),
 
+    /** Закрыт цикл сетки: покупка уровня сопоставлена с продажей. */
+    CYCLE_CLOSED(false),
+
     /** Цена вышла за границы сетки — главный риск конструкции. */
     RANGE_EXIT(true),
 

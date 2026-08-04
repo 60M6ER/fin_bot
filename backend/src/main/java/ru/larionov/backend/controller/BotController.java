@@ -5,11 +5,13 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 import ru.larionov.backend.dto.BotCreateRequest;
+import ru.larionov.backend.dto.BotAccountingDto;
 import ru.larionov.backend.dto.BotDetailDto;
 import ru.larionov.backend.dto.BotEventDto;
 import ru.larionov.backend.dto.BotListItemDto;
 import ru.larionov.backend.dto.BotTradingStateDto;
 import ru.larionov.backend.dto.BotUpdateRequest;
+import ru.larionov.backend.dto.MoneyLedgerDto;
 import ru.larionov.backend.enums.StrategyType;
 import ru.larionov.backend.model.RuntimeInfo;
 import ru.larionov.backend.service.BotService;
@@ -81,6 +83,18 @@ public class BotController {
     public List<BotEventDto> events(@PathVariable UUID id,
                                     @RequestParam(defaultValue = "100") int limit) {
         return service.events(id, limit);
+    }
+
+    @GetMapping("/{id}/accounting")
+    public BotAccountingDto accounting(@PathVariable UUID id,
+                                       @RequestParam(required = false) Boolean dryRun) {
+        return service.accounting(id, dryRun);
+    }
+
+    @GetMapping("/{id}/ledger")
+    public List<MoneyLedgerDto> ledger(@PathVariable UUID id,
+                                       @RequestParam(required = false) Boolean dryRun) {
+        return service.ledger(id, dryRun);
     }
 
     @GetMapping("/{id}/runtime")

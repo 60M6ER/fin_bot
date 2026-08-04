@@ -55,6 +55,7 @@ const EVENT_TYPE_LABELS = {
   RISK_BLOCKED: 'Сработал лимит',
   STREAM_RECONNECTED: 'Переподключение стрима',
   RECONCILED: 'Сверка с биржей',
+  CYCLE_CLOSED: 'Цикл закрыт',
   ERROR: 'Ошибка',
   HOUSEKEEPING: 'Событие'
 }
@@ -78,4 +79,23 @@ export function formatInstant (instant) {
   const d = new Date(instant)
   if (Number.isNaN(d.getTime())) return instant
   return d.toLocaleString()
+}
+
+/** Вид инструмента — крупная часть подписи в выпадающем списке выбора инструмента. */
+const INSTRUMENT_KIND_LABELS = {
+  SHARE: 'Акция',
+  ETF: 'Фонд',
+  BOND: 'Облигация',
+  CURRENCY: 'Валюта',
+  FUTURE: 'Фьючерс',
+  OPTION: 'Опцион',
+  INDEX: 'Индекс',
+  COMMODITY: 'Товар',
+  CRYPTO_SPOT: 'Криптовалюта',
+  CRYPTO_FUTURE: 'Крипто-фьючерс',
+  OTHER: 'Прочее'
+}
+
+export function instrumentKindLabel (kind) {
+  return INSTRUMENT_KIND_LABELS[kind] || kind || ''
 }

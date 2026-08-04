@@ -19,6 +19,9 @@ public interface BotOrderRepository extends JpaRepository<BotOrderEntity, UUID> 
 
     List<BotOrderEntity> findAllByBotIdAndStatusIn(UUID botId, List<OrderStatus> statuses);
 
+    List<BotOrderEntity> findAllByBotIdAndDryRunAndFeeActualFalseAndExecutedLotsGreaterThan(
+            UUID botId, boolean dryRun, long executedLots);
+
     List<BotOrderEntity> findTop200ByBotIdOrderByCreatedAtDesc(UUID botId);
 
     boolean existsByBotIdAndStatusIn(UUID botId, List<OrderStatus> statuses);

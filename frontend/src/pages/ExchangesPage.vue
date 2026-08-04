@@ -91,6 +91,19 @@
             />
 
             <q-btn
+              v-if="detail"
+              dense
+              flat
+              icon="library_books"
+              label="Справочник"
+              :loading="catalogSyncing"
+              :disable="detailLoading || catalogSyncing"
+              @click="syncCatalog"
+            >
+              <q-tooltip>Обновить справочник инструментов этой биржи</q-tooltip>
+            </q-btn>
+
+            <q-btn
               dense
               flat
               icon="refresh"
@@ -641,6 +654,7 @@ const detailLoading = ref(false)
 const runtime = ref(null)
 const runtimeLoading = ref(false)
 const actionLoading = ref(false)
+const catalogSyncing = ref(false)
 const desiredActive = ref(null) // true/false while we wait runtime to reach target
 
 let runtimePollTimer = null
@@ -712,6 +726,26 @@ async function waitRuntimeToTarget (id, targetActive) {
       // keep polling (avoid spamming)
     }
   }, periodMs)
+}
+
+/**
+ * Явный выход из состояния «справочник пуст»: синхронизация сама срабатывает при запуске
+ * подключения и по расписанию, но без кнопки пользователю оставалось бы только гадать,
+ * почему в форме бота ничего не находится.
+ */
+async function syncCatalog () {
+  const exchange = detail.value?.exchange
+  if (!exchange) return
+
+  catalogSyncing.value = true
+  try {
+    await apiClient.post(`/api/v1/instruments/sync?exchange=${encodeURIComponent(exchange)}`)
+    toast?.info('Обновление справочника запущено — результат придёт в Telegram')
+  } catch (e) {
+    toast?.err(getErrorMessage(e, 'Не удалось обновить справочник'))
+  } finally {
+    catalogSyncing.value = false
+  }
 }
 
 async function doActivateDeactivate () {

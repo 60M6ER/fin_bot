@@ -1,0 +1,45 @@
+databaseChangeLog:
+  - changeSet:
+      id: 071-money-ledger
+      author: boris
+      comment: >
+        Append-only книга денежных операций бота. Денежные строки пишутся один раз
+        на новый cumulative fill, а уникальный ключ защищает от дубля между стримом
+        и REST-сверкой.
+      changes:
+        - createTable:
+            tableName: money_ledger
+            columns:
+              - column: { name: seq, type: bigserial, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: bot_id, type: uuid, constraints: { nullable: false } }
+              - column: { name: dry_run, type: boolean, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: entry_type, type: varchar(32), constraints: { nullable: false } }
+              - column: { name: affects_cash, type: boolean, constraints: { nullable: false } }
+              - column: { name: order_id, type: uuid }
+              - column: { name: client_order_id, type: varchar(36) }
+              - column: { name: side, type: varchar(8) }
+              - column: { name: grid_level, type: int }
+              - column: { name: lots, type: bigint }
+              - column: { name: lot_size, type: int, defaultValueNumeric: 1, constraints: { nullable: false } }
+              - column: { name: price, type: "numeric(24,9)" }
+              - column: { name: gross_amount, type: "numeric(24,9)" }
+              - column: { name: commission, type: "numeric(24,9)" }
+              - column: { name: commission_estimated, type: boolean, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: amount, type: "numeric(24,9)" }
+              - column: { name: executed_lots_cum, type: bigint }
+              - column: { name: currency, type: varchar(16) }
+              - column: { name: note, type: text }
+              - column: { name: ts, type: timestamp with time zone, defaultValueComputed: CURRENT_TIMESTAMP, constraints: { nullable: false } }
+
+        - addUniqueConstraint:
+            tableName: money_ledger
+            constraintName: uq_money_ledger_order_type_cum
+            columnNames: order_id, entry_type, executed_lots_cum
+
+        - createIndex:
+            tableName: money_ledger
+            indexName: idx_money_ledger_bot_seq
+            columns:
+              - column: { name: bot_id }
+              - column: { name: dry_run }
+              - column: { name: seq }

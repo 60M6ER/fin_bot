@@ -28,6 +28,7 @@ public record GridConfig(
         Integer maxActiveOrders,
         RangeExitAction onRangeExit,
         BigDecimal minStepToCommissionRatio,
+        Integer feeRefreshSeconds,
         Boolean enabled
 ) {
 
@@ -36,6 +37,18 @@ public record GridConfig(
         STOP_BUYING,
         /** Снять все заявки и остановить бота. Жёстче, но предсказуемее. */
         CANCEL_AND_STOP
+    }
+
+    public GridConfig(BigDecimal lowerPrice,
+                      BigDecimal upperPrice,
+                      Integer levels,
+                      Long lotsPerOrder,
+                      Integer maxActiveOrders,
+                      RangeExitAction onRangeExit,
+                      BigDecimal minStepToCommissionRatio,
+                      Boolean enabled) {
+        this(lowerPrice, upperPrice, levels, lotsPerOrder, maxActiveOrders,
+                onRangeExit, minStepToCommissionRatio, null, enabled);
     }
 
     public GridConfig {
@@ -67,6 +80,9 @@ public record GridConfig(
         // минимум в полтора раза». Меньше 1.0 — торговля в убыток по построению.
         if (minStepToCommissionRatio == null || minStepToCommissionRatio.signum() <= 0) {
             minStepToCommissionRatio = new BigDecimal("1.5");
+        }
+        if (feeRefreshSeconds == null || feeRefreshSeconds <= 0) {
+            feeRefreshSeconds = 3600;
         }
     }
 

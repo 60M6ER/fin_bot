@@ -8,6 +8,7 @@ import ru.larionov.backend.exchange.api.model.id.InstrumentId;
 import ru.larionov.backend.exchange.api.model.id.OrderId;
 import ru.larionov.backend.exchange.api.model.order.OrderRequest;
 import ru.larionov.backend.exchange.api.model.order.OrderResponse;
+import ru.larionov.backend.exchange.api.model.order.OrderFee;
 import ru.larionov.backend.exchange.api.model.order.OrderState;
 
 import java.math.BigDecimal;
@@ -45,7 +46,7 @@ public class FakeOrdersApi implements OrdersApi {
             throw new RuntimeException("сеть недоступна");
         }
 
-        OrderState state = state(req, OrderStatus.NEW, 0);
+        OrderState state = state(req, OrderStatus.NEW, 0, null);
         accepted.put(clientOrderId, state);
 
         if (acceptThenTimeout) {
@@ -55,7 +56,7 @@ public class FakeOrdersApi implements OrdersApi {
         return new OrderResponse(state.orderId(), req.clientOrderId(), state);
     }
 
-    private OrderState state(OrderRequest req, OrderStatus status, long executed) {
+    private OrderState state(OrderRequest req, OrderStatus status, long executed, OrderFee fee) {
         return new OrderState(
                 new OrderId("exch-" + req.clientOrderId().value()),
                 req.clientOrderId(),
@@ -66,7 +67,7 @@ public class FakeOrdersApi implements OrdersApi {
                 BigDecimal.valueOf(executed),
                 req.limitPrice(),
                 req.limitPrice(),
-                null,
+                fee,
                 status,
                 Instant.now(),
                 Instant.now());
@@ -74,6 +75,10 @@ public class FakeOrdersApi implements OrdersApi {
 
     /** Имитирует исполнение уже принятого ордера. */
     public void fill(String clientOrderId) {
+        fill(clientOrderId, null);
+    }
+
+    public void fill(String clientOrderId, OrderFee fee) {
         OrderState s = accepted.get(clientOrderId);
         if (s == null) {
             return;
@@ -81,8 +86,21 @@ public class FakeOrdersApi implements OrdersApi {
         accepted.put(clientOrderId, new OrderState(
                 s.orderId(), s.clientOrderId(), s.accountId(), s.instrumentId(), s.side(),
                 s.requestedQuantity(), s.requestedQuantity(),
-                s.limitPrice(), s.limitPrice(), null,
+                s.limitPrice(), s.limitPrice(), fee,
                 OrderStatus.FILLED, s.createdAt(), Instant.now()));
+    }
+
+    /** Имитирует частичное исполнение уже принятого ордера. */
+    public void partialFill(String clientOrderId, long executed, OrderFee fee) {
+        OrderState s = accepted.get(clientOrderId);
+        if (s == null) {
+            return;
+        }
+        accepted.put(clientOrderId, new OrderState(
+                s.orderId(), s.clientOrderId(), s.accountId(), s.instrumentId(), s.side(),
+                s.requestedQuantity(), BigDecimal.valueOf(executed),
+                s.limitPrice(), s.limitPrice(), fee,
+                OrderStatus.PARTIALLY_FILLED, s.createdAt(), Instant.now()));
     }
 
     @Override

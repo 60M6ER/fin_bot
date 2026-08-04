@@ -150,6 +150,7 @@ public class BotEventService {
             case ORDER_FILLED -> "Заявка исполнена";
             case ORDER_CANCELLED -> "Заявка снята";
             case ORDER_REJECTED -> "Заявка отклонена";
+            case CYCLE_CLOSED -> "Цикл закрыт";
             case RANGE_EXIT -> "Выход из диапазона";
             case RISK_BLOCKED -> "Сработал лимит";
             case STREAM_RECONNECTED -> "Переподключение стрима";

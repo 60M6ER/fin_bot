@@ -1,5 +1,7 @@
 package ru.larionov.backend.strategy.grid;
 
+import ru.larionov.backend.exchange.api.model.FeeInfo;
+
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 
@@ -27,6 +29,22 @@ public final class GridValidator {
                                 BigDecimal commissionRate,
                                 int lotSize,
                                 BigDecimal maxCapital) {
+        validate(cfg, ladder, priceIncrement, new FeeInfo(commissionRate, commissionRate), lotSize, maxCapital);
+    }
+
+    /**
+     * Проверяет сетку с учётом комиссии покупки и продажи отдельно.
+     *
+     * Для пассивной grid-стратегии используем maker-ставки: покупка стоит
+     * makerBuyRate, закрывающая продажа — makerSellRate. У T-Invest они совпадают,
+     * но для других бирж это не обязано быть правдой.
+     */
+    public static void validate(GridConfig cfg,
+                                GridLadder ladder,
+                                BigDecimal priceIncrement,
+                                FeeInfo fees,
+                                int lotSize,
+                                BigDecimal maxCapital) {
 
         BigDecimal step = ladder.effectiveStep();
 
@@ -48,14 +66,16 @@ public final class GridValidator {
         BigDecimal referencePrice = cfg.upperPrice();
         BigDecimal stepPct = step.divide(referencePrice, 9, RoundingMode.HALF_UP);
 
-        BigDecimal rate = commissionRate == null ? BigDecimal.ZERO : commissionRate;
-        BigDecimal roundTripPct = rate.multiply(BigDecimal.valueOf(2));
+        FeeInfo feeInfo = fees == null ? new FeeInfo(BigDecimal.ZERO, BigDecimal.ZERO) : fees;
+        BigDecimal buyFeePct = feeInfo.makerBuyRate();
+        BigDecimal sellFeePct = feeInfo.makerSellRate();
+        BigDecimal roundTripPct = feeInfo.makerRoundTripRate();
         BigDecimal required = roundTripPct.multiply(cfg.minStepToCommissionRatio());
 
         if (stepPct.compareTo(required) < 0) {
             throw new IllegalStateException(
                     ("Шаг сетки не окупает комиссию. Шаг %s (%s%% от цены %s), "
-                            + "комиссия за оборот %s%%, требуется минимум %s%% "
+                            + "комиссия за оборот %s%% (покупка %s%% + продажа %s%%), требуется минимум %s%% "
                             + "(запас ×%s). Увеличьте диапазон, уменьшите число уровней "
                             + "или проверьте ставку комиссии в настройках подключения.")
                             .formatted(
@@ -63,6 +83,8 @@ public final class GridValidator {
                                     pct(stepPct),
                                     referencePrice.toPlainString(),
                                     pct(roundTripPct),
+                                    pct(buyFeePct),
+                                    pct(sellFeePct),
                                     pct(required),
                                     cfg.minStepToCommissionRatio().toPlainString()));
         }

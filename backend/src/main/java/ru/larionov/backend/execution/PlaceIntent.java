@@ -26,9 +26,4 @@ public record PlaceIntent(
             throw new IllegalArgumentException("limitPrice must be > 0");
         }
     }
-
-    /** Стоимость заявки без комиссии — этим она давит на лимит капитала. */
-    public BigDecimal notional() {
-        return limitPrice.multiply(BigDecimal.valueOf(lots));
-    }
 }

@@ -63,7 +63,7 @@ public final class TInvestExchangeClient implements ExchangeClient {
                 true,  // supportsTradingCalendar
                 true,  // supportsMarketDataStream
                 true,  // supportsOrderEventsStream
-                false, // supportsFutures (not used in MVP)
+                true,  // supportsFutures — справочник выгружает срочный рынок
                 true   // supportsSandbox
         );
     }

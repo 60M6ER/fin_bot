@@ -196,13 +196,9 @@ public class BotRuntimeService {
                 handlers.put(id, handler);
                 runtime.put(id, new RuntimeInfo(id, RuntimeState.ACTIVE, null, Instant.now()));
 
-                notifyService.broadcast("""
-                        ✅ Бот активирован
-
-                        Bot: %s
-                        ID: %s
-                        Strategy: %s
-                        """.formatted(bot.getName(), id, bot.getStrategyType()));
+                // Уведомление шлёт сам хендлер через BotEventService (событие BOT_STARTED):
+                // там оно проходит троттлинг и содержит осмысленные детали.
+                // Дублировать его здесь означало бы два сообщения на каждое действие.
 
                 log.info("Bot started: id={}, name={}, strategy={}", id, bot.getName(), bot.getStrategyType());
 
@@ -270,13 +266,8 @@ public class BotRuntimeService {
             bot.setActive(false);
             repo.save(bot);
 
-            notifyService.broadcast("""
-                    ⛔ Бот остановлен
-
-                    Bot: %s
-                    ID: %s
-                    Strategy: %s
-                    """.formatted(bot.getName(), id, bot.getStrategyType()));
+            // Событие BOT_STOPPED (с отчётом о снятых заявках) шлёт сам хендлер.
+            // Здесь второе сообщение было бы дублем — именно его вы и видели в Telegram.
 
             log.info("Bot deactivated: id={}, name={}", id, bot.getName());
         }

@@ -3,10 +3,12 @@ package ru.larionov.backend.exchange.tinvest;
 import com.google.protobuf.Timestamp;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import lombok.extern.slf4j.Slf4j;
 import ru.larionov.backend.exchange.api.OrdersApi;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 import ru.larionov.backend.exchange.api.enums.TimeInForce;
+import ru.larionov.backend.exchange.api.model.order.CommissionSource;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
 import ru.larionov.backend.exchange.api.model.id.ClientOrderId;
 import ru.larionov.backend.exchange.api.model.id.InstrumentId;
@@ -24,6 +26,7 @@ import java.util.*;
 /**
  * T-Invest implementation of OrdersApi (limit orders only for now).
  */
+@Slf4j
 public class TInvestOrdersApi implements OrdersApi {
 
     private final TInvestExchangeClient client;
@@ -203,7 +206,7 @@ public class TInvestOrdersApi implements OrdersApi {
             avgPrice = req.limitPrice();
         }
 
-        OrderFee fee = estimateFee(req.accountId(), req.instrumentId(), req.limitPrice(), requested);
+        OrderFee fee = feeFromPostOrderResponse(resp);
 
         Instant now = Instant.now();
 
@@ -244,9 +247,7 @@ public class TInvestOrdersApi implements OrdersApi {
 
         OrderSide side = mapSideBack(s.getDirection());
 
-        // Фактическую комиссию считаем по сделкам, а не здесь: в состоянии ордера
-        // её нет, а подставлять оценку туда, где ожидается факт, — врать в журнал.
-        OrderFee fee = null;
+        OrderFee fee = feeFromOrderState(s);
 
         Instant createdAt = toInstant(s.getOrderDate());
         // Раньше updatedAt слепо равнялся createdAt, из-за чего исполненный час назад
@@ -270,24 +271,46 @@ public class TInvestOrdersApi implements OrdersApi {
         );
     }
 
-    private OrderFee estimateFee(AccountId accountId, InstrumentId instrumentId, BigDecimal limitPrice, BigDecimal lots) {
-        try {
-            // We don't know maker/taker at this level. For grid we usually assume maker.
-            // If FeesApi cannot provide anything yet, we return null.
-            var feeInfo = client.fees().getFeeInfo(accountId, instrumentId);
-            if (feeInfo == null || feeInfo.makerRate() == null) {
-                return null;
-            }
-
-            BigDecimal rate = feeInfo.makerRate();
-            BigDecimal estimated = limitPrice
-                    .multiply(lots)
-                    .multiply(rate);
-
-            return new OrderFee(rate, estimated, null);
-        } catch (Exception e) {
-            return null;
+    private OrderFee feeFromPostOrderResponse(PostOrderResponse response) {
+        if (response.hasExecutedCommission() && response.getLotsExecuted() > 0) {
+            return OrderFee.actual(
+                    moneyValueToBigDecimal(response.getExecutedCommission()),
+                    response.getExecutedCommission().getCurrency(),
+                    CommissionSource.EXCHANGE_EXECUTED);
         }
+        if (response.hasInitialCommission()) {
+            return OrderFee.estimated(
+                    null,
+                    moneyValueToBigDecimal(response.getInitialCommission()),
+                    response.getInitialCommission().getCurrency(),
+                    CommissionSource.EXCHANGE_INITIAL);
+        }
+        return null;
+    }
+
+    private OrderFee feeFromOrderState(ru.tinkoff.piapi.contract.v1.OrderState state) {
+        if (state.hasServiceCommission()) {
+            BigDecimal service = moneyValueToBigDecimal(state.getServiceCommission());
+            if (service != null && service.signum() != 0) {
+                log.info("T-Invest serviceCommission for order {} is {} {}. Не суммирую с executedCommission, "
+                                + "пока семантика брокера не проверена на живом отчёте.",
+                        state.getOrderId(), service.toPlainString(), state.getServiceCommission().getCurrency());
+            }
+        }
+        if (state.hasExecutedCommission() && state.getLotsExecuted() > 0) {
+            return OrderFee.actual(
+                    moneyValueToBigDecimal(state.getExecutedCommission()),
+                    state.getExecutedCommission().getCurrency(),
+                    CommissionSource.EXCHANGE_EXECUTED);
+        }
+        if (state.hasInitialCommission()) {
+            return OrderFee.estimated(
+                    null,
+                    moneyValueToBigDecimal(state.getInitialCommission()),
+                    state.getInitialCommission().getCurrency(),
+                    CommissionSource.EXCHANGE_INITIAL);
+        }
+        return null;
     }
 
     private static OrderDirection mapSide(OrderSide side) {

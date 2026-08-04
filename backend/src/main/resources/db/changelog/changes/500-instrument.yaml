@@ -1,0 +1,122 @@
+databaseChangeLog:
+  - changeSet:
+      id: 060-instrument
+      author: boris
+      comment: >
+        Справочник инструментов, синхронизируемый с биржи в фоне.
+        Живёт в БД, а не в памяти: поиск в форме бота должен работать сразу после
+        рестарта и не требовать поднятого подключения к брокеру, а полная выгрузка
+        по gRPC занимает секунды — на каждое нажатие клавиши так ходить нельзя.
+        Ключ — (exchange, instrument_uid): figi у опционов T-Invest отсутствует вовсе,
+        а ticker+class_code не уникальны между площадками и не существуют у криптобирж.
+        Делистинг помечается флагом is_active, а не удалением строки: на инструмент
+        ссылаются конфиги ботов, и подпись для него всё равно нужно уметь показать.
+      changes:
+        - createTable:
+            tableName: instrument
+            columns:
+              - column: { name: id, type: uuid, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: exchange, type: varchar(32), constraints: { nullable: false } }
+              - column: { name: instrument_uid, type: varchar(64), constraints: { nullable: false } }
+              - column: { name: figi, type: varchar(32) }
+              - column: { name: isin, type: varchar(32) }
+              - column: { name: kind, type: varchar(24), constraints: { nullable: false } }
+              - column: { name: segment, type: varchar(16), constraints: { nullable: false } }
+              - column: { name: ticker, type: varchar(64), constraints: { nullable: false } }
+              - column: { name: name, type: varchar(512), constraints: { nullable: false } }
+              - column: { name: class_code, type: varchar(32) }
+              - column: { name: venue, type: varchar(32) }
+              - column: { name: venue_raw, type: varchar(64) }
+              - column: { name: currency, type: varchar(16) }
+              - column: { name: lot, type: int, defaultValueNumeric: 1, constraints: { nullable: false } }
+              - column: { name: min_price_increment, type: "numeric(24,9)" }
+              - column: { name: buy_available, type: boolean, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: sell_available, type: boolean, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: api_trade_available, type: boolean, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: short_enabled, type: boolean, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: weekend_trading, type: boolean, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: trading_status, type: varchar(48) }
+              - column: { name: basic_asset, type: varchar(64) }
+              - column: { name: expires_at, type: timestamp with time zone }
+              - column: { name: strike_price, type: "numeric(24,9)" }
+              - column: { name: is_active, type: boolean, defaultValueBoolean: true, constraints: { nullable: false } }
+              - column: { name: synced_at, type: timestamp with time zone, defaultValueComputed: CURRENT_TIMESTAMP, constraints: { nullable: false } }
+              - column: { name: created_at, type: timestamp with time zone, defaultValueComputed: CURRENT_TIMESTAMP, constraints: { nullable: false } }
+              - column: { name: updated_at, type: timestamp with time zone, defaultValueComputed: CURRENT_TIMESTAMP, constraints: { nullable: false } }
+
+        - addUniqueConstraint:
+            tableName: instrument
+            constraintName: uq_instrument_exchange_uid
+            columnNames: exchange, instrument_uid
+
+        - createIndex:
+            tableName: instrument
+            indexName: idx_instrument_exchange_kind_active
+            columns:
+              - column: { name: exchange }
+              - column: { name: kind }
+              - column: { name: is_active }
+
+        - createIndex:
+            tableName: instrument
+            indexName: idx_instrument_figi
+            columns:
+              - column: { name: figi }
+
+  - changeSet:
+      id: 061-instrument-search-index
+      author: boris
+      comment: >
+        Префиксный поиск — основной сценарий автокомплита: пользователь набирает SBER.
+        varchar_pattern_ops нужен именно для LIKE 'sber%': обычный btree при не-C локали
+        такой предикат не обслуживает. Выражение lower(...) обязано совпадать с тем,
+        что стоит в запросе, иначе планировщик уйдёт в seq scan.
+      changes:
+        - sql:
+            splitStatements: false
+            sql: >
+              CREATE INDEX idx_instrument_ticker_prefix
+              ON instrument (exchange, lower(ticker) varchar_pattern_ops)
+        - sql:
+            splitStatements: false
+            sql: >
+              CREATE INDEX idx_instrument_name_prefix
+              ON instrument (exchange, lower(name) varchar_pattern_ops)
+      rollback:
+        - sql: { sql: "DROP INDEX IF EXISTS idx_instrument_ticker_prefix" }
+        - sql: { sql: "DROP INDEX IF EXISTS idx_instrument_name_prefix" }
+
+  - changeSet:
+      id: 062-instrument-trgm
+      author: boris
+      failOnError: false
+      comment: >
+        Триграммный индекс для подстроки в названии («газпр» внутри «Газпром нефть»).
+        Намеренно необязателен: CREATE EXTENSION требует superuser, и жёсткая зависимость
+        от него означала бы сломанный деплой на managed Postgres. На 15-50k строк
+        последовательный скан с LIMIT 20 укладывается в десятки миллисекунд, так что
+        деградация приемлема. Если профилирование покажет обратное — снять failOnError.
+      changes:
+        - sql: { sql: "CREATE EXTENSION IF NOT EXISTS pg_trgm" }
+        - sql:
+            splitStatements: false
+            sql: >
+              CREATE INDEX idx_instrument_name_trgm
+              ON instrument USING gin (lower(name) gin_trgm_ops)
+      rollback:
+        - sql: { sql: "DROP INDEX IF EXISTS idx_instrument_name_trgm" }
+
+  - changeSet:
+      id: 063-instrument-trading-status-width
+      author: boris
+      comment: >
+        48 символов не хватило: у T-Invest есть статусы вида
+        SECURITY_TRADING_STATUS_DEALER_NOT_AVAILABLE_FOR_TRADING (56 символов),
+        и на них падал весь батч по акциям, фондам, облигациям, валютам и фьючерсам —
+        прошли только опционы, у которых словарь статусов короче.
+        64 с запасом покрывают текущий словарь брокера.
+      changes:
+        - modifyDataType:
+            tableName: instrument
+            columnName: trading_status
+            newDataType: varchar(64)

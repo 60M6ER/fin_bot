@@ -5,6 +5,7 @@ import ru.larionov.backend.exchange.api.*;
 import ru.larionov.backend.exchange.api.model.account.AccountInfo;
 import ru.larionov.backend.exchange.api.model.account.AccountState;
 import ru.larionov.backend.exchange.api.model.account.Position;
+import ru.larionov.backend.exchange.api.model.FeeInfo;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
 import ru.larionov.backend.exchange.api.model.id.InstrumentId;
 import ru.larionov.backend.exchange.api.model.instrument.ExchangeMeta;
@@ -20,6 +21,7 @@ public class FakeExchangeClient implements ExchangeClient {
 
     /** Позиция, которую «видит» биржа. Позволяет проверить обнаружение расхождений. */
     public BigDecimal exchangePosition = BigDecimal.ZERO;
+    public FeeInfo feeInfo = new FeeInfo(BigDecimal.ZERO, BigDecimal.ZERO);
 
     public FakeExchangeClient(FakeOrdersApi orders) {
         this.orders = orders;
@@ -67,7 +69,7 @@ public class FakeExchangeClient implements ExchangeClient {
 
     @Override
     public FeesApi fees() {
-        throw new UnsupportedOperationException("не нужен в этих тестах");
+        return (accountId, instrumentId) -> feeInfo;
     }
 
     @Override
