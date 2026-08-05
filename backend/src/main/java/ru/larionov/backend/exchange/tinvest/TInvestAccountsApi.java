@@ -6,7 +6,6 @@ import ru.larionov.backend.exchange.api.model.id.AccountId;
 import ru.larionov.backend.exchange.api.model.id.InstrumentId;
 import ru.tinkoff.piapi.contract.v1.*;
 
-import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.*;
@@ -141,38 +140,13 @@ public class TInvestAccountsApi implements AccountsApi {
         return balances;
     }
 
-    private List<Position> mapPositions(PositionsResponse response) {
-        List<Position> positions = new ArrayList<>();
-
-        // Securities positions
-        for (PositionsSecurities sec : response.getSecuritiesList()) {
-            InstrumentId instrumentId = new InstrumentId(
-                    // SDK versions differ: instrumentUid may be present
-                    safeGetInstrumentUid(sec),
-                    sec.getFigi()
-            );
-
-            BigDecimal qty = BigDecimal.valueOf(sec.getBalance());
-
-            positions.add(new Position(
-                    instrumentId,
-                    qty,
-                    null,
-                    null,
-                    null
-            ));
-        }
-
-        return positions;
-    }
-
     private List<Position> mapPortfolioPositions(PortfolioResponse response) {
         List<Position> positions = new ArrayList<>();
 
         // Реальные позиции
         for (PortfolioPosition p : response.getPositionsList()) {
             InstrumentId instrumentId = new InstrumentId(
-                    safeGetInstrumentUid(p),
+                    nullIfBlank(p.getInstrumentUid()),
                     p.getFigi()
             );
 
@@ -193,7 +167,7 @@ public class TInvestAccountsApi implements AccountsApi {
         // Виртуальные позиции (например, фьючи) — пока добавляем так же, если понадобятся позже
         for (VirtualPortfolioPosition p : response.getVirtualPositionsList()) {
             InstrumentId instrumentId = new InstrumentId(
-                    safeGetInstrumentUid(p),
+                    nullIfBlank(p.getInstrumentUid()),
                     p.getFigi()
             );
 
@@ -214,28 +188,14 @@ public class TInvestAccountsApi implements AccountsApi {
         return positions;
     }
 
-    private static String safeGetInstrumentUid(PortfolioPosition p) {
-        try {
-            var m = p.getClass().getMethod("getInstrumentUid");
-            Object v = m.invoke(p);
-            if (v instanceof String s && !s.isBlank()) {
-                return s;
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
-    }
-
-    private static String safeGetInstrumentUid(VirtualPortfolioPosition p) {
-        try {
-            var m = p.getClass().getMethod("getInstrumentUid");
-            Object v = m.invoke(p);
-            if (v instanceof String s && !s.isBlank()) {
-                return s;
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
+    /**
+     * Раньше uid доставали рефлексией «на случай другой версии SDK». В контракте 1.49.3
+     * getInstrumentUid() есть у обоих типов, а рефлексия глотала ошибки и возвращала null —
+     * то есть при малейшей осечке позиция переставала сопоставляться с инструментом
+     * (сравнение идёт именно по uid), и сверка видела бы нулевую позицию там, где она есть.
+     */
+    private static String nullIfBlank(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     private static BigDecimal quotationToBigDecimal(Quotation q) {
@@ -245,18 +205,6 @@ public class TInvestAccountsApi implements AccountsApi {
         BigDecimal units = BigDecimal.valueOf(q.getUnits());
         BigDecimal nano = BigDecimal.valueOf(q.getNano(), 9);
         return units.add(nano);
-    }
-
-    private static String safeGetInstrumentUid(PositionsSecurities sec) {
-        try {
-            Method m = sec.getClass().getMethod("getInstrumentUid");
-            Object v = m.invoke(sec);
-            if (v instanceof String s && !s.isBlank()) {
-                return s;
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
     }
 
     private static ru.larionov.backend.exchange.api.enums.AccountType mapAccountType(ru.tinkoff.piapi.contract.v1.AccountType type) {
@@ -288,18 +236,10 @@ public class TInvestAccountsApi implements AccountsApi {
     }
 
     /**
-     * We keep sandbox flag in AccountInfo. In our app it is a connection-level setting,
-     * so we try to read it from the client via reflection to avoid hard coupling.
+     * Раньше здесь была рефлексия, искавшая несуществующий метод isSandbox(), из-за чего
+     * AccountInfo.sandbox всегда был false — даже при работе в песочнице.
      */
     private boolean isSandboxMode() {
-        try {
-            Method m = client.getClass().getMethod("isSandbox");
-            Object v = m.invoke(client);
-            if (v instanceof Boolean b) {
-                return b;
-            }
-        } catch (Exception ignored) {
-        }
-        return false;
+        return client.isSandbox();
     }
 }

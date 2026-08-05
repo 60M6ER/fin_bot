@@ -1,0 +1,65 @@
+databaseChangeLog:
+  - changeSet:
+      id: 050-bot-order
+      author: boris
+      comment: >
+        Журнал ордеров — источник правды при рестарте и после разрыва стрима.
+        Без него бот после перезапуска не знает, что уже выставил, и выставляет заново.
+        client_order_id уникален и генерируется ДО сетевого вызова: T-Invest дедуплицирует
+        по нему, поэтому повтор с тем же id второй ордер не создаёт.
+      changes:
+        - createTable:
+            tableName: bot_order
+            columns:
+              - column: { name: id, type: uuid, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: bot_id, type: uuid, constraints: { nullable: false } }
+              - column: { name: connection_id, type: uuid, constraints: { nullable: false } }
+              - column: { name: account_id, type: varchar(64), constraints: { nullable: false } }
+              - column: { name: instrument_uid, type: varchar(64), constraints: { nullable: false } }
+              - column: { name: client_order_id, type: varchar(36), constraints: { nullable: false, unique: true } }
+              - column: { name: exchange_order_id, type: varchar(64) }
+              - column: { name: side, type: varchar(8), constraints: { nullable: false } }
+              - column: { name: status, type: varchar(24), constraints: { nullable: false } }
+              - column: { name: grid_level, type: int }
+              - column: { name: requested_lots, type: bigint, constraints: { nullable: false } }
+              - column: { name: executed_lots, type: bigint, defaultValueNumeric: 0, constraints: { nullable: false } }
+              - column: { name: limit_price, type: "numeric(24,9)" }
+              - column: { name: avg_price, type: "numeric(24,9)" }
+              - column: { name: fee, type: "numeric(24,9)" }
+              - column: { name: dry_run, type: boolean, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: last_error, type: text }
+              - column: { name: created_at, type: timestamp with time zone, defaultValueComputed: CURRENT_TIMESTAMP, constraints: { nullable: false } }
+              - column: { name: updated_at, type: timestamp with time zone, defaultValueComputed: CURRENT_TIMESTAMP, constraints: { nullable: false } }
+
+        - createIndex:
+            tableName: bot_order
+            indexName: idx_bot_order_bot_status
+            columns:
+              - column: { name: bot_id }
+              - column: { name: status }
+
+  - changeSet:
+      id: 051-bot-event
+      author: boris
+      comment: >
+        Журнал событий бота: из него рендерятся консоль, Telegram и лента в UI.
+        Удаляется вместе с ботом — это лог, а не финансовая запись (в отличие от bot_order,
+        который переживает удаление бота намеренно).
+      changes:
+        - createTable:
+            tableName: bot_event
+            columns:
+              - column: { name: id, type: uuid, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: bot_id, type: uuid, constraints: { nullable: false } }
+              - column: { name: ts, type: timestamp with time zone, defaultValueComputed: CURRENT_TIMESTAMP, constraints: { nullable: false } }
+              - column: { name: level, type: varchar(8), constraints: { nullable: false } }
+              - column: { name: type, type: varchar(32), constraints: { nullable: false } }
+              - column: { name: message, type: text }
+              - column: { name: payload, type: jsonb, defaultValueComputed: "'{}'::jsonb", constraints: { nullable: false } }
+
+        - createIndex:
+            tableName: bot_event
+            indexName: idx_bot_event_bot_ts
+            columns:
+              - column: { name: bot_id }
+              - column: { name: ts, descending: true }

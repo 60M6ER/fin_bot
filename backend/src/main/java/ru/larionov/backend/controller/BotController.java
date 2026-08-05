@@ -5,8 +5,14 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 import ru.larionov.backend.dto.BotCreateRequest;
+import ru.larionov.backend.dto.BotAccountingDto;
 import ru.larionov.backend.dto.BotDetailDto;
+import ru.larionov.backend.dto.BotEventDto;
 import ru.larionov.backend.dto.BotListItemDto;
+import ru.larionov.backend.dto.BotTradingStateDto;
+import ru.larionov.backend.dto.BotUpdateRequest;
+import ru.larionov.backend.dto.MoneyLedgerDto;
+import ru.larionov.backend.enums.StrategyType;
 import ru.larionov.backend.model.RuntimeInfo;
 import ru.larionov.backend.service.BotService;
 import ru.larionov.backend.service.BotRuntimeService;
@@ -32,10 +38,21 @@ public class BotController {
         return service.get(id);
     }
 
+    @GetMapping("/strategy-types")
+    public List<StrategyType> strategyTypes() {
+        return service.getStrategyTypes();
+    }
+
     @PostMapping
     public ResponseEntity<UUID> create(@RequestBody BotCreateRequest req) {
         UUID id = service.create(req);
         return ResponseEntity.status(HttpStatus.CREATED).body(id);
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<Void> update(@PathVariable UUID id, @RequestBody BotUpdateRequest req) {
+        service.update(id, req);
+        return ResponseEntity.noContent().build();
     }
 
     @DeleteMapping("/{id}")
@@ -54,6 +71,30 @@ public class BotController {
     public ResponseEntity<Void> deactivate(@PathVariable UUID id) {
         runtimeService.deactivate(id);
         return ResponseEntity.noContent().build();
+    }
+
+    /** Что бот делает прямо сейчас: позиция, активные заявки, очередь событий. */
+    @GetMapping("/{id}/state")
+    public BotTradingStateDto state(@PathVariable UUID id) {
+        return service.tradingState(id);
+    }
+
+    @GetMapping("/{id}/events")
+    public List<BotEventDto> events(@PathVariable UUID id,
+                                    @RequestParam(defaultValue = "100") int limit) {
+        return service.events(id, limit);
+    }
+
+    @GetMapping("/{id}/accounting")
+    public BotAccountingDto accounting(@PathVariable UUID id,
+                                       @RequestParam(required = false) Boolean dryRun) {
+        return service.accounting(id, dryRun);
+    }
+
+    @GetMapping("/{id}/ledger")
+    public List<MoneyLedgerDto> ledger(@PathVariable UUID id,
+                                       @RequestParam(required = false) Boolean dryRun) {
+        return service.ledger(id, dryRun);
     }
 
     @GetMapping("/{id}/runtime")

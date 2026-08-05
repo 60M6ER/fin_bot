@@ -9,5 +9,15 @@ import java.util.UUID;
 
 @Repository
 public interface BotRepository extends JpaRepository<BotEntity, UUID> {
-    List<BotEntity> findAllByEnabledTrueOrderByNameAsc();
+
+    /** Все боты с desired-state = active (используется супервизором). */
+    List<BotEntity> findAllByActiveTrueOrderByNameAsc();
+
+    /** Боты конкретного подключения с desired-state = active — каскад запуска. */
+    List<BotEntity> findAllByExchangeConnectionIdAndActiveTrueOrderByNameAsc(UUID exchangeConnectionId);
+
+    /** Все боты подключения независимо от desired-state — каскад остановки и UI. */
+    List<BotEntity> findAllByExchangeConnectionIdOrderByNameAsc(UUID exchangeConnectionId);
+
+    boolean existsByExchangeConnectionId(UUID exchangeConnectionId);
 }

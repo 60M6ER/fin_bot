@@ -1,12 +1,12 @@
 package ru.larionov.backend.strategy;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.enums.StrategyType;
 import ru.larionov.backend.strategy.grid.GridConfig;
 import ru.larionov.backend.strategy.grid.GridStrategy;
+import tools.jackson.databind.ObjectMapper;
 
 @Component
 @RequiredArgsConstructor

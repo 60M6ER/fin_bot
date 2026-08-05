@@ -8,51 +8,59 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
 import lombok.extern.slf4j.Slf4j;
-import ru.larionov.backend.entity.ExchangeConnectionEntity;
 import ru.larionov.backend.enums.ExchangeType;
 import ru.larionov.backend.exchange.api.ExchangeClient;
+import ru.larionov.backend.exchange.api.model.ExchangeConnectionContext;
+import ru.larionov.backend.exchange.api.model.ExchangeConnectionSettings;
+import ru.larionov.backend.exchange.api.model.id.AccountId;
+import ru.larionov.backend.exchange.api.model.stream.StreamHealth;
 import ru.larionov.backend.service.ExchangeHandler;
 import ru.ttech.piapi.core.connector.ConnectorConfiguration;
 
 /**
  * T-Invest (Tinkoff Invest) exchange handler.
  *
- * Responsibilities:
- *  - Own SDK lifecycle (create/start/stop)
- *  - Provide client facade used by the rest of the app
- *  - Provide lightweight health-check (test)
- *
- * NOTE: Конкретная привязка к SDK будет внутри пакета tinvest; наружу отдаём только ExchangeClient.
+ * Работает с уже разрешённым {@link ExchangeConnectionContext}: секреты расшифрованы,
+ * настройки разобраны. Про JPA и шифрование адаптер ничего не знает.
  */
 @Slf4j
 public final class TInvestExchangeHandler implements ExchangeHandler {
 
-    private final ExchangeConnectionEntity connection;
+    private final ExchangeConnectionContext connection;
 
     private final ReentrantLock lifecycleLock = new ReentrantLock();
     private final AtomicBoolean started = new AtomicBoolean(false);
 
     private volatile ExchangeClient client; // created on start
     private volatile ConnectorConfiguration connectorConfiguration;
-
     private volatile ScheduledExecutorService resilienceExecutor;
 
-    public TInvestExchangeHandler(ExchangeConnectionEntity connection) {
-        this.connection = connection;
+    /** Счёт, подтверждённый health-check'ом. Им же дальше торгуют боты. */
+    private volatile AccountId resolvedAccountId;
+
+    public TInvestExchangeHandler(ExchangeConnectionContext connection) {
         if (connection == null) {
             throw new IllegalArgumentException("connection must not be null");
         }
+        this.connection = connection;
     }
 
     @Override
     public UUID connectionId() {
-        return connection.getId();
+        return connection.id();
     }
 
     @Override
     public ExchangeType exchangeType() {
-        // adjust enum constant name to your project
         return ExchangeType.T_INVEST;
+    }
+
+    public ExchangeConnectionContext context() {
+        return connection;
+    }
+
+    public AccountId resolvedAccountId() {
+        return resolvedAccountId;
     }
 
     @Override
@@ -67,16 +75,13 @@ public final class TInvestExchangeHandler implements ExchangeHandler {
                 return;
             }
 
-            if (connection.getApiKey() == null || connection.getApiKey().isBlank()) {
-                throw new IllegalStateException("T-Invest apiKey/token is empty for connectionId=" + connection.getId());
+            if (connection.apiKey() == null || connection.apiKey().isBlank()) {
+                throw new IllegalStateException(
+                        "Не задан токен T-Invest для подключения «" + connection.name() + "». "
+                                + "Укажите его в разделе «Биржи» → «Ключи».");
             }
 
-            Properties p = new Properties();
-            p.setProperty("token", connection.getApiKey());
-
-            p.setProperty("sandbox.enabled", Boolean.toString(connection.isSandboxEnabled()));
-
-            this.connectorConfiguration = ConnectorConfiguration.loadFromProperties(p);
+            this.connectorConfiguration = ConnectorConfiguration.loadFromProperties(buildProperties());
 
             this.resilienceExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, "tinvest-resilience");
@@ -84,12 +89,42 @@ public final class TInvestExchangeHandler implements ExchangeHandler {
                 return t;
             });
 
-            // Create real client via factory method (builds ServiceStubFactory + resilience wrappers internally)
-            this.client = TInvestExchangeClient.create(this.connectorConfiguration, this.resilienceExecutor);
+            this.client = TInvestExchangeClient.create(
+                    this.connectorConfiguration,
+                    this.resilienceExecutor,
+                    connection.sandboxEnabled(),
+                    connection.settings().commissionRate());
 
             started.set(true);
         } finally {
             lifecycleLock.unlock();
+        }
+    }
+
+    /** Имена ключей сверены с константами SDK 1.49.3. */
+    private Properties buildProperties() {
+        Properties p = new Properties();
+        p.setProperty("token", connection.apiKey());
+        p.setProperty("sandbox.enabled", Boolean.toString(connection.sandboxEnabled()));
+
+        // Синхронизация справочника тянет весь список инструментов одним ответом, и вселенная
+        // опционов в дефолтные 16 МБ SDK может не поместиться — тогда gRPC вернёт
+        // RESOURCE_EXHAUSTED вместо данных. Поднимаем лимит: платим только реально
+        // принятым объёмом, буфер такого размера заранее не выделяется.
+        p.setProperty("connection.max-message-size", Integer.toString(64 * 1024 * 1024));
+
+        ExchangeConnectionSettings s = connection.settings();
+        if (s != null) {
+            putIfPositive(p, "stream.inactivity-timeout", s.streamInactivityTimeoutSec());
+            putIfPositive(p, "stream.ping-delay", s.streamPingDelayMs());
+            putIfPositive(p, "stream.market-data.max-streams-count", s.maxMarketDataStreamsCount());
+        }
+        return p;
+    }
+
+    private static void putIfPositive(Properties p, String key, Integer value) {
+        if (value != null && value > 0) {
+            p.setProperty(key, Integer.toString(value));
         }
     }
 
@@ -112,8 +147,8 @@ public final class TInvestExchangeHandler implements ExchangeHandler {
             this.resilienceExecutor = null;
 
             this.connectorConfiguration = null;
+            this.resolvedAccountId = null;
 
-            // Close SDK client first
             if (c != null) {
                 try {
                     c.close();
@@ -122,7 +157,6 @@ public final class TInvestExchangeHandler implements ExchangeHandler {
                 }
             }
 
-            // Then stop executor used by resilience
             if (ex != null) {
                 ex.shutdownNow();
             }
@@ -135,39 +169,60 @@ public final class TInvestExchangeHandler implements ExchangeHandler {
 
     @Override
     public void test() {
-        log.info("Testing T-Invest Exchange");
         if (!started.get()) {
             throw new IllegalStateException("TInvest handler is not started");
         }
 
-        try {
-            ExchangeClient c = client();
+        ExchangeClient c = client();
+        var accountsApi = c.accounts();
+        var accounts = accountsApi.listAccounts();
 
-            var accountsApi = c.accounts();
-            var accounts = accountsApi.listAccounts();
-            if (accounts == null || accounts.isEmpty()) {
-                log.warn("T-Invest test: no accounts returned");
-                return;
-            }
-
-            // For now: pick the first account. Later we can persist a preferred accountId in connection settings.
-            var acc = accounts.get(0);
-            var state = accountsApi.getState(acc.id());
-
-            log.info("T-Invest test OK. accountId={}, name={}, type={}, sandbox={}",
-                    acc.id().value(), acc.name(), acc.type(), acc.sandbox());
-
-            if (state.balances() == null || state.balances().isEmpty()) {
-                log.info("Balances: <empty>");
-            } else {
-                for (var b : state.balances()) {
-                    log.info("Balance: {} available={} blocked={}", b.currency(), b.available(), b.blocked());
-                }
-            }
-        } catch (Exception e) {
-            log.warn("T-Invest test failed: {}", e.getMessage(), e);
-            throw e;
+        if (accounts == null || accounts.isEmpty()) {
+            throw new IllegalStateException("У этого токена нет доступных счетов");
         }
+
+        AccountId accountId = chooseAccount(accounts);
+        var state = accountsApi.getState(accountId);
+        this.resolvedAccountId = accountId;
+
+        log.info("T-Invest test OK: connection={}, accountId={}, sandbox={}",
+                connection.name(), accountId.value(), connection.sandboxEnabled());
+
+        if (state.balances() == null || state.balances().isEmpty()) {
+            log.info("Balances: <empty>");
+        } else {
+            for (var b : state.balances()) {
+                log.info("Balance: {} available={} blocked={}", b.currency(), b.available(), b.blocked());
+            }
+        }
+    }
+
+    /**
+     * Раньше здесь безусловно бралcя accounts.get(0). Для реальных денег так нельзя:
+     * торговать нужно ровно на том счёте, который выбрал пользователь.
+     */
+    private AccountId chooseAccount(java.util.List<ru.larionov.backend.exchange.api.model.account.AccountInfo> accounts) {
+        if (connection.hasAccountId()) {
+            return accounts.stream()
+                    .map(a -> a.id())
+                    .filter(id -> connection.accountId().equals(id.value()))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Счёт " + connection.accountId() + " недоступен по этому токену. "
+                                    + "Выберите счёт заново в настройках подключения."));
+        }
+
+        if (accounts.size() == 1) {
+            // Выбор однозначен — не заставляем подтверждать очевидное.
+            AccountId only = accounts.get(0).id();
+            log.info("Подключение «{}»: счёт не задан, доступен единственный — {}",
+                    connection.name(), only.value());
+            return only;
+        }
+
+        throw new IllegalStateException(
+                "Доступно несколько счетов (" + accounts.size() + "). "
+                        + "Выберите нужный в настройках подключения перед запуском.");
     }
 
     @Override
@@ -177,6 +232,18 @@ public final class TInvestExchangeHandler implements ExchangeHandler {
             throw new IllegalStateException("TInvest handler is not started");
         }
         return local;
+    }
+
+    @Override
+    public StreamHealth marketDataStreamHealth() {
+        ExchangeClient c = this.client;
+        return c instanceof TInvestExchangeClient t ? t.marketDataStreamHealth() : StreamHealth.disconnected();
+    }
+
+    @Override
+    public StreamHealth ordersStreamHealth() {
+        ExchangeClient c = this.client;
+        return c instanceof TInvestExchangeClient t ? t.ordersStreamHealth() : StreamHealth.disconnected();
     }
 
     @Override

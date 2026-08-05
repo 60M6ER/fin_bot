@@ -8,9 +8,14 @@ import org.springframework.transaction.annotation.Transactional;
 import ru.larionov.backend.dto.*;
 import ru.larionov.backend.entity.ExchangeConnectionEntity;
 import ru.larionov.backend.enums.ExchangeType;
-import ru.larionov.backend.enums.RuntimeState;
 import ru.larionov.backend.exception.NotFoundException;
+import ru.larionov.backend.exchange.api.model.ExchangeConnectionSettings;
+import ru.larionov.backend.exchange.api.model.stream.StreamHealth;
+import ru.larionov.backend.model.RuntimeInfo;
+import ru.larionov.backend.repository.BotRepository;
 import ru.larionov.backend.repository.ExchangeConnectionRepository;
+import ru.larionov.backend.security.SecretCipher;
+import tools.jackson.databind.ObjectMapper;
 
 import java.util.List;
 import java.util.UUID;
@@ -21,32 +26,63 @@ import java.util.UUID;
 public class ExchangeConnectionService {
 
     private final ExchangeConnectionRepository repo;
+    private final BotRepository botRepo;
+    private final ExchangeRuntimeService runtimeService;
+    private final ExchangeConnectionContextResolver contextResolver;
+    private final SecretCipher cipher;
+    private final ObjectMapper objectMapper;
 
     public Page<ExchangeConnectionListItemDto> list(Pageable pageable) {
-        return repo.findAll(pageable)
-                .map(this::toListItem);
+        return repo.findAll(pageable).map(this::toListItem);
     }
 
     public ExchangeConnectionDetailDto get(UUID id) {
-        ExchangeConnectionEntity e = repo.findById(id)
-                .orElseThrow(() -> new NotFoundException("Exchange connection not found: " + id));
-        return toDetail(e);
+        return toDetail(requireConnection(id));
     }
 
     public List<ExchangeType> getExchangeTypes() {
         return List.of(ExchangeType.values());
     }
 
+    /**
+     * Счета, доступные по токену. Требует поднятого подключения — список приходит
+     * от биржи, а не из нашей БД.
+     */
+    public List<ExchangeAccountDto> listAccounts(UUID id) {
+        requireConnection(id);
+        ExchangeHandler handler = runtimeService.get(id)
+                .orElseThrow(() -> new IllegalStateException(
+                        "Подключение не активно. Запустите его, чтобы получить список счетов."));
+
+        return handler.client().accounts().listAccounts().stream()
+                .map(a -> new ExchangeAccountDto(
+                        a.id().value(),
+                        a.name(),
+                        a.type() == null ? null : a.type().name(),
+                        a.sandbox()))
+                .toList();
+    }
+
+    /** Живость стримов. Без активного подключения стримов нет — отдаём «отключено». */
+    public ConnectionStreamsDto streams(UUID id) {
+        requireConnection(id);
+        return runtimeService.get(id)
+                .map(h -> new ConnectionStreamsDto(true, h.marketDataStreamHealth(), h.ordersStreamHealth()))
+                .orElseGet(() -> new ConnectionStreamsDto(
+                        false, StreamHealth.disconnected(), StreamHealth.disconnected()));
+    }
+
     @Transactional
     public UUID create(ExchangeConnectionCreateRequest req) {
+        if (req.exchange() == null) {
+            throw new IllegalArgumentException("exchange is required");
+        }
         ExchangeConnectionEntity e = ExchangeConnectionEntity.builder()
                 .exchange(req.exchange())
-                .name(req.name().trim())
-                .apiKey(null)
-                .apiSecret(null)
-                .passphrase(null)
+                .name(requireName(req.name()))
                 .sandboxEnabled(false)
                 .active(false)
+                .settings("{}")
                 .build();
 
         repo.save(e);
@@ -58,38 +94,82 @@ public class ExchangeConnectionService {
         if (!repo.existsById(id)) {
             throw new NotFoundException("Exchange connection not found: " + id);
         }
+        // FK на bot стоит с RESTRICT: без явной проверки пользователь получил бы
+        // невнятную ошибку драйвера вместо объяснения.
+        if (botRepo.existsByExchangeConnectionId(id)) {
+            throw new IllegalStateException(
+                    "К подключению привязаны боты. Удалите или перенесите их перед удалением подключения.");
+        }
         repo.deleteById(id);
     }
 
     @Transactional
-    public void updateName(ExchangeUpdateNameDto updateNameDto) {
-        ExchangeConnectionEntity e = repo.findById(updateNameDto.id())
-                .orElseThrow(() -> new NotFoundException("Exchange connection not found: " + updateNameDto.id()));
-        if (updateNameDto.name() == null || updateNameDto.name().isBlank()) {
+    public void updateName(ExchangeUpdateNameDto dto) {
+        ExchangeConnectionEntity e = requireConnection(dto.id());
+        e.setName(requireName(dto.name()));
+        repo.save(e);
+    }
+
+    @Transactional
+    public void setSandboxEnabled(ExchangeSetSandboxEnabledDto dto) {
+        ExchangeConnectionEntity e = requireConnection(dto.id());
+        requireStopped(dto.id(), "переключить песочницу");
+        e.setSandboxEnabled(dto.enabled());
+        repo.save(e);
+    }
+
+    @Transactional
+    public void updateCredentials(ExchangeUpdateCredentialsDto dto) {
+        ExchangeConnectionEntity e = requireConnection(dto.id());
+        requireStopped(dto.id(), "изменить ключи");
+
+        // Шифруем на входе: в БД секреты в открытом виде не попадают.
+        e.setApiKey(cipher.encrypt(normalizeNullable(dto.apiKey())));
+        e.setApiSecret(cipher.encrypt(normalizeNullable(dto.apiSecret())));
+        e.setPassphrase(cipher.encrypt(normalizeNullable(dto.passphrase())));
+
+        repo.save(e);
+    }
+
+    @Transactional
+    public void updateSettings(ExchangeUpdateSettingsDto dto) {
+        ExchangeConnectionEntity e = requireConnection(dto.id());
+        requireStopped(dto.id(), "изменить настройки");
+
+        e.setAccountId(normalizeNullable(dto.accountId()));
+
+        ExchangeConnectionSettings settings =
+                dto.settings() == null ? ExchangeConnectionSettings.defaults() : dto.settings();
+        e.setSettings(objectMapper.writeValueAsString(settings));
+
+        repo.save(e);
+    }
+
+    // ==============================
+    // VALIDATION
+    // ==============================
+
+    private ExchangeConnectionEntity requireConnection(UUID id) {
+        return repo.findById(id)
+                .orElseThrow(() -> new NotFoundException("Exchange connection not found: " + id));
+    }
+
+    /**
+     * Менять ключи, счёт или песочницу под работающим подключением нельзя: клиент уже
+     * создан со старыми значениями, и часть ботов может держать открытые ордера.
+     */
+    private void requireStopped(UUID id, String action) {
+        if (runtimeService.isRunning(id)) {
+            throw new IllegalStateException(
+                    "Нельзя " + action + ": подключение активно. Сначала остановите его.");
+        }
+    }
+
+    private String requireName(String raw) {
+        if (raw == null || raw.isBlank()) {
             throw new IllegalArgumentException("name must not be blank");
         }
-        e.setName(updateNameDto.name().trim());
-        repo.save(e);
-    }
-
-    @Transactional
-    public void setSandboxEnabled(ExchangeSetSandboxEnabledDto sandboxEnabledDto) {
-        ExchangeConnectionEntity e = repo.findById(sandboxEnabledDto.id())
-                .orElseThrow(() -> new NotFoundException("Exchange connection not found: " + sandboxEnabledDto.id()));
-        e.setSandboxEnabled(sandboxEnabledDto.enabled());
-        repo.save(e);
-    }
-
-    @Transactional
-    public void updateCredentials(ExchangeUpdateCredentialsDto updateCredentialsDto) {
-        ExchangeConnectionEntity e = repo.findById(updateCredentialsDto.id())
-                .orElseThrow(() -> new NotFoundException("Exchange connection not found: " + updateCredentialsDto.id()));
-
-        e.setApiKey(normalizeNullable(updateCredentialsDto.apiKey()));
-        e.setApiSecret(normalizeNullable(updateCredentialsDto.apiSecret()));
-        e.setPassphrase(normalizeNullable(updateCredentialsDto.passphrase()));
-
-        repo.save(e);
+        return raw.trim();
     }
 
     private String normalizeNullable(String v) {
@@ -98,31 +178,62 @@ public class ExchangeConnectionService {
         return t.isBlank() ? null : t;
     }
 
+    // ==============================
+    // MAPPING
+    // ==============================
+
     private ExchangeConnectionListItemDto toListItem(ExchangeConnectionEntity e) {
+        // Раньше здесь был хардкод INACTIVE, из-за чего список всегда показывал
+        // «выключено» независимо от реальности.
+        RuntimeInfo info = runtimeService.runtimeInfo(e.getId());
+
         return new ExchangeConnectionListItemDto(
                 e.getId(),
                 e.getExchange(),
                 e.getName(),
                 e.isActive(),
-                RuntimeState.INACTIVE,
-                ""
+                info.state(),
+                info.lastError() == null ? "" : info.lastError()
         );
     }
 
     private ExchangeConnectionDetailDto toDetail(ExchangeConnectionEntity e) {
-        String masked = maskKey(e.getApiKey());
+        RuntimeInfo info = runtimeService.runtimeInfo(e.getId());
+
         return new ExchangeConnectionDetailDto(
                 e.getId(),
                 e.getExchange(),
                 e.getName(),
                 e.isActive(),
+                info.state(),
+                info.lastError() == null ? "" : info.lastError(),
                 e.isSandboxEnabled(),
-                masked,
-                e.getApiSecret() != null && !e.getApiSecret().isBlank(),
-                e.getPassphrase() != null && !e.getPassphrase().isBlank(),
+                maskKey(safeDecrypt(e.getApiKey())),
+                isPresent(e.getApiSecret()),
+                isPresent(e.getPassphrase()),
+                cipher.isEnabled(),
+                e.getAccountId(),
+                contextResolver.parseSettings(e),
                 e.getCreatedAt(),
                 e.getUpdatedAt()
         );
+    }
+
+    private boolean isPresent(String v) {
+        return v != null && !v.isBlank();
+    }
+
+    /**
+     * Для маски достаточно знать первые и последние символы. Если расшифровать не вышло
+     * (сменили APP_SECRET_KEY), экран подключения всё равно должен открываться —
+     * иначе пользователь не сможет перезаписать ключи и починить ситуацию.
+     */
+    private String safeDecrypt(String stored) {
+        try {
+            return cipher.decrypt(stored);
+        } catch (Exception ex) {
+            return null;
+        }
     }
 
     private String maskKey(String apiKey) {

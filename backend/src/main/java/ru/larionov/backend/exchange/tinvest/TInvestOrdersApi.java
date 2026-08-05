@@ -3,10 +3,12 @@ package ru.larionov.backend.exchange.tinvest;
 import com.google.protobuf.Timestamp;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import lombok.extern.slf4j.Slf4j;
 import ru.larionov.backend.exchange.api.OrdersApi;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 import ru.larionov.backend.exchange.api.enums.TimeInForce;
+import ru.larionov.backend.exchange.api.model.order.CommissionSource;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
 import ru.larionov.backend.exchange.api.model.id.ClientOrderId;
 import ru.larionov.backend.exchange.api.model.id.InstrumentId;
@@ -24,6 +26,7 @@ import java.util.*;
 /**
  * T-Invest implementation of OrdersApi (limit orders only for now).
  */
+@Slf4j
 public class TInvestOrdersApi implements OrdersApi {
 
     private final TInvestExchangeClient client;
@@ -124,6 +127,39 @@ public class TInvestOrdersApi implements OrdersApi {
         }
     }
 
+    /**
+     * Состояние по нашему clientOrderId — через OrderIdType.ORDER_ID_TYPE_REQUEST.
+     * Именно это позволяет после оборванной постановки узнать судьбу ордера,
+     * не имея биржевого идентификатора, и не выставить дубль.
+     */
+    @Override
+    public Optional<ru.larionov.backend.exchange.api.model.order.OrderState> getByClientOrderId(
+            AccountId accountId, ClientOrderId clientOrderId) {
+        Objects.requireNonNull(accountId, "accountId");
+        Objects.requireNonNull(clientOrderId, "clientOrderId");
+
+        GetOrderStateRequest request = GetOrderStateRequest.newBuilder()
+                .setAccountId(accountId.value())
+                .setOrderId(clientOrderId.value())
+                .setOrderIdType(OrderIdType.ORDER_ID_TYPE_REQUEST)
+                .build();
+
+        try {
+            ru.tinkoff.piapi.contract.v1.OrderState s = client.ordersStub()
+                    .callSyncMethod(
+                            OrdersServiceGrpc.getGetOrderStateMethod(),
+                            stub -> stub.getOrderState(request)
+                    );
+            return Optional.of(mapOrderState(accountId, s));
+        } catch (StatusRuntimeException e) {
+            if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
+                // Ордера с таким clientOrderId у биржи нет — значит его не приняли.
+                return Optional.empty();
+            }
+            throw e;
+        }
+    }
+
     @Override
     public List<ru.larionov.backend.exchange.api.model.order.OrderState> listOpen(AccountId accountId, InstrumentId instrumentId) {
         Objects.requireNonNull(accountId, "accountId");
@@ -170,7 +206,7 @@ public class TInvestOrdersApi implements OrdersApi {
             avgPrice = req.limitPrice();
         }
 
-        OrderFee fee = estimateFee(req.accountId(), req.instrumentId(), req.limitPrice(), requested);
+        OrderFee fee = feeFromPostOrderResponse(resp);
 
         Instant now = Instant.now();
 
@@ -211,10 +247,12 @@ public class TInvestOrdersApi implements OrdersApi {
 
         OrderSide side = mapSideBack(s.getDirection());
 
-        OrderFee fee = null;
+        OrderFee fee = feeFromOrderState(s);
 
         Instant createdAt = toInstant(s.getOrderDate());
-        Instant updatedAt = createdAt;
+        // Раньше updatedAt слепо равнялся createdAt, из-за чего исполненный час назад
+        // ордер выглядел неизменившимся с момента постановки.
+        Instant updatedAt = Instant.now();
 
         return new ru.larionov.backend.exchange.api.model.order.OrderState(
                 orderId,
@@ -233,24 +271,46 @@ public class TInvestOrdersApi implements OrdersApi {
         );
     }
 
-    private OrderFee estimateFee(AccountId accountId, InstrumentId instrumentId, BigDecimal limitPrice, BigDecimal lots) {
-        try {
-            // We don't know maker/taker at this level. For grid we usually assume maker.
-            // If FeesApi cannot provide anything yet, we return null.
-            var feeInfo = client.fees().getFeeInfo(accountId, instrumentId);
-            if (feeInfo == null || feeInfo.makerRate() == null) {
-                return null;
-            }
-
-            BigDecimal rate = feeInfo.makerRate();
-            BigDecimal estimated = limitPrice
-                    .multiply(lots)
-                    .multiply(rate);
-
-            return new OrderFee(rate, estimated, null);
-        } catch (Exception e) {
-            return null;
+    private OrderFee feeFromPostOrderResponse(PostOrderResponse response) {
+        if (response.hasExecutedCommission() && response.getLotsExecuted() > 0) {
+            return OrderFee.actual(
+                    moneyValueToBigDecimal(response.getExecutedCommission()),
+                    response.getExecutedCommission().getCurrency(),
+                    CommissionSource.EXCHANGE_EXECUTED);
         }
+        if (response.hasInitialCommission()) {
+            return OrderFee.estimated(
+                    null,
+                    moneyValueToBigDecimal(response.getInitialCommission()),
+                    response.getInitialCommission().getCurrency(),
+                    CommissionSource.EXCHANGE_INITIAL);
+        }
+        return null;
+    }
+
+    private OrderFee feeFromOrderState(ru.tinkoff.piapi.contract.v1.OrderState state) {
+        if (state.hasServiceCommission()) {
+            BigDecimal service = moneyValueToBigDecimal(state.getServiceCommission());
+            if (service != null && service.signum() != 0) {
+                log.info("T-Invest serviceCommission for order {} is {} {}. Не суммирую с executedCommission, "
+                                + "пока семантика брокера не проверена на живом отчёте.",
+                        state.getOrderId(), service.toPlainString(), state.getServiceCommission().getCurrency());
+            }
+        }
+        if (state.hasExecutedCommission() && state.getLotsExecuted() > 0) {
+            return OrderFee.actual(
+                    moneyValueToBigDecimal(state.getExecutedCommission()),
+                    state.getExecutedCommission().getCurrency(),
+                    CommissionSource.EXCHANGE_EXECUTED);
+        }
+        if (state.hasInitialCommission()) {
+            return OrderFee.estimated(
+                    null,
+                    moneyValueToBigDecimal(state.getInitialCommission()),
+                    state.getInitialCommission().getCurrency(),
+                    CommissionSource.EXCHANGE_INITIAL);
+        }
+        return null;
     }
 
     private static OrderDirection mapSide(OrderSide side) {
@@ -268,9 +328,21 @@ public class TInvestOrdersApi implements OrdersApi {
         };
     }
 
+    /**
+     * ВНИМАНИЕ: аргумент игнорируется, и это не упущение, а свойство площадки.
+     *
+     * В контракте T-Invest 1.49.3 есть только UNSPECIFIED, DAY, FILL_AND_KILL и
+     * FILL_OR_KILL — GTC отсутствует. Любая лимитная заявка живёт ровно одну
+     * торговую сессию и умирает на её закрытии.
+     *
+     * От этого зависит вся конструкция сетки: она обязана переставлять себя при
+     * каждом открытии торгов, а не полагаться на то, что вчерашние заявки ещё стоят.
+     * Триггером служит событие торгового статуса из стрима.
+     *
+     * FILL_AND_KILL / FILL_OR_KILL сознательно не поддерживаем: сетка ставит
+     * пассивные заявки и ждёт исполнения, а эти режимы означают противоположное.
+     */
     private static ru.tinkoff.piapi.contract.v1.TimeInForceType mapTif(TimeInForce tif) {
-        // В нашем домене пока оставили только GTC.
-        // В Tinkoff нет GTC, поэтому маппим его в DAY.
         return TimeInForceType.TIME_IN_FORCE_DAY;
     }
 

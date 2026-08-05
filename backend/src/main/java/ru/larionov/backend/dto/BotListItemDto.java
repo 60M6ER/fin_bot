@@ -9,6 +9,8 @@ public record BotListItemDto(
         UUID id,
         String name,
         StrategyType strategyType,
+        UUID exchangeConnectionId,
+        String exchangeConnectionName,
         boolean active,
         RuntimeInfo runtime
 ) {}

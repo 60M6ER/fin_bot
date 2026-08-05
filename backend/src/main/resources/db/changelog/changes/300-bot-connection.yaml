@@ -1,0 +1,33 @@
+databaseChangeLog:
+  - changeSet:
+      id: 030-bot-exchange-connection
+      author: boris
+      comment: >
+        Явная связь бота с подключением. До этого связь жила только внутри
+        strategy_config (jsonb), из-за чего каскад активации/деактивации
+        не мог отличить ботов одного подключения от ботов другого и
+        трогал вообще всех.
+      changes:
+        - addColumn:
+            tableName: bot
+            columns:
+              - column:
+                  name: exchange_connection_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+
+        - addForeignKeyConstraint:
+            constraintName: fk_bot_exchange_connection
+            baseTableName: bot
+            baseColumnNames: exchange_connection_id
+            referencedTableName: exchange_connection
+            referencedColumnNames: id
+            onDelete: RESTRICT
+
+        - createIndex:
+            tableName: bot
+            indexName: idx_bot_exchange_connection_id
+            columns:
+              - column:
+                  name: exchange_connection_id
