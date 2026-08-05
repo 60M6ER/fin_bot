@@ -3,6 +3,8 @@ package ru.larionov.backend.execution;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import ru.larionov.backend.accounting.AccountingService;
+import ru.larionov.backend.accounting.Inventory;
 import ru.larionov.backend.entity.BotOrderEntity;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
@@ -37,6 +39,7 @@ public class RiskGuard {
 
     private final BotOrderRepository orderRepo;
     private final TradingSwitch tradingSwitch;
+    private final AccountingService accounting;
 
     /**
      * Отметки времени последних постановок для минутного лимита.
@@ -176,7 +179,14 @@ public class RiskGuard {
             return;
         }
 
-        BigDecimal used = usedCapital(ctx);
+        CapitalUsage usage = capitalUsage(ctx);
+        if (usage.journalPositionLots() != usage.inventory().openLots()) {
+            throw new RiskRejectedException(
+                    ("Новая покупка запрещена: позиция в журнале ордеров (%d лот.) "
+                            + "не совпадает с денежной книгой (%d лот.).")
+                            .formatted(usage.journalPositionLots(), usage.inventory().openLots()));
+        }
+        BigDecimal used = usage.amount();
         BigDecimal projected = used.add(orderNotional(intent.limitPrice(), intent.lots(), ctx.lotSize()));
 
         if (projected.compareTo(limit) > 0) {
@@ -186,8 +196,12 @@ public class RiskGuard {
         }
     }
 
-    /** Деньги, занятые открытыми заявками на покупку и уже набранной позицией. */
+    /** Деньги, занятые открытыми заявками на покупку и себестоимостью позиции из книги. */
     public BigDecimal usedCapital(BotExecutionContext ctx) {
+        return capitalUsage(ctx).amount();
+    }
+
+    private CapitalUsage capitalUsage(BotExecutionContext ctx) {
         List<BotOrderEntity> open = orderRepo.findAllByBotIdAndStatusIn(ctx.botId(), OPEN_STATUSES);
 
         BigDecimal reserved = BigDecimal.ZERO;
@@ -198,39 +212,17 @@ public class RiskGuard {
             reserved = reserved.add(orderNotional(o.getLimitPrice(), o.remainingLots(), o.getLotSize()));
         }
 
-        long positionLots = orderRepo.sumPositionLots(ctx.botId(), ctx.dryRun());
-        if (positionLots > 0) {
-            BigDecimal avg = averageEntryPrice(ctx);
-            if (avg != null) {
-                reserved = reserved.add(orderNotional(avg, positionLots, ctx.lotSize()));
-            }
-        }
-        return reserved;
-    }
-
-    /** Средняя цена входа по журналу — грубая, но достаточная для оценки занятого капитала. */
-    private BigDecimal averageEntryPrice(BotExecutionContext ctx) {
-        List<BotOrderEntity> all = orderRepo.findTop200ByBotIdOrderByCreatedAtDesc(ctx.botId());
-
-        BigDecimal sum = BigDecimal.ZERO;
-        long lots = 0;
-        for (BotOrderEntity o : all) {
-            if (o.isDryRun() != ctx.dryRun() || o.getSide() != OrderSide.BUY || o.getExecutedLots() <= 0) {
-                continue;
-            }
-            BigDecimal price = o.getAvgPrice() != null ? o.getAvgPrice() : o.getLimitPrice();
-            if (price == null) {
-                continue;
-            }
-            sum = sum.add(price.multiply(BigDecimal.valueOf(o.getExecutedLots())));
-            lots += o.getExecutedLots();
-        }
-        return lots == 0 ? null : sum.divide(BigDecimal.valueOf(lots), 9, java.math.RoundingMode.HALF_UP);
+        long journalPositionLots = orderRepo.sumPositionLots(ctx.botId(), ctx.dryRun());
+        Inventory inventory = accounting.inventory(ctx.botId(), ctx.dryRun());
+        return new CapitalUsage(reserved.add(inventory.costBasisOpen()), journalPositionLots, inventory);
     }
 
     private static BigDecimal orderNotional(BigDecimal price, long lots, int lotSize) {
         return price
                 .multiply(BigDecimal.valueOf(lots))
                 .multiply(BigDecimal.valueOf(lotSize <= 0 ? 1 : lotSize));
+    }
+
+    private record CapitalUsage(BigDecimal amount, long journalPositionLots, Inventory inventory) {
     }
 }

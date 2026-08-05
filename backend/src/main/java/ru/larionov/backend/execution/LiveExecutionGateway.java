@@ -211,6 +211,11 @@ public class LiveExecutionGateway implements ExecutionGateway {
         }
 
         BotOrderEntity entity = found.get();
+        if (!belongsToContext(entity, ctx)) {
+            log.debug("Событие clientOrderId={} принадлежит боту {}, текущий бот {} — пропускаю",
+                    entity.getClientOrderId(), entity.getBotId(), ctx.botId());
+            return Optional.empty();
+        }
         OrderStatus before = entity.getStatus();
         long executedBefore = entity.getExecutedLots();
 
@@ -218,6 +223,13 @@ public class LiveExecutionGateway implements ExecutionGateway {
 
         emitFillEvents(ctx, entity, before, executedBefore);
         return Optional.of(BotOrderView.of(entity));
+    }
+
+    private boolean belongsToContext(BotOrderEntity entity, BotExecutionContext ctx) {
+        return entity.getBotId().equals(ctx.botId())
+                && entity.getConnectionId().equals(ctx.connectionId())
+                && entity.getAccountId().equals(ctx.accountId().value())
+                && entity.getInstrumentUid().equals(ctx.instrumentId().primary());
     }
 
     private void emitFillEvents(BotExecutionContext ctx, BotOrderEntity entity,

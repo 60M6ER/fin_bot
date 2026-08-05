@@ -5,17 +5,20 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 import ru.larionov.backend.dto.BotCreateRequest;
-import ru.larionov.backend.dto.BotAccountingDto;
 import ru.larionov.backend.dto.BotDetailDto;
 import ru.larionov.backend.dto.BotEventDto;
 import ru.larionov.backend.dto.BotListItemDto;
 import ru.larionov.backend.dto.BotTradingStateDto;
 import ru.larionov.backend.dto.BotUpdateRequest;
+import ru.larionov.backend.dto.BotValuationDto;
 import ru.larionov.backend.dto.MoneyLedgerDto;
+import ru.larionov.backend.dto.GridPreviewDto;
+import ru.larionov.backend.dto.GridPreviewRequest;
 import ru.larionov.backend.enums.StrategyType;
 import ru.larionov.backend.model.RuntimeInfo;
 import ru.larionov.backend.service.BotService;
 import ru.larionov.backend.service.BotRuntimeService;
+import ru.larionov.backend.service.GridPreviewService;
 
 import java.util.List;
 import java.util.UUID;
@@ -27,6 +30,7 @@ public class BotController {
 
     private final BotService service;
     private final BotRuntimeService runtimeService;
+    private final GridPreviewService gridPreviewService;
 
     @GetMapping
     public List<BotListItemDto> list() {
@@ -47,6 +51,11 @@ public class BotController {
     public ResponseEntity<UUID> create(@RequestBody BotCreateRequest req) {
         UUID id = service.create(req);
         return ResponseEntity.status(HttpStatus.CREATED).body(id);
+    }
+
+    @PostMapping("/grid-preview")
+    public GridPreviewDto gridPreview(@RequestBody GridPreviewRequest request) {
+        return gridPreviewService.preview(request);
     }
 
     @PutMapping("/{id}")
@@ -86,8 +95,8 @@ public class BotController {
     }
 
     @GetMapping("/{id}/accounting")
-    public BotAccountingDto accounting(@PathVariable UUID id,
-                                       @RequestParam(required = false) Boolean dryRun) {
+    public BotValuationDto accounting(@PathVariable UUID id,
+                                      @RequestParam(required = false) Boolean dryRun) {
         return service.accounting(id, dryRun);
     }
 

@@ -2,6 +2,7 @@ package ru.larionov.backend.service;
 
 import ru.larionov.backend.enums.ExchangeType;
 import ru.larionov.backend.exchange.api.ExchangeClient;
+import ru.larionov.backend.exchange.api.model.id.AccountId;
 import ru.larionov.backend.exchange.api.model.stream.StreamHealth;
 
 import java.util.UUID;
@@ -16,6 +17,9 @@ public interface ExchangeHandler extends AutoCloseable {
 
     ExchangeClient client();
 
+    /** Счёт, однозначно подтверждённый health-check подключения. */
+    AccountId tradingAccountId();
+
     /**
      * Живость стримов. Читается без побочных эффектов: опрос статуса не должен
      * сам поднимать соединения. Биржи без стримов отдают «отключено».
@@ -26,4 +30,3 @@ public interface ExchangeHandler extends AutoCloseable {
 
     @Override default void close() { stop(); }
 }
-

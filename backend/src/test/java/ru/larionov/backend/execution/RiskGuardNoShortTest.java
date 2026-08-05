@@ -7,6 +7,8 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import ru.larionov.backend.accounting.AccountingService;
+import ru.larionov.backend.accounting.Inventory;
 import ru.larionov.backend.entity.BotOrderEntity;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
@@ -45,12 +47,16 @@ class RiskGuardNoShortTest {
     @Mock
     private TradingSwitch tradingSwitch;
 
+    @Mock
+    private AccountingService accounting;
+
     private RiskGuard guard;
 
     @BeforeEach
     void setUp() {
-        guard = new RiskGuard(orderRepo, tradingSwitch);
+        guard = new RiskGuard(orderRepo, tradingSwitch, accounting);
         when(tradingSwitch.isEnabled()).thenReturn(true);
+        when(accounting.inventory(any(), anyBoolean())).thenReturn(Inventory.empty());
     }
 
     /** Лимиты намеренно не заданы: инвариант «не шортим» не должен зависеть от настроек. */
@@ -162,6 +168,30 @@ class RiskGuardNoShortTest {
                 new PlaceIntent(OrderSide.BUY, 1, new BigDecimal("22.1"), 0)))
                 .isInstanceOf(RiskRejectedException.class)
                 .hasMessageContaining("221.0");
+    }
+
+    @Test
+    void capitalLimitUsesLedgerCostBasisIncludingCommission() {
+        when(orderRepo.sumPositionLots(any(), anyBoolean())).thenReturn(1L);
+        when(orderRepo.findAllByBotIdAndStatusIn(any(), any())).thenReturn(List.of());
+        when(accounting.inventory(BOT, false))
+                .thenReturn(new Inventory(1, new BigDecimal("95"), new BigDecimal("9.5"), 10));
+
+        assertThatThrownBy(() -> guard.check(ctxLot10(new BigDecimal("100")),
+                new PlaceIntent(OrderSide.BUY, 1, BigDecimal.ONE, 0)))
+                .isInstanceOf(RiskRejectedException.class)
+                .hasMessageContaining("105");
+    }
+
+    @Test
+    void capitalLimitRejectsBuyWhenLedgerDoesNotCoverJournalPosition() {
+        when(orderRepo.sumPositionLots(any(), anyBoolean())).thenReturn(1L);
+        when(orderRepo.findAllByBotIdAndStatusIn(any(), any())).thenReturn(List.of());
+
+        assertThatThrownBy(() -> guard.check(ctxLot10(new BigDecimal("1000")),
+                new PlaceIntent(OrderSide.BUY, 1, BigDecimal.ONE, 0)))
+                .isInstanceOf(RiskRejectedException.class)
+                .hasMessageContaining("не совпадает с денежной книгой");
     }
 
     /**

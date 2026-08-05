@@ -1,0 +1,23 @@
+spring:
+  application:
+    name: backend-test
+  datasource:
+    url: jdbc:h2:mem:fin_bot_test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+  liquibase:
+    enabled: false
+
+telegram:
+  bot:
+    token: ""
+    username: ""
+
+app:
+  secret-key: test-only-key

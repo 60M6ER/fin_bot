@@ -23,15 +23,19 @@ public final class GridLadder {
     }
 
     public static GridLadder build(GridConfig cfg, BigDecimal priceIncrement) {
+        return build(GridRange.manual(cfg, null), priceIncrement);
+    }
+
+    public static GridLadder build(GridRange range, BigDecimal priceIncrement) {
         BigDecimal increment = (priceIncrement == null || priceIncrement.signum() <= 0)
                 ? new BigDecimal("0.000000001")
                 : priceIncrement;
 
-        BigDecimal rawStep = cfg.rawStep();
-        List<BigDecimal> result = new ArrayList<>(cfg.levels() + 1);
+        BigDecimal rawStep = range.rawStep();
+        List<BigDecimal> result = new ArrayList<>(range.levels() + 1);
 
-        for (int i = 0; i <= cfg.levels(); i++) {
-            BigDecimal raw = cfg.lowerPrice().add(rawStep.multiply(BigDecimal.valueOf(i)));
+        for (int i = 0; i <= range.levels(); i++) {
+            BigDecimal raw = range.lower().add(rawStep.multiply(BigDecimal.valueOf(i)));
             result.add(roundToIncrement(raw, increment));
         }
         return new GridLadder(result, increment);

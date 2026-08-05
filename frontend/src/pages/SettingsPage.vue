@@ -157,7 +157,80 @@
           </div>
         </q-card-section>
       </q-card>
+
+      <!-- Перезапуск приложения -->
+      <q-card flat bordered>
+        <q-card-section class="row items-center justify-between">
+          <div class="text-subtitle1">Перезапуск</div>
+          <div v-if="systemInfo.startedAt" class="text-caption text-grey-7">
+            работает {{ uptimeLabel }}
+          </div>
+        </q-card-section>
+
+        <q-separator />
+
+        <q-card-section>
+          <div class="text-body2">
+            Приложение корректно остановит ботов, <b>снимет все выставленные заявки</b>
+            и завершит процесс. Контейнер поднимется автоматически, боты вернутся
+            в работу по сохранённому состоянию.
+          </div>
+          <div class="text-caption text-grey-7 q-mt-sm">
+            Нужен, чтобы применить переменные окружения — например
+            <span class="mono">APP_SECRET_KEY</span> или токен Telegram.
+            <template v-if="systemInfo.instanceId">
+              Текущий процесс: <span class="mono">{{ shortInstanceId }}</span>.
+            </template>
+          </div>
+          <div class="q-mt-md">
+            <q-btn
+              color="negative"
+              icon="restart_alt"
+              label="Перезапустить бэкенд"
+              :disable="!systemInfo.restartEnabled || restarting"
+              @click="confirmRestart = true"
+            >
+              <q-tooltip v-if="!systemInfo.restartEnabled">
+                Перезапуск отключён настройкой app.restart.enabled: вне контейнера
+                поднимать приложение обратно было бы некому.
+              </q-tooltip>
+            </q-btn>
+          </div>
+        </q-card-section>
+      </q-card>
     </div>
+
+    <q-dialog v-model="confirmRestart">
+      <q-card style="min-width: 460px">
+        <q-card-section class="row items-center q-gutter-sm">
+          <q-icon name="warning" color="negative" size="md" />
+          <div class="text-subtitle1">Перезапустить бэкенд?</div>
+        </q-card-section>
+        <q-card-section class="text-grey-8">
+          Все работающие боты будут остановлены, <b>их активные заявки на бирже
+          будут сняты</b>. После запуска боты вернутся в работу и расставят сетку
+          заново — это займёт несколько секунд.
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat label="Отмена" v-close-popup />
+          <q-btn color="negative" label="Перезапустить" v-close-popup @click="doRestart" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Пока бэкенд поднимается, закрывать нечего: страница всё равно не работает -->
+    <q-dialog v-model="restarting" persistent>
+      <q-card style="min-width: 380px">
+        <q-card-section class="column items-center q-gutter-md">
+          <q-spinner color="primary" size="42px" />
+          <div class="text-subtitle1">Перезапуск бэкенда</div>
+          <div class="text-caption text-grey-7">
+            Прошло {{ restartElapsed }} с. Страница обновится сама, когда поднимется
+            новый процесс.
+          </div>
+        </q-card-section>
+      </q-card>
+    </q-dialog>
 
     <q-dialog v-model="confirmClear">
       <q-card style="min-width: 420px">
@@ -178,7 +251,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, inject } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, inject } from 'vue'
 import { apiClient, getErrorMessage } from 'src/services/apiClient'
 
 const toast = inject('toast')
@@ -188,6 +261,29 @@ const savingTelegram = ref(false)
 const savingTrading = ref(false)
 const showToken = ref(false)
 const confirmClear = ref(false)
+const confirmRestart = ref(false)
+const restarting = ref(false)
+const restartElapsed = ref(0)
+
+const systemInfo = ref({
+  instanceId: null,
+  startedAt: null,
+  restartEnabled: false,
+  restarting: false
+})
+
+let restartTimer = null
+
+const shortInstanceId = computed(() =>
+  systemInfo.value.instanceId ? systemInfo.value.instanceId.slice(0, 8) : '')
+
+const uptimeLabel = computed(() => {
+  const started = Date.parse(systemInfo.value.startedAt)
+  if (Number.isNaN(started)) return ''
+  const minutes = Math.max(0, Math.floor((Date.now() - started) / 60000))
+  const hours = Math.floor(minutes / 60)
+  return hours > 0 ? `${hours} ч ${minutes % 60} мин` : `${minutes} мин`
+})
 
 const data = ref({
   hasTelegramToken: false,
@@ -209,6 +305,10 @@ const telegramStatusLabel = computed(() => {
 
 onMounted(load)
 
+onBeforeUnmount(() => {
+  if (restartTimer) clearInterval(restartTimer)
+})
+
 async function load () {
   loading.value = true
   try {
@@ -221,6 +321,60 @@ async function load () {
   } finally {
     loading.value = false
   }
+
+  // Отдельно от настроек: сведения о процессе не должны падать вместе с ними.
+  try {
+    systemInfo.value = await apiClient.get('/api/v1/system/info')
+  } catch {
+    systemInfo.value = { ...systemInfo.value, restartEnabled: false }
+  }
+}
+
+async function doRestart () {
+  const previousInstanceId = systemInfo.value.instanceId
+  restarting.value = true
+  restartElapsed.value = 0
+  restartTimer = setInterval(() => { restartElapsed.value += 1 }, 1000)
+
+  try {
+    await apiClient.post('/api/v1/system/restart')
+  } catch {
+    // Ответ может не дойти — процесс уже гасится. Это не ошибка.
+  }
+  await waitForBackend(previousInstanceId)
+}
+
+/**
+ * Ждём именно СМЕНЫ instanceId, а не «кто-нибудь ответил».
+ *
+ * При graceful shutdown старый процесс продолжает отвечать ещё до 30 секунд,
+ * и проверка доступности объявила бы успех против умирающего JVM, после чего
+ * перезагрузка страницы упёрлась бы в connection refused.
+ */
+async function waitForBackend (previousInstanceId) {
+  const deadline = Date.now() + 120000
+  while (Date.now() < deadline) {
+    await sleep(2000)
+    try {
+      const fresh = await apiClient.get('/api/v1/system/info', { timeout: 3000 })
+      if (fresh && fresh.instanceId && fresh.instanceId !== previousInstanceId) {
+        // Новый jar может содержать и новый фронтенд — перезагружаем целиком.
+        window.location.reload()
+        return
+      }
+    } catch {
+      // Ожидаемо, пока бэкенд не поднялся.
+    }
+  }
+
+  if (restartTimer) clearInterval(restartTimer)
+  restartTimer = null
+  restarting.value = false
+  toast?.err('Бэкенд не поднялся за 2 минуты — проверьте docker logs')
+}
+
+function sleep (ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 async function onTradingToggle (value) {

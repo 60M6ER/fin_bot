@@ -189,6 +189,46 @@ class LiveExecutionGatewayReconcileTest {
     }
 
     @Test
+    void streamEventForAnotherBotIsIgnored() {
+        UUID otherBotId = UUID.randomUUID();
+        BotOrderEntity foreignOrder = orderRepo.save(BotOrderEntity.builder()
+                .botId(otherBotId)
+                .connectionId(ctx.connectionId())
+                .accountId(ctx.accountId().value())
+                .instrumentUid("uid-2")
+                .clientOrderId(UUID.randomUUID().toString())
+                .side(OrderSide.BUY)
+                .status(OrderStatus.NEW)
+                .gridLevel(4)
+                .requestedLots(1)
+                .executedLots(0)
+                .limitPrice(new BigDecimal("22.27"))
+                .lotSize(10)
+                .dryRun(false)
+                .build());
+
+        var foreignFill = new ru.larionov.backend.exchange.api.model.order.OrderState(
+                new ru.larionov.backend.exchange.api.model.id.OrderId("foreign-exchange-id"),
+                new ru.larionov.backend.exchange.api.model.id.ClientOrderId(foreignOrder.getClientOrderId()),
+                ctx.accountId(), new InstrumentId("uid-2", null), OrderSide.BUY,
+                BigDecimal.ONE, BigDecimal.ONE, new BigDecimal("22.27"), new BigDecimal("22.27"),
+                null, OrderStatus.FILLED, null, null);
+
+        try {
+            assertThat(gateway.applyOrderEvent(ctx, foreignFill)).isEmpty();
+
+            BotOrderEntity unchanged = orderRepo.findById(foreignOrder.getId()).orElseThrow();
+            assertThat(unchanged.getStatus()).isEqualTo(OrderStatus.NEW);
+            assertThat(unchanged.getExecutedLots()).isZero();
+            assertThat(ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(otherBotId, false)).isEmpty();
+        } finally {
+            ledgerRepo.deleteAll(ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(otherBotId, false));
+            orderRepo.deleteById(foreignOrder.getId());
+            events.deleteAllForBot(otherBotId);
+        }
+    }
+
+    @Test
     void ledgerIsIdempotentForRepeatedSameFill() {
         gateway.placeLimit(ctx, buyOne());
         String clientOrderId = journal().get(0).getClientOrderId();
@@ -270,7 +310,10 @@ class LiveExecutionGatewayReconcileTest {
         assertThat(rows.get(1).getCommission()).isEqualByComparingTo("-0.030000000");
         assertThat(rows.get(1).getAmount()).isEqualByComparingTo("0.030000000");
         assertThat(rows.get(1).isCommissionEstimated()).isFalse();
-        assertThat(accounting.summary(botId, false).cashFlow()).isEqualByComparingTo("-100.07");
+        var summary = accounting.summary(botId, false);
+        assertThat(summary.cashFlow()).isEqualByComparingTo("-100.07");
+        assertThat(summary.costBasisOpen()).isEqualByComparingTo("100.07");
+        assertThat(summary.realizedPnl()).isEqualByComparingTo(BigDecimal.ZERO);
     }
 
     @Test

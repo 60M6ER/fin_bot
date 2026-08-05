@@ -46,7 +46,8 @@
               </q-item-section>
 
               <q-item-section side>
-                <div class="row items-center q-gutter-xs">
+                <div class="row items-center q-gutter-sm no-wrap">
+                  <connection-valuation-cell :valuation="item.valuation" />
                   <!-- Подключение, которое должно работать, но не работает: идут повторы -->
                   <q-icon
                     v-if="item.active && !isRuntimeActive(item.runtimeState)"
@@ -370,6 +371,59 @@
 
               <q-separator />
 
+              <!-- Куда разошлись деньги счёта: сколько роздано, сколько лежит без дела -->
+              <q-card-section v-if="detail.valuation && detail.valuation.botCount">
+                <div class="money-grid">
+                  <div>
+                    <div class="money-label">Итого на подключении</div>
+                    <div class="money-value mono">{{ connectionMoney.total }}</div>
+                  </div>
+                  <div>
+                    <div class="money-label">Роздано ботам</div>
+                    <div class="money-value mono">
+                      {{ formatMoneyWithCurrency(detail.valuation.allocatedBudget,
+                                                 detail.valuation.currency) }}
+                    </div>
+                  </div>
+                  <div>
+                    <div class="money-label">Баланс ботов</div>
+                    <div class="money-value mono">
+                      {{ formatMoneyWithCurrency(detail.valuation.botsBalance,
+                                                 detail.valuation.currency) }}
+                    </div>
+                  </div>
+                  <div>
+                    <div class="money-label">Не задействовано</div>
+                    <div
+                      class="money-value mono"
+                      :class="Number(detail.valuation.unallocatedCash) < 0 ? 'text-negative' : ''"
+                    >
+                      {{ formatMoneyWithCurrency(detail.valuation.unallocatedCash,
+                                                 detail.valuation.currency) }}
+                    </div>
+                  </div>
+                  <div>
+                    <div class="money-label">P/L ботов</div>
+                    <div class="money-value" :class="moneyTone(detail.valuation.botsPnl)">
+                      {{ formatSignedMoney(detail.valuation.botsPnl, detail.valuation.currency) }}
+                    </div>
+                  </div>
+                </div>
+                <div
+                  v-if="Number(detail.valuation.unallocatedCash) < 0"
+                  class="text-caption text-negative q-mt-sm"
+                >
+                  Ботам роздано больше, чем есть свободных денег на счёте.
+                </div>
+                <div v-if="detail.valuation.incomplete" class="text-caption text-grey-7 q-mt-sm">
+                  Не учтено ботов:
+                  {{ detail.valuation.botCount - detail.valuation.valuedBotCount }} —
+                  у них не задан бюджет либо есть позиция без актуальной цены.
+                </div>
+              </q-card-section>
+
+              <q-separator v-if="detail.valuation && detail.valuation.botCount" />
+
               <q-list separator>
                 <q-item v-for="b in connectionBots" :key="b.id" clickable to="/bots">
                   <q-item-section>
@@ -377,11 +431,14 @@
                     <q-item-label caption>{{ b.strategyType }}</q-item-label>
                   </q-item-section>
                   <q-item-section side>
-                    <q-badge
-                      :color="stateColor(b.runtime && b.runtime.state)"
-                      :label="stateLabel(b.runtime && b.runtime.state)"
-                      outline
-                    />
+                    <div class="row items-center q-gutter-sm no-wrap">
+                      <bot-valuation-cell :valuation="b.valuation" dense />
+                      <q-badge
+                        :color="stateColor(b.runtime && b.runtime.state)"
+                        :label="stateLabel(b.runtime && b.runtime.state)"
+                        outline
+                      />
+                    </div>
                   </q-item-section>
                 </q-item>
 
@@ -534,6 +591,11 @@
 import { ref, computed, onMounted, reactive, onBeforeUnmount, inject } from 'vue'
 import { apiClient, getErrorMessage } from 'src/services/apiClient'
 import { stateColor, stateLabel, isRuntimeActive, isRuntimeInactive } from 'src/services/runtimeState'
+import BotValuationCell from 'components/BotValuationCell.vue'
+import ConnectionValuationCell from 'components/ConnectionValuationCell.vue'
+import {
+  formatConnectionValuation, formatMoneyWithCurrency, formatSignedMoney, moneyTone
+} from 'src/services/money'
 
 const toast = inject('toast')
 
@@ -649,6 +711,9 @@ const listLoading = ref(false)
 const selectedId = ref(null)
 const detail = ref(null)
 const detailLoading = ref(false)
+
+const connectionMoney = computed(() =>
+  formatConnectionValuation(detail.value && detail.value.valuation))
 
 // runtime status (in-memory state on backend)
 const runtime = ref(null)
@@ -1094,5 +1159,24 @@ function formatInstant (instant) {
 
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.money-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.money-label {
+  color: #757575;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.money-value {
+  margin-top: 4px;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.2;
 }
 </style>

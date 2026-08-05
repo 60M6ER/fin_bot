@@ -81,7 +81,7 @@ export default defineConfig((/* ctx */) => {
       open: true, // opens browser window automatically
       proxy: {
         '/api': {
-          target: 'http://localhost:8080',
+          target: process.env.API_TARGET || 'http://localhost:8080',
           changeOrigin: true
         }
       }

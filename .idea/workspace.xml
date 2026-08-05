@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ChangeListManager">
+    <list default="true" id="d94d798c-bf6c-4628-a9d8-f1e175a26005" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/.gitignore" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/compiler.xml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/dataSources.xml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/gradle.xml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/modules.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/modules/backend.main.iml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/build.gradle" beforeDir="false" afterPath="$PROJECT_DIR$/backend/build.gradle" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/accounting/AccountingService.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/accounting/AccountingService.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/controller/BotController.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/controller/BotController.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/dto/BotAccountingDto.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/dto/BotAccountingDto.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/dto/BotListItemDto.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/dto/BotListItemDto.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/dto/BotTradingStateDto.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/dto/BotTradingStateDto.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/dto/ExchangeConnectionDetailDto.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/dto/ExchangeConnectionDetailDto.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/dto/ExchangeConnectionListItemDto.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/dto/ExchangeConnectionListItemDto.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/entity/MoneyLedgerEntity.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/entity/MoneyLedgerEntity.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/enums/BotEventType.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/enums/BotEventType.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/exchange/tinvest/TInvestExchangeHandler.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/exchange/tinvest/TInvestExchangeHandler.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/exchange/tinvest/TInvestOrdersStreamService.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/exchange/tinvest/TInvestOrdersStreamService.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/execution/LiveExecutionGateway.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/execution/LiveExecutionGateway.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/execution/RiskGuard.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/execution/RiskGuard.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/runtime/StrategyBotHandler.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/runtime/StrategyBotHandler.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/runtime/StrategyBotHandlerFactory.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/runtime/StrategyBotHandlerFactory.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/runtime/TradingScheduler.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/runtime/TradingScheduler.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/service/BotEventService.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/service/BotEventService.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/service/BotRuntimeService.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/service/BotRuntimeService.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/service/BotService.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/service/BotService.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/service/ExchangeConnectionService.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/service/ExchangeConnectionService.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/service/ExchangeHandler.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/service/ExchangeHandler.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/DefaultStrategyContext.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/DefaultStrategyContext.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/Strategy.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/Strategy.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/StrategyContext.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/StrategyContext.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/grid/GridConfig.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/grid/GridConfig.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/grid/GridLadder.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/grid/GridLadder.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/grid/GridStrategy.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/grid/GridStrategy.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/grid/GridValidator.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/java/ru/larionov/backend/strategy/grid/GridValidator.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/main/resources/application.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/main/resources/application.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/test/java/ru/larionov/backend/accounting/AccountingServiceTest.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/test/java/ru/larionov/backend/accounting/AccountingServiceTest.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/test/java/ru/larionov/backend/execution/LiveExecutionGatewayReconcileTest.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/test/java/ru/larionov/backend/execution/LiveExecutionGatewayReconcileTest.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/src/test/java/ru/larionov/backend/execution/RiskGuardNoShortTest.java" beforeDir="false" afterPath="$PROJECT_DIR$/backend/src/test/java/ru/larionov/backend/execution/RiskGuardNoShortTest.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docker-compose.yml" beforeDir="false" afterPath="$PROJECT_DIR$/docker-compose.yml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/frontend/quasar.config.js" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/quasar.config.js" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/frontend/src/components/GridConfigForm.vue" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/components/GridConfigForm.vue" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/frontend/src/pages/BotsPage.vue" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/pages/BotsPage.vue" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/frontend/src/pages/ExchangesPage.vue" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/pages/ExchangesPage.vue" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/frontend/src/pages/IndexPage.vue" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/pages/IndexPage.vue" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/frontend/src/pages/SettingsPage.vue" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/pages/SettingsPage.vue" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="ProjectColorInfo"><![CDATA[{
+  "associatedIndex": 1
+}]]></component>
+  <component name="ProjectId" id="3HW7ogedKcaeav1cRgGzuqDWfZu" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "git-widget-placeholder": "grid-updates",
+    "kotlin-language-version-configured": "true",
+    "last_opened_file_path": "/Users/borislarionov/Developer/java/fin_bot",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "settings.editor.selected.configurable": "preferences.pluginManager",
+    "vue.rearranger.settings.migration": "true"
+  }
+}]]></component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-jdk-9823dce3aa75-bf35d07a577b-intellij.indexing.shared.core-IU-252.27397.103" />
+        <option value="bundled-js-predefined-d6986cc7102b-3aa1da707db6-JavaScript-IU-252.27397.103" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="d94d798c-bf6c-4628-a9d8-f1e175a26005" name="Changes" comment="" />
+      <created>1785972148390</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1785972148390</updated>
+      <workItem from="1785972149832" duration="562000" />
+    </task>
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+</project>

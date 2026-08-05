@@ -1,9 +1,11 @@
 package ru.larionov.backend.service;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import ru.larionov.backend.accounting.AccountingService;
+import ru.larionov.backend.accounting.BotValuationService;
 import ru.larionov.backend.dto.*;
 import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.entity.BotOrderEntity;
@@ -22,11 +24,13 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 @Transactional(readOnly = true)
@@ -42,6 +46,7 @@ public class BotService {
     private final ExchangeRuntimeService exchangeRuntimeService;
     private final BotEventService eventService;
     private final AccountingService accountingService;
+    private final BotValuationService valuationService;
     private final ObjectMapper objectMapper;
 
     public List<BotListItemDto> list() {
@@ -94,7 +99,16 @@ public class BotService {
                 reserved,
                 open.size(),
                 botRuntimeService.queueSize(id),
-                recent.stream().limit(50).map(BotOrderView::of).toList()
+                botRuntimeService.strategySnapshot(id).orElse(null),
+                // Только активные заявки. Раньше сюда шли последние 200 ордеров ЛЮБОГО
+                // статуса, и виджет состояния показывал давно исполненные и отменённые
+                // вперемешку с живыми — уровень выглядел занятым ордером, которого
+                // на бирже уже нет. История и так есть ниже: книга сделок и журнал событий.
+                open.stream()
+                        .sorted(Comparator.comparing(BotOrderEntity::getCreatedAt,
+                                Comparator.nullsLast(Comparator.naturalOrder())))
+                        .map(BotOrderView::of)
+                        .toList()
         );
     }
 
@@ -103,9 +117,8 @@ public class BotService {
         return eventService.recent(id, limit).stream().map(BotEventDto::of).toList();
     }
 
-    public BotAccountingDto accounting(UUID id, Boolean dryRun) {
-        requireBot(id);
-        return accountingService.summary(id, resolveDryRun(id, dryRun));
+    public BotValuationDto accounting(UUID id, Boolean dryRun) {
+        return valuationService.accounting(requireBot(id), dryRun);
     }
 
     public List<MoneyLedgerDto> ledger(UUID id, Boolean dryRun) {
@@ -169,6 +182,7 @@ public class BotService {
         // Журнал ордеров (bot_order) остаётся намеренно: это финансовая запись.
         eventService.deleteAllForBot(id);
         botRepo.deleteById(id);
+        valuationService.forget(id);
     }
 
     // ==============================
@@ -243,8 +257,21 @@ public class BotService {
                 b.getExchangeConnectionId(),
                 connectionName,
                 b.isActive(),
-                runtimeOrDefault(b.getId())
+                runtimeOrDefault(b.getId()),
+                valuationOrEmpty(b)
         );
+    }
+
+    /**
+     * Сбой оценки не должен ронять весь список: остальные боты в нём ни при чём.
+     */
+    private BotValuationDto valuationOrEmpty(BotEntity b) {
+        try {
+            return valuationService.valuation(b);
+        } catch (Exception e) {
+            log.warn("Не удалось оценить бота {}: {}", b.getId(), e.getMessage());
+            return BotValuationDto.empty(false);
+        }
     }
 
     private BotDetailDto toDetail(BotEntity b) {

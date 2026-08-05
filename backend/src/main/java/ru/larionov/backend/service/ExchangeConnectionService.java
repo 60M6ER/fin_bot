@@ -1,11 +1,14 @@
 package ru.larionov.backend.service;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import ru.larionov.backend.accounting.BotValuationService;
 import ru.larionov.backend.dto.*;
+import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.entity.ExchangeConnectionEntity;
 import ru.larionov.backend.enums.ExchangeType;
 import ru.larionov.backend.exception.NotFoundException;
@@ -18,8 +21,11 @@ import ru.larionov.backend.security.SecretCipher;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 @Transactional(readOnly = true)
@@ -30,10 +36,20 @@ public class ExchangeConnectionService {
     private final ExchangeRuntimeService runtimeService;
     private final ExchangeConnectionContextResolver contextResolver;
     private final SecretCipher cipher;
+    private final BotValuationService valuationService;
     private final ObjectMapper objectMapper;
 
     public Page<ExchangeConnectionListItemDto> list(Pageable pageable) {
-        return repo.findAll(pageable).map(this::toListItem);
+        Page<ExchangeConnectionEntity> page = repo.findAll(pageable);
+
+        // Ботов забираем одним запросом и группируем в памяти: иначе оценка каждой
+        // строки лезла бы в БД отдельно, а список опрашивается фронтендом постоянно.
+        Map<UUID, List<BotEntity>> botsByConnection = botRepo.findAll().stream()
+                .filter(b -> b.getExchangeConnectionId() != null)
+                .collect(Collectors.groupingBy(BotEntity::getExchangeConnectionId));
+
+        return page.map(e -> toListItem(
+                e, botsByConnection.getOrDefault(e.getId(), List.of())));
     }
 
     public ExchangeConnectionDetailDto get(UUID id) {
@@ -182,7 +198,7 @@ public class ExchangeConnectionService {
     // MAPPING
     // ==============================
 
-    private ExchangeConnectionListItemDto toListItem(ExchangeConnectionEntity e) {
+    private ExchangeConnectionListItemDto toListItem(ExchangeConnectionEntity e, List<BotEntity> bots) {
         // Раньше здесь был хардкод INACTIVE, из-за чего список всегда показывал
         // «выключено» независимо от реальности.
         RuntimeInfo info = runtimeService.runtimeInfo(e.getId());
@@ -193,7 +209,8 @@ public class ExchangeConnectionService {
                 e.getName(),
                 e.isActive(),
                 info.state(),
-                info.lastError() == null ? "" : info.lastError()
+                info.lastError() == null ? "" : info.lastError(),
+                valuationOrEmpty(e.getId(), bots)
         );
     }
 
@@ -215,8 +232,22 @@ public class ExchangeConnectionService {
                 e.getAccountId(),
                 contextResolver.parseSettings(e),
                 e.getCreatedAt(),
-                e.getUpdatedAt()
+                e.getUpdatedAt(),
+                valuationOrEmpty(e.getId(), botRepo.findAllByExchangeConnectionIdOrderByNameAsc(e.getId()))
         );
+    }
+
+    /**
+     * Сбой оценки не должен ронять экран подключения: ключи и настройки нужны
+     * пользователю именно тогда, когда что-то не работает.
+     */
+    private ConnectionValuationDto valuationOrEmpty(UUID connectionId, List<BotEntity> bots) {
+        try {
+            return valuationService.connectionValuation(connectionId, bots);
+        } catch (Exception e) {
+            log.warn("Не удалось оценить подключение {}: {}", connectionId, e.getMessage());
+            return ConnectionValuationDto.empty();
+        }
     }
 
     private boolean isPresent(String v) {

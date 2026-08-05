@@ -1,18 +1,25 @@
 package ru.larionov.backend.strategy;
 
 import lombok.RequiredArgsConstructor;
+import ru.larionov.backend.accounting.AccountingService;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
+import ru.larionov.backend.enums.LedgerEntryType;
 import ru.larionov.backend.exchange.api.ExchangeClient;
 import ru.larionov.backend.exchange.api.model.instrument.TradingConstraints;
 import ru.larionov.backend.execution.BotExecutionContext;
 import ru.larionov.backend.execution.ExecutionGateway;
 import ru.larionov.backend.service.BotEventService;
+import ru.larionov.backend.service.StrategyStateService;
 
 import java.time.Clock;
+import java.math.BigDecimal;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
+import java.util.function.Consumer;
+import ru.larionov.backend.accounting.Inventory;
 
 /**
  * Реализация контекста стратегии. До этого этапа их не существовало ни одной —
@@ -30,6 +37,9 @@ public class DefaultStrategyContext implements StrategyContext {
     private final Supplier<ExchangeClient> clientSupplier;
     private final BotEventService events;
     private final Clock clock;
+    private final StrategyStateService stateService;
+    private final AccountingService accounting;
+    private final Consumer<String> stopRequester;
 
     @Override
     public UUID botId() {
@@ -62,6 +72,36 @@ public class DefaultStrategyContext implements StrategyContext {
     }
 
     @Override
+    public <T> Optional<T> loadState(Class<T> type) {
+        return stateService.read(botId, type);
+    }
+
+    @Override
+    public void saveState(Object state) {
+        stateService.write(botId, state);
+    }
+
+    @Override
+    public void ledgerMarker(LedgerEntryType type, String note) {
+        accounting.recordMarker(execution, type, note);
+    }
+
+    @Override
+    public Inventory inventory() {
+        return accounting.inventory(botId, execution.dryRun());
+    }
+
+    @Override
+    public BigDecimal realizedPnl() {
+        return accounting.summary(botId, execution.dryRun()).realizedPnl();
+    }
+
+    @Override
+    public void requestStop(String reason) {
+        stopRequester.accept(reason);
+    }
+
+    @Override
     public void info(String message) {
         events.emit(botId, BotEventLevel.INFO, BotEventType.HOUSEKEEPING, message, Map.of());
     }
@@ -84,6 +124,11 @@ public class DefaultStrategyContext implements StrategyContext {
             case RANGE_EXIT, RISK_BLOCKED, STREAM_RECONNECTED, ORDER_REJECTED -> BotEventLevel.WARN;
             default -> BotEventLevel.INFO;
         };
+        events.emit(botId, level, type, message, Map.of());
+    }
+
+    @Override
+    public void event(BotEventLevel level, BotEventType type, String message) {
         events.emit(botId, level, type, message, Map.of());
     }
 }

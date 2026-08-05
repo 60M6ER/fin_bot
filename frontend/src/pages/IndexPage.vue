@@ -23,11 +23,14 @@
                 <q-item-label caption>{{ c.exchange }}</q-item-label>
               </q-item-section>
               <q-item-section side>
-                <q-badge
-                  :color="stateColor(c.runtimeState)"
-                  :label="stateLabel(c.runtimeState)"
-                  outline
-                />
+                <div class="row items-center q-gutter-sm no-wrap">
+                  <connection-valuation-cell :valuation="c.valuation" dense />
+                  <q-badge
+                    :color="stateColor(c.runtimeState)"
+                    :label="stateLabel(c.runtimeState)"
+                    outline
+                  />
+                </div>
               </q-item-section>
             </q-item>
 
@@ -57,7 +60,8 @@
                 </q-item-label>
               </q-item-section>
               <q-item-section side>
-                <div class="row items-center q-gutter-xs">
+                <div class="row items-center q-gutter-sm no-wrap">
+                  <bot-valuation-cell :valuation="b.valuation" dense />
                   <!-- Бот, который должен работать, но не работает: супервизор его поднимает -->
                   <q-icon
                     v-if="needsAttention(b)"
@@ -90,6 +94,8 @@
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { apiClient } from 'src/services/apiClient'
 import { stateColor, stateLabel, isRuntimeActive } from 'src/services/runtimeState'
+import BotValuationCell from 'components/BotValuationCell.vue'
+import ConnectionValuationCell from 'components/ConnectionValuationCell.vue'
 
 const connections = ref([])
 const bots = ref([])

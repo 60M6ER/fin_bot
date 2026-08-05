@@ -11,5 +11,7 @@ public record ExchangeConnectionListItemDto(
         String name,
         boolean active,         // desired/факт по твоей семантике (B)
         RuntimeState runtimeState,
-        String runtimeError      // nullable
+        String runtimeError,     // nullable
+        /** Никогда не null: шаблоны читают поля без проверок. */
+        ConnectionValuationDto valuation
 ) {}

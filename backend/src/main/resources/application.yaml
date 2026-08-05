@@ -1,6 +1,8 @@
 spring:
   application:
     name: backend
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5435/trading_bot}
     username: ${DB_USERNAME:trading_bot}
@@ -35,3 +37,7 @@ telegram:
 
 server:
   port: 8080
+  shutdown: graceful
+  compression:
+    enabled: true
+    mime-types: text/html,text/css,application/javascript,application/json,image/svg+xml
