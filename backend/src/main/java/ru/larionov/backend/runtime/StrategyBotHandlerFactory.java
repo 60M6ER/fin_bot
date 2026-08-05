@@ -9,15 +9,17 @@ import ru.larionov.backend.exchange.api.model.id.AccountId;
 import ru.larionov.backend.exchange.api.model.id.InstrumentId;
 import ru.larionov.backend.exchange.api.model.instrument.TradingConstraints;
 import ru.larionov.backend.execution.*;
-import ru.larionov.backend.exchange.tinvest.TInvestExchangeHandler;
 import ru.larionov.backend.repository.BotOrderRepository;
 import ru.larionov.backend.service.BotEventService;
 import ru.larionov.backend.service.ExchangeHandler;
 import ru.larionov.backend.service.ExchangeRuntimeService;
+import ru.larionov.backend.service.StrategyStateService;
 import ru.larionov.backend.strategy.BotRuntimeConfig;
 import ru.larionov.backend.strategy.Strategy;
 import ru.larionov.backend.strategy.StrategyFactory;
 import tools.jackson.databind.ObjectMapper;
+
+import java.util.function.Consumer;
 
 /**
  * Собирает работающего бота из конфигурации: стратегия, гейтвей, лимиты, подписки.
@@ -37,9 +39,11 @@ public class StrategyBotHandlerFactory {
     private final BotEventService events;
     private final AccountingService accounting;
     private final TradingScheduler scheduler;
+    private final StrategyStateService strategyStateService;
+    private final LastPriceCache lastPriceCache;
     private final ObjectMapper objectMapper;
 
-    public StrategyBotHandler create(BotEntity bot, Runnable onFatal) {
+    public StrategyBotHandler create(BotEntity bot, Consumer<String> onStopRequested, Runnable onFatal) {
         BotRuntimeConfig config = parseConfig(bot);
 
         if (!config.hasInstrument()) {
@@ -52,7 +56,7 @@ public class StrategyBotHandlerFactory {
                 .orElseThrow(() -> new IllegalStateException(
                         "Подключение бота не активно. Запустите его перед запуском бота."));
 
-        AccountId accountId = resolveAccountId(exchangeHandler);
+        AccountId accountId = exchangeHandler.tradingAccountId();
         InstrumentId instrumentId = new InstrumentId(config.instrumentUid(), null);
 
         // Лотность и шаг цены нужны стратегии для округления — тянем один раз при старте.
@@ -89,7 +93,8 @@ public class StrategyBotHandlerFactory {
 
         return new StrategyBotHandler(
                 bot, config, strategy, exchangeHandler, gateway, execContext,
-                constraints, events, scheduler, onFatal);
+                constraints, events, scheduler, strategyStateService, accounting,
+                lastPriceCache, onStopRequested, onFatal);
     }
 
     private BotRuntimeConfig parseConfig(BotEntity bot) {
@@ -103,22 +108,4 @@ public class StrategyBotHandlerFactory {
         }
     }
 
-    /**
-     * Счёт берём тот, что подтвердил health-check подключения. Догадываться здесь нельзя:
-     * ошибка означает торговлю на чужом счёте.
-     */
-    private AccountId resolveAccountId(ExchangeHandler handler) {
-        if (handler instanceof TInvestExchangeHandler t) {
-            AccountId resolved = t.resolvedAccountId();
-            if (resolved != null) {
-                return resolved;
-            }
-            String configured = t.context().accountId();
-            if (configured != null && !configured.isBlank()) {
-                return new AccountId(configured);
-            }
-        }
-        throw new IllegalStateException(
-                "Не определён торговый счёт подключения. Выберите счёт в настройках подключения.");
-    }
 }

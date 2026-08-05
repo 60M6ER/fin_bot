@@ -64,6 +64,19 @@ public final class TInvestExchangeHandler implements ExchangeHandler {
     }
 
     @Override
+    public AccountId tradingAccountId() {
+        AccountId resolved = resolvedAccountId;
+        if (resolved != null) {
+            return resolved;
+        }
+        if (connection.hasAccountId()) {
+            return new AccountId(connection.accountId());
+        }
+        throw new IllegalStateException(
+                "Не определён торговый счёт подключения. Выберите счёт в настройках подключения.");
+    }
+
+    @Override
     public void start() {
         if (started.get()) {
             return;

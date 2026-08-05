@@ -1,6 +1,7 @@
 package ru.larionov.backend.runtime;
 
 import lombok.extern.slf4j.Slf4j;
+import ru.larionov.backend.accounting.AccountingService;
 import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
@@ -17,6 +18,7 @@ import ru.larionov.backend.execution.*;
 import ru.larionov.backend.service.BotEventService;
 import ru.larionov.backend.service.BotRuntimeService;
 import ru.larionov.backend.service.ExchangeHandler;
+import ru.larionov.backend.service.StrategyStateService;
 import ru.larionov.backend.strategy.*;
 
 import java.time.Clock;
@@ -25,6 +27,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 /**
  * Реальный хендлер бота: собирает движок и держит его жизненный цикл.
@@ -48,6 +51,7 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
     private final TradingScheduler scheduler;
     private final long tickIntervalSeconds;
     private final BotRuntimeConfig.PriceSource priceSource;
+    private final LastPriceCache lastPriceCache;
     private final Runnable onFatal;
 
     private final BotEventLoop loop;
@@ -63,6 +67,10 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
                        TradingConstraints constraints,
                        BotEventService events,
                        TradingScheduler scheduler,
+                       StrategyStateService stateService,
+                       AccountingService accounting,
+                       LastPriceCache lastPriceCache,
+                       Consumer<String> onStopRequested,
                        Runnable onFatal) {
         this.botId = bot.getId();
         this.strategy = strategy;
@@ -73,11 +81,13 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
         this.scheduler = scheduler;
         this.tickIntervalSeconds = runtimeConfig.tickIntervalSeconds();
         this.priceSource = runtimeConfig.priceSource();
+        this.lastPriceCache = lastPriceCache;
         this.onFatal = onFatal;
 
         this.context = new DefaultStrategyContext(
                 botId, execContext, gateway, constraints,
-                exchangeHandler::client, events, Clock.systemUTC());
+                exchangeHandler::client, events, Clock.systemUTC(), stateService, accounting,
+                reason -> scheduler.executeControl(() -> onStopRequested.accept(reason)));
 
         this.loop = new BotEventLoop(botId, this, QUEUE_CAPACITY, MAX_CONSECUTIVE_FAILURES, this::fatal);
     }
@@ -101,7 +111,7 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
         log.info("Bot {} reconciled on start: openOrders={}, position={}",
                 botId, reconciled.openOrders().size(), reconciled.positionLots());
 
-        strategy.onStart(context);
+        strategy.onStart(context, reconciled);
 
         // Результат стартовой сверки обязан дойти до стратегии ДО первого её решения.
         // Раньше он оставался только в логе: стратегия узнавала о расхождении позиции
@@ -199,12 +209,20 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
                     var mid = book.bids().get(0).price().value()
                             .add(book.asks().get(0).price().value())
                             .divide(java.math.BigDecimal.valueOf(2), 9, java.math.RoundingMode.HALF_UP);
+                    // Кэш наполняем ЗДЕСЬ, а не в BotEventLoop: цикл склеивает цены
+                    // (priceQueued) и полностью отбрасывает их после close(), а рыночная
+                    // оценка должна видеть каждый тик и жить после остановки бота.
+                    lastPriceCache.put(botId, mid, book.ts());
                     loop.submitPrice(new LastPrice(book.instrumentId(),
                             new ru.larionov.backend.exchange.api.model.market.Price(mid, null), book.ts()));
                 });
             } else {
                 md.subscribeLastPrice(instruments, p -> {
-                    if (isOurs(p.instrumentId())) loop.submitPrice(p);
+                    if (!isOurs(p.instrumentId())) return;
+                    if (p.price() != null) {
+                        lastPriceCache.put(botId, p.price().value(), p.ts());
+                    }
+                    loop.submitPrice(p);
                 });
             }
 
@@ -216,7 +234,12 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
         });
 
         client.ordersStream().ifPresent(os -> {
-            os.subscribeOrderStates(execContext.accountId(), loop::submitOrderUpdate);
+            os.subscribeOrderStates(execContext.accountId(), state -> {
+                if (state == null || !isOurs(state.instrumentId())) {
+                    return;
+                }
+                loop.submitOrderUpdate(state);
+            });
             os.onReconnect(loop::submitReconnect);
         });
     }
@@ -288,5 +311,9 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
     /** Для UI: сколько событий ждёт обработки. Растущая очередь — признак беды. */
     public int queueSize() {
         return loop.queueSize();
+    }
+
+    public java.util.Optional<StrategySnapshot> strategySnapshot() {
+        return strategy.snapshot();
     }
 }

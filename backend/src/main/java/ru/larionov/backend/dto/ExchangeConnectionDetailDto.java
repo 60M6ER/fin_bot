@@ -23,5 +23,6 @@ public record ExchangeConnectionDetailDto(
         String accountId,
         ExchangeConnectionSettings settings,
         Instant createdAt,
-        Instant updatedAt
+        Instant updatedAt,
+        ConnectionValuationDto valuation
 ) {}

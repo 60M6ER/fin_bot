@@ -5,6 +5,8 @@ import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.larionov.backend.execution.BotOrderView;
 import ru.larionov.backend.execution.ReconcileResult;
 
+import java.util.Optional;
+
 /**
  * Стратегия — реакция на события, а не цикл опроса.
  *
@@ -14,6 +16,11 @@ import ru.larionov.backend.execution.ReconcileResult;
 public interface Strategy {
 
     void onStart(StrategyContext ctx);
+
+    /** Старт с уже выполненной сверкой, чтобы стратегия не гадала о позиции после рестарта. */
+    default void onStart(StrategyContext ctx, ReconcileResult initialState) {
+        onStart(ctx);
+    }
 
     void onStop();
 
@@ -62,5 +69,9 @@ public interface Strategy {
      * и проверка, не залип ли стрим.
      */
     default void onTick() {
+    }
+
+    default Optional<StrategySnapshot> snapshot() {
+        return Optional.empty();
     }
 }

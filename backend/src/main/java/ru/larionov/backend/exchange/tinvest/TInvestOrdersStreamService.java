@@ -13,6 +13,7 @@ import ru.larionov.backend.exchange.api.model.stream.StreamHealth;
 import ru.tinkoff.piapi.contract.v1.MoneyValue;
 import ru.tinkoff.piapi.contract.v1.OrderDirection;
 import ru.tinkoff.piapi.contract.v1.OrderExecutionReportStatus;
+import ru.tinkoff.piapi.contract.v1.OrderTrade;
 import ru.tinkoff.piapi.contract.v1.OrderStateStreamRequest;
 import ru.tinkoff.piapi.contract.v1.OrderStateStreamResponse;
 import ru.ttech.piapi.core.connector.resilience.ResilienceServerSideStreamWrapper;
@@ -21,6 +22,7 @@ import ru.ttech.piapi.core.connector.streaming.StreamServiceStubFactory;
 import ru.ttech.piapi.core.impl.orders.OrderStateStreamWrapperConfiguration;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -175,7 +177,7 @@ public final class TInvestOrdersStreamService implements OrdersStreamService {
         BigDecimal executed = BigDecimal.valueOf(s.getLotsExecuted());
 
         BigDecimal limitPrice = money(s.hasInitialOrderPrice() ? s.getInitialOrderPrice() : null);
-        BigDecimal avgPrice = money(s.hasExecutedOrderPrice() ? s.getExecutedOrderPrice() : null);
+        BigDecimal avgPrice = averageExecutedPrice(s);
         if (avgPrice == null) {
             avgPrice = limitPrice;
         }
@@ -209,6 +211,31 @@ public final class TInvestOrdersStreamService implements OrdersStreamService {
             return null;
         }
         return BigDecimal.valueOf(mv.getUnits()).add(BigDecimal.valueOf(mv.getNano(), 9));
+    }
+
+    static BigDecimal averageExecutedPrice(OrderStateStreamResponse.OrderState state) {
+        BigDecimal total = BigDecimal.ZERO;
+        long shares = 0;
+        for (OrderTrade trade : state.getTradesList()) {
+            if (!trade.hasPrice() || trade.getQuantity() <= 0) {
+                continue;
+            }
+            BigDecimal price = BigDecimal.valueOf(trade.getPrice().getUnits())
+                    .add(BigDecimal.valueOf(trade.getPrice().getNano(), 9));
+            total = total.add(price.multiply(BigDecimal.valueOf(trade.getQuantity())));
+            shares += trade.getQuantity();
+        }
+        if (shares > 0) {
+            return total.divide(BigDecimal.valueOf(shares), 9, RoundingMode.HALF_UP);
+        }
+        if (!state.hasExecutedOrderPrice()) {
+            return null;
+        }
+
+        // В OrderStateStream executedOrderPrice фактически приходит стоимость лота.
+        // Для внутренней модели нужна цена одной бумаги: ledger сам умножит её на lotSize.
+        return money(state.getExecutedOrderPrice())
+                .divide(BigDecimal.valueOf(Math.max(1, state.getLotSize())), 9, RoundingMode.HALF_UP);
     }
 
     private static OrderSide mapSide(OrderDirection d) {

@@ -36,6 +36,7 @@ dependencies {
     testImplementation 'org.springframework.boot:spring-boot-starter-data-jpa-test'
     testImplementation 'org.springframework.boot:spring-boot-starter-liquibase-test'
     testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+    testRuntimeOnly 'com.h2database:h2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     implementation 'ru.tinkoff.piapi:java-sdk-core:1.49.3'
     implementation "org.telegram:telegrambots-spring-boot-starter:6.9.7.1"
@@ -43,4 +44,49 @@ dependencies {
 
 tasks.named('test') {
     useJUnitPlatform()
+}
+
+def frontendDir = file('../frontend')
+def frontendDist = file('../frontend/dist/spa')
+def skipFrontend = providers.gradleProperty('skipFrontend')
+        .map { it.toBoolean() }
+        .orElse(false)
+
+tasks.register('frontendInstall', Exec) {
+    group = 'build'
+    description = 'Installs locked frontend dependencies.'
+    workingDir frontendDir
+    commandLine 'npm', 'ci', '--ignore-scripts'
+    inputs.files(
+            file('../frontend/package.json'),
+            file('../frontend/package-lock.json')
+    )
+    outputs.file(file('../frontend/node_modules/.package-lock.json'))
+    onlyIf { !skipFrontend.get() }
+}
+
+tasks.register('buildFrontend', Exec) {
+    group = 'build'
+    description = 'Builds the Quasar SPA that is packaged into the Spring Boot jar.'
+    dependsOn tasks.named('frontendInstall')
+    workingDir frontendDir
+    commandLine 'npm', 'run', 'build'
+    inputs.files(
+            file('../frontend/package.json'),
+            file('../frontend/package-lock.json'),
+            file('../frontend/quasar.config.js'),
+            file('../frontend/postcss.config.js')
+    )
+    inputs.dir(file('../frontend/src'))
+    inputs.dir(file('../frontend/public'))
+    inputs.dir(file('../frontend/scripts'))
+    outputs.dir(frontendDist)
+    onlyIf { !skipFrontend.get() }
+}
+
+tasks.named('bootJar') {
+    dependsOn tasks.named('buildFrontend')
+    from(frontendDist) {
+        into 'BOOT-INF/classes/static'
+    }
 }

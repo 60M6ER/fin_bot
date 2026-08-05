@@ -41,6 +41,17 @@ public class TradingScheduler {
         }, intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
     }
 
+    /** Управляющее действие выполняется вне event loop конкретного бота. */
+    public void executeControl(Runnable task) {
+        executor.execute(() -> {
+            try {
+                task.run();
+            } catch (Exception e) {
+                log.error("Scheduled bot control action failed: {}", e.getMessage(), e);
+            }
+        });
+    }
+
     @PreDestroy
     public void shutdown() {
         executor.shutdownNow();

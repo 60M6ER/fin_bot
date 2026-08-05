@@ -15,8 +15,29 @@ import java.math.RoundingMode;
  */
 public final class GridValidator {
 
+    public record Economics(
+            BigDecimal effectiveStep,
+            BigDecimal stepRate,
+            BigDecimal buyFeeRate,
+            BigDecimal sellFeeRate,
+            BigDecimal roundTripFeeRate,
+            BigDecimal requiredStepRate,
+            BigDecimal commissionCoverageRatio,
+            BigDecimal netPerCycleRate,
+            BigDecimal worstCaseCapital,
+            GridSizing sizing
+    ) {
+    }
+
     private GridValidator() {
     }
+
+    /*
+     * Публичных входа ровно два: validate(...) с рабочим бюджетом и revalidate(...)
+     * с уже посчитанным размером заявки. Две перегрузки ниже — сокращения для ручного
+     * диапазона, они существуют ради тестов и вызывающего кода без бюджета.
+     * Новых перегрузок сюда лучше не добавлять.
+     */
 
     /**
      * @param commissionRate ставка за ОДНУ сторону сделки (0.0005 = 0.05%)
@@ -29,7 +50,9 @@ public final class GridValidator {
                                 BigDecimal commissionRate,
                                 int lotSize,
                                 BigDecimal maxCapital) {
-        validate(cfg, ladder, priceIncrement, new FeeInfo(commissionRate, commissionRate), lotSize, maxCapital);
+        validate(cfg, GridRange.manual(cfg, null), ladder, priceIncrement,
+                new FeeInfo(commissionRate, commissionRate), lotSize, maxCapital,
+                cfg.workingBudget(BigDecimal.ZERO));
     }
 
     /**
@@ -45,6 +68,55 @@ public final class GridValidator {
                                 FeeInfo fees,
                                 int lotSize,
                                 BigDecimal maxCapital) {
+        validate(cfg, GridRange.manual(cfg, null), ladder, priceIncrement, fees, lotSize, maxCapital,
+                cfg.workingBudget(BigDecimal.ZERO));
+    }
+
+    /**
+     * Канонический вход: сам считает размер заявки.
+     *
+     * @param workingBudget рабочий бюджет бота; игнорируется в режиме FIXED_LOTS
+     */
+    public static Economics validate(GridConfig cfg,
+                                     GridRange range,
+                                     GridLadder ladder,
+                                     BigDecimal priceIncrement,
+                                     FeeInfo fees,
+                                     int lotSize,
+                                     BigDecimal maxCapital,
+                                     BigDecimal workingBudget) {
+
+        GridSizing sizing = cfg.budgetSized()
+                ? GridSizing.fromBudget(cfg, ladder, lotSize, workingBudget)
+                : GridSizing.fixed(cfg.lotsPerOrder(), ladder, lotSize);
+
+        return check(cfg, range, ladder, priceIncrement, fees, maxCapital, sizing);
+    }
+
+    /**
+     * Повторная проверка с УЖЕ посчитанным размером заявки.
+     *
+     * Нужна на пути обновления комиссий: пересчитывать размер там нельзя, иначе
+     * у бота с реинвестированием прибыли объём заявки менялся бы посреди жизни сетки,
+     * между покупкой и её встречной продажей.
+     */
+    public static Economics revalidate(GridConfig cfg,
+                                       GridRange range,
+                                       GridLadder ladder,
+                                       BigDecimal priceIncrement,
+                                       FeeInfo fees,
+                                       BigDecimal maxCapital,
+                                       GridSizing frozenSizing) {
+        return check(cfg, range, ladder, priceIncrement, fees, maxCapital, frozenSizing);
+    }
+
+    private static Economics check(GridConfig cfg,
+                                   GridRange range,
+                                   GridLadder ladder,
+                                   BigDecimal priceIncrement,
+                                   FeeInfo fees,
+                                   BigDecimal maxCapital,
+                                   GridSizing sizing) {
 
         BigDecimal step = ladder.effectiveStep();
 
@@ -56,14 +128,14 @@ public final class GridValidator {
                     ("Уровни сетки слиплись: на диапазоне %s..%s при %d уровнях шаг оказался "
                             + "меньше шага цены инструмента (%s). Уменьшите число уровней "
                             + "или расширьте диапазон.")
-                            .formatted(cfg.lowerPrice().toPlainString(), cfg.upperPrice().toPlainString(),
-                                    cfg.levels(),
+                            .formatted(range.lower().toPlainString(), range.upper().toPlainString(),
+                                    range.levels(),
                                     priceIncrement == null ? "?" : priceIncrement.toPlainString()));
         }
 
         // Сравниваем в процентах от цены: комиссия берётся с оборота, а не с шага.
         // Худший случай — верх диапазона: там шаг в процентах наименьший.
-        BigDecimal referencePrice = cfg.upperPrice();
+        BigDecimal referencePrice = range.upper();
         BigDecimal stepPct = step.divide(referencePrice, 9, RoundingMode.HALF_UP);
 
         FeeInfo feeInfo = fees == null ? new FeeInfo(BigDecimal.ZERO, BigDecimal.ZERO) : fees;
@@ -89,14 +161,12 @@ public final class GridValidator {
                                     cfg.minStepToCommissionRatio().toPlainString()));
         }
 
+        // Худший случай: все уровни покупки выкуплены по своей цене.
+        BigDecimal worstCase = sizing.worstCaseNotional();
+        // В бюджетных режимах worstCase <= бюджета по построению, поэтому проверка ниже
+        // может сработать только при maxCapital < budget — а это настоящая
+        // рассогласованность двух настроек, и сказать о ней надо.
         if (maxCapital != null && maxCapital.signum() > 0) {
-            // Худший случай: все уровни выкуплены по своей цене.
-            BigDecimal worstCase = BigDecimal.ZERO;
-            for (int i = 0; i < ladder.levelCount(); i++) {
-                worstCase = worstCase.add(ladder.priceAt(i)
-                        .multiply(BigDecimal.valueOf(cfg.lotsPerOrder()))
-                        .multiply(BigDecimal.valueOf(lotSize <= 0 ? 1 : lotSize)));
-            }
             if (worstCase.compareTo(maxCapital) > 0) {
                 throw new IllegalStateException(
                         ("Сетка не помещается в лимит капитала: при полном выкупе всех уровней "
@@ -106,6 +176,13 @@ public final class GridValidator {
                                         maxCapital.toPlainString()));
             }
         }
+
+        BigDecimal coverage = roundTripPct.signum() == 0
+                ? null
+                : stepPct.divide(roundTripPct, 9, RoundingMode.HALF_UP);
+        return new Economics(
+                step, stepPct, buyFeePct, sellFeePct, roundTripPct, required,
+                coverage, stepPct.subtract(roundTripPct), worstCase, sizing);
     }
 
     private static String pct(BigDecimal fraction) {

@@ -12,5 +12,7 @@ public record BotListItemDto(
         UUID exchangeConnectionId,
         String exchangeConnectionName,
         boolean active,
-        RuntimeInfo runtime
+        RuntimeInfo runtime,
+        /** Никогда не null: шаблоны читают valuation.totalPnl без проверок. */
+        BotValuationDto valuation
 ) {}

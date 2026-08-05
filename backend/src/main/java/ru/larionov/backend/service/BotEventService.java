@@ -152,6 +152,7 @@ public class BotEventService {
             case ORDER_REJECTED -> "Заявка отклонена";
             case CYCLE_CLOSED -> "Цикл закрыт";
             case RANGE_EXIT -> "Выход из диапазона";
+            case GRID_REPLACED -> "Диапазон переставлен";
             case RISK_BLOCKED -> "Сработал лимит";
             case STREAM_RECONNECTED -> "Переподключение стрима";
             case RECONCILED -> "Сверка с биржей";

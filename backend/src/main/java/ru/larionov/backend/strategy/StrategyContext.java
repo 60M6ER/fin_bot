@@ -1,12 +1,17 @@
 package ru.larionov.backend.strategy;
 
 import ru.larionov.backend.enums.BotEventType;
+import ru.larionov.backend.enums.BotEventLevel;
+import ru.larionov.backend.enums.LedgerEntryType;
+import ru.larionov.backend.accounting.Inventory;
 import ru.larionov.backend.exchange.api.ExchangeClient;
 import ru.larionov.backend.exchange.api.model.instrument.TradingConstraints;
 import ru.larionov.backend.execution.BotExecutionContext;
 import ru.larionov.backend.execution.ExecutionGateway;
 
 import java.time.Clock;
+import java.math.BigDecimal;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -33,6 +38,20 @@ public interface StrategyContext {
 
     Clock clock();
 
+    <T> Optional<T> loadState(Class<T> type);
+
+    void saveState(Object state);
+
+    /** Неденежная отметка стратегии в общей книге операций. */
+    void ledgerMarker(LedgerEntryType type, String note);
+
+    Inventory inventory();
+
+    BigDecimal realizedPnl();
+
+    /** Асинхронно и навсегда выключить runtime вместе с persisted desired-state. */
+    void requestStop(String reason);
+
     void info(String message);
 
     void warn(String message);
@@ -41,4 +60,6 @@ public interface StrategyContext {
 
     /** Событие с явным типом — попадёт в журнал, консоль и, если нужно, в Telegram. */
     void event(BotEventType type, String message);
+
+    void event(BotEventLevel level, BotEventType type, String message);
 }

@@ -10,6 +10,7 @@ import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.runtime.StrategyBotHandler;
 import ru.larionov.backend.runtime.StrategyBotHandlerFactory;
+import ru.larionov.backend.strategy.StrategySnapshot;
 import ru.larionov.backend.enums.RuntimeState;
 import ru.larionov.backend.exception.NotFoundException;
 import ru.larionov.backend.model.RuntimeInfo;
@@ -21,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
@@ -71,6 +73,13 @@ public class BotRuntimeService {
     public int queueSize(UUID botId) {
         BotHandler h = handlers.get(botId);
         return h instanceof StrategyBotHandler s ? s.queueSize() : 0;
+    }
+
+    public Optional<StrategySnapshot> strategySnapshot(UUID botId) {
+        BotHandler handler = handlers.get(botId);
+        return handler instanceof StrategyBotHandler strategyHandler
+                ? strategyHandler.strategySnapshot()
+                : Optional.empty();
     }
 
     // ==============================
@@ -311,7 +320,16 @@ public class BotRuntimeService {
      * она зависит от ExchangeRuntimeService, а тот — от этого сервиса.
      */
     private BotHandler createHandler(BotEntity bot) {
-        return handlerFactory.getObject().create(bot, () -> stopRuntimeOnly(bot.getId(), "фатальный сбой движка"));
+        return handlerFactory.getObject().create(
+                bot,
+                reason -> stopPermanently(bot.getId(), reason),
+                () -> stopRuntimeOnly(bot.getId(), "фатальный сбой движка"));
+    }
+
+    private void stopPermanently(UUID botId, String reason) {
+        deactivate(botId);
+        runtime.put(botId, new RuntimeInfo(botId, RuntimeState.INACTIVE, reason, Instant.now()));
+        log.error("Bot permanently stopped: id={}, reason={}", botId, reason);
     }
 
     public interface BotHandler {

@@ -1,6 +1,7 @@
 package ru.larionov.backend.dto;
 
 import ru.larionov.backend.execution.BotOrderView;
+import ru.larionov.backend.strategy.StrategySnapshot;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -18,5 +19,6 @@ public record BotTradingStateDto(
         BigDecimal reservedByBuyOrders,
         int openOrdersCount,
         int queueSize,
+        StrategySnapshot strategySnapshot,
         List<BotOrderView> orders
 ) {}

@@ -1,0 +1,19 @@
+databaseChangeLog:
+  - changeSet:
+      id: 072-bot-strategy-state
+      author: boris
+      comment: Текущий диапазон стратегии, который должен переживать рестарт процесса.
+      changes:
+        - createTable:
+            tableName: bot_strategy_state
+            columns:
+              - column: { name: bot_id, type: uuid, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: state, type: jsonb, constraints: { nullable: false } }
+              - column: { name: updated_at, type: timestamp with time zone, defaultValueComputed: CURRENT_TIMESTAMP, constraints: { nullable: false } }
+        - addForeignKeyConstraint:
+            baseTableName: bot_strategy_state
+            baseColumnNames: bot_id
+            referencedTableName: bot
+            referencedColumnNames: id
+            constraintName: fk_bot_strategy_state_bot
+            onDelete: CASCADE

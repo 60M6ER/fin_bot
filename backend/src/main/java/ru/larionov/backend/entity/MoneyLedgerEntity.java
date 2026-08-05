@@ -15,7 +15,13 @@ import java.util.UUID;
 @AllArgsConstructor
 @Builder
 @Entity
-@Table(name = "money_ledger")
+@Table(
+        name = "money_ledger",
+        uniqueConstraints = @UniqueConstraint(
+                name = "uq_money_ledger_order_type_cum",
+                columnNames = {"order_id", "entry_type", "executed_lots_cum"}
+        )
+)
 public class MoneyLedgerEntity {
 
     @Id

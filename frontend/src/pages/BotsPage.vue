@@ -37,7 +37,8 @@
               </q-item-section>
 
               <q-item-section side>
-                <div class="row items-center q-gutter-xs">
+                <div class="row items-center q-gutter-sm no-wrap">
+                  <bot-valuation-cell :valuation="item.valuation" />
                   <q-icon v-if="needsAttention(item)" name="sync_problem" color="warning" size="xs">
                     <q-tooltip>Должен работать, но не запущен</q-tooltip>
                   </q-icon>
@@ -220,9 +221,8 @@
                     <GridConfigForm
                       v-model="editForm.strategyConfig"
                       :disable="saving || detail.active"
-                      :commission-rate="commissionRate"
-                      :price-increment="priceIncrement"
-                      :open-orders="state.orders"
+                      :exchange="selectedExchange"
+                      :connection-id="editForm.exchangeConnectionId"
                     />
                   </div>
 
@@ -302,10 +302,61 @@
               <q-card-section>
                 <div class="accounting-grid">
                   <div class="metric-tile">
+                    <div class="metric-label">Баланс бота</div>
+                    <div class="metric-value mono">
+                      {{ formatMoneyWithCurrency(accounting.equity, accounting.currency) }}
+                    </div>
+                    <div class="metric-hint">
+                      <template v-if="accounting.equity === null || accounting.equity === undefined">
+                        {{ accounting.budget === null || accounting.budget === undefined
+                          ? 'бюджет не задан' : 'нет актуальной цены' }}
+                      </template>
+                      <template v-else>
+                        бюджет {{ formatMoney(accounting.workingBudget) }}
+                      </template>
+                    </div>
+                  </div>
+                  <div class="metric-tile">
+                    <div class="metric-label">Общий P/L</div>
+                    <div class="metric-value" :class="moneyTone(accounting.totalPnl)">
+                      {{ formatSignedMoney(accounting.totalPnl, accounting.currency) }}
+                    </div>
+                    <div class="metric-hint">реализованный + нереализованный</div>
+                  </div>
+                  <div class="metric-tile">
                     <div class="metric-label">Реализованный P/L</div>
                     <div class="metric-value" :class="moneyTone(accounting.realizedPnl)">
                       {{ formatSignedMoney(accounting.realizedPnl, accounting.currency) }}
                     </div>
+                  </div>
+                  <div class="metric-tile">
+                    <div class="metric-label">Нереализованный P/L</div>
+                    <div class="metric-value" :class="moneyTone(accounting.unrealizedPnl)">
+                      {{ formatSignedMoney(accounting.unrealizedPnl, accounting.currency) }}
+                    </div>
+                  </div>
+                  <div class="metric-tile">
+                    <div class="metric-label">Рыночная стоимость</div>
+                    <div class="metric-value mono">
+                      {{ formatMoneyWithCurrency(accounting.marketValue, accounting.currency) }}
+                    </div>
+                    <div class="metric-hint">
+                      <template v-if="accounting.lastPrice !== null && accounting.lastPrice !== undefined">
+                        по {{ formatMoney(accounting.lastPrice) }} от
+                        {{ formatMoneyTime(accounting.lastPriceAt) }}
+                      </template>
+                      <template v-else>цена из потока не получена</template>
+                    </div>
+                  </div>
+                  <div
+                    v-if="accounting.profitPolicy === 'WITHDRAW'"
+                    class="metric-tile"
+                  >
+                    <div class="metric-label">Выведено прибыли</div>
+                    <div class="metric-value" :class="moneyTone(accounting.withdrawnProfit)">
+                      {{ formatSignedMoney(accounting.withdrawnProfit, accounting.currency) }}
+                    </div>
+                    <div class="metric-hint">не реинвестируется</div>
                   </div>
                   <div class="metric-tile">
                     <div class="metric-label">Денежный поток</div>
@@ -409,49 +460,52 @@
                 </div>
               </q-card-section>
 
+              <template v-if="state.strategySnapshot">
+                <q-separator />
+                <q-card-section class="runtime-range">
+                  <div class="row items-center q-gutter-sm">
+                    <span class="text-caption text-grey-7">Действующий диапазон</span>
+                    <b class="mono">{{ formatMoney(state.strategySnapshot.lowerPrice) }} — {{ formatMoney(state.strategySnapshot.upperPrice) }}</b>
+                    <q-badge :label="rangeOriginLabel(state.strategySnapshot.rangeOrigin)" color="primary" outline />
+                    <q-badge
+                      v-if="state.strategySnapshot.awaitingReplacement"
+                      :label="state.strategySnapshot.replacementDirection === 'DOWN'
+                        ? 'принудительное закрытие вниз'
+                        : 'закрытие перед перестановкой вверх'"
+                      color="orange-8" outline
+                    />
+                    <q-badge v-if="state.strategySnapshot.buyingStopped" label="покупки остановлены" color="warning" outline />
+                    <q-badge v-if="state.strategySnapshot.halted" label="остановлена" color="negative" outline />
+                  </div>
+                  <div class="text-caption text-grey-7 q-mt-xs">
+                    Поколение {{ state.strategySnapshot.generation }} · с {{ formatInstant(state.strategySnapshot.rangeSince) }}
+                    <template v-if="state.strategySnapshot.downwardReplacements > 0">
+                      · вниз {{ state.strategySnapshot.downwardReplacements }}
+                      · зафиксировано {{ formatMoney(state.strategySnapshot.realizedDownwardLoss) }}
+                    </template>
+                  </div>
+                  <div
+                    v-if="state.strategySnapshot.workingBudget !== null
+                      && state.strategySnapshot.workingBudget !== undefined"
+                    class="text-caption text-grey-7"
+                  >
+                    Бюджет {{ formatMoney(state.strategySnapshot.workingBudget) }} ·
+                    задействовано {{ formatMoney(state.strategySnapshot.worstCaseNotional) }}
+                    <template v-if="state.strategySnapshot.sizingMode">
+                      · {{ sizingModeLabel(state.strategySnapshot.sizingMode) }}
+                    </template>
+                  </div>
+                </q-card-section>
+              </template>
+
               <q-separator />
 
-              <q-markup-table flat dense wrap-cells class="orders-table">
-                <thead>
-                  <tr>
-                    <th class="text-left">Уровень</th>
-                    <th class="text-left">Сторона</th>
-                    <th class="text-right">Цена</th>
-                    <th class="text-right">Лоты</th>
-                    <th class="text-right">Комиссия</th>
-                    <th class="text-left">Статус</th>
-                    <th class="text-left">Время</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="o in state.orders" :key="o.id">
-                    <td>{{ o.gridLevel === null ? '—' : o.gridLevel }}</td>
-                    <td>
-                      <q-badge
-                        :color="o.side === 'BUY' ? 'green-7' : 'red-7'"
-                        :label="o.side === 'BUY' ? 'покупка' : 'продажа'"
-                        outline
-                      />
-                    </td>
-                    <td class="text-right mono">{{ formatMoney(o.limitPrice) }}</td>
-                    <td class="text-right mono">{{ o.executedLots }}/{{ o.requestedLots }}</td>
-                    <td class="text-right mono">
-                      {{ formatOrderFee(o) }}
-                      <q-icon v-if="o.fee && !o.feeActual" name="schedule" size="14px" class="q-ml-xs text-warning">
-                        <q-tooltip>Комиссия оценочная</q-tooltip>
-                      </q-icon>
-                    </td>
-                    <td>
-                      <q-badge :color="orderStatusColor(o.status)" :label="orderStatusLabel(o.status)" outline />
-                      <q-tooltip v-if="o.lastError">{{ o.lastError }}</q-tooltip>
-                    </td>
-                    <td class="mono text-caption">{{ formatInstant(o.updatedAt) }}</td>
-                  </tr>
-                  <tr v-if="state.orders.length === 0">
-                    <td colspan="7" class="text-grey">Ордеров пока нет</td>
-                  </tr>
-                </tbody>
-              </q-markup-table>
+              <q-card-section>
+                <grid-state-board
+                  :snapshot="state.strategySnapshot"
+                  :orders="state.orders"
+                />
+              </q-card-section>
             </q-card>
 
             <!-- Лента событий -->
@@ -577,25 +631,14 @@ import {
   eventTypeLabel, isNotifiableEvent
 } from 'src/services/runtimeState'
 import GridConfigForm from 'components/GridConfigForm.vue'
+import BotValuationCell from 'components/BotValuationCell.vue'
+import GridStateBoard from 'components/GridStateBoard.vue'
+import {
+  formatMoney, formatMoneyWithCurrency, formatFeeWithCurrency,
+  formatSignedMoney, moneyTone, formatTime as formatMoneyTime
+} from 'src/services/money'
 
 const toast = inject('toast')
-
-// Ставка комиссии и шаг цены приходят от подключения: без них проверка
-// безубытка в форме считала бы не то, что бэкенд.
-const commissionRate = ref(0.003)
-const priceIncrement = ref(0.01)
-
-async function loadConnectionEconomics (connectionId) {
-  if (!connectionId) return
-  try {
-    const conn = await apiClient.get(`/api/v1/exchange-connections/${connectionId}`)
-    if (conn?.settings?.commissionRate != null) {
-      commissionRate.value = Number(conn.settings.commissionRate)
-    }
-  } catch (e) {
-    console.debug(e)
-  }
-}
 
 const list = ref([])
 const listLoading = ref(false)
@@ -626,6 +669,10 @@ const connectionOptions = computed(() =>
   connections.value.map(c => ({ value: c.id, label: `${c.name} (${c.exchange})` }))
 )
 
+const selectedExchange = computed(() =>
+  connections.value.find(c => c.id === editForm.exchangeConnectionId)?.exchange || null
+)
+
 const canCreate = computed(() =>
   !!createForm.name.trim() &&
   !!createForm.strategyType &&
@@ -654,7 +701,8 @@ const isDirty = computed(() =>
 // Что бот делает прямо сейчас: позиция, заявки, очередь событий.
 const state = ref({
   running: false, dryRun: false, positionLots: 0,
-  reservedByBuyOrders: null, openOrdersCount: 0, queueSize: 0, orders: []
+  reservedByBuyOrders: null, openOrdersCount: 0, queueSize: 0,
+  strategySnapshot: null, orders: []
 })
 const botEvents = ref([])
 const eventLevelFilter = ref('все')
@@ -670,6 +718,16 @@ const filteredEvents = computed(() =>
 
 const ledgerRows = computed(() => ledger.value.slice(0, 50))
 
+const SIZING_MODE_LABELS = {
+  FIXED_LOTS: 'фиксировано лотов',
+  UNIFORM: 'один размер на все уровни',
+  PER_LEVEL: 'поровну денег на уровень'
+}
+
+function sizingModeLabel (mode) {
+  return SIZING_MODE_LABELS[mode] || mode
+}
+
 function emptyAccounting () {
   return {
     dryRun: false,
@@ -679,81 +737,26 @@ function emptyAccounting () {
     paidCommission: 0,
     openLots: 0,
     averageEntryPrice: null,
-    currency: null
+    currency: null,
+    openShares: 0,
+    lastPrice: null,
+    lastPriceAt: null,
+    marketValue: null,
+    unrealizedPnl: null,
+    totalPnl: null,
+    budget: null,
+    workingBudget: null,
+    withdrawnProfit: 0,
+    equity: null,
+    profitPolicy: null,
+    sizingMode: null
   }
-}
-
-function formatMoney (value) {
-  if (value === null || value === undefined) return '—'
-  const n = Number(value)
-  return Number.isNaN(n) ? String(value) : n.toLocaleString('ru-RU', { maximumFractionDigits: 4 })
-}
-
-function formatMoneyWithCurrency (value, currency) {
-  const amount = formatMoney(value)
-  return amount === '—' ? amount : `${amount}${currency ? ` ${currency}` : ''}`
-}
-
-function formatFee (value) {
-  if (value === null || value === undefined) return '—'
-  const n = Number(value)
-  return Number.isNaN(n) ? String(value) : n.toLocaleString('ru-RU', { maximumFractionDigits: 9 })
-}
-
-function formatFeeWithCurrency (value, currency) {
-  const amount = formatFee(value)
-  return amount === '—' ? amount : `${amount}${currency ? ` ${currency}` : ''}`
-}
-
-function formatSignedMoney (value, currency) {
-  if (value === null || value === undefined) return '—'
-  const n = Number(value)
-  if (Number.isNaN(n)) return String(value)
-  const prefix = n > 0 ? '+' : ''
-  return `${prefix}${formatMoney(n)}${currency ? ` ${currency}` : ''}`
-}
-
-function moneyTone (value) {
-  const n = Number(value)
-  if (Number.isNaN(n) || n === 0) return 'text-grey-8'
-  return n > 0 ? 'text-positive' : 'text-negative'
-}
-
-function formatOrderFee (order) {
-  if (order?.fee === null || order?.fee === undefined) return '—'
-  return formatFeeWithCurrency(order.fee, order.feeCurrency)
 }
 
 function formatLots (row) {
   if (row?.lots === null || row?.lots === undefined) return '—'
   const lotSize = row.lotSize && row.lotSize !== 1 ? ` × ${row.lotSize}` : ''
   return `${row.lots}${lotSize}`
-}
-
-function orderStatusColor (status) {
-  switch (status) {
-    case 'FILLED': return 'positive'
-    case 'NEW':
-    case 'PARTIALLY_FILLED': return 'primary'
-    // PENDING — исход постановки неизвестен, его разрешит сверка.
-    case 'PENDING':
-    case 'UNKNOWN': return 'warning'
-    case 'REJECTED': return 'negative'
-    default: return 'grey-6'
-  }
-}
-
-function orderStatusLabel (status) {
-  switch (status) {
-    case 'PENDING': return 'ожидает сверки'
-    case 'NEW': return 'выставлен'
-    case 'PARTIALLY_FILLED': return 'частично'
-    case 'FILLED': return 'исполнен'
-    case 'CANCELLED': return 'снят'
-    case 'REJECTED': return 'отклонён'
-    case 'EXPIRED': return 'истёк'
-    default: return status
-  }
 }
 
 function eventLevelColor (level) {
@@ -786,6 +789,16 @@ function ledgerTypeColor (type) {
     case 'COMMISSION_CORRECTION': return 'warning'
     case 'CYCLE_RESULT': return 'primary'
     default: return 'grey-6'
+  }
+}
+
+function rangeOriginLabel (origin) {
+  switch (origin) {
+    case 'MANUAL': return 'ручной'
+    case 'ATR_INITIAL': return 'ATR'
+    case 'ATR_REPLACED_UP': return 'ATR · выше'
+    case 'ATR_REPLACED_DOWN': return 'ATR · ниже'
+    default: return origin || '—'
   }
 }
 
@@ -943,7 +956,6 @@ async function loadDetail (id) {
     await Promise.all([
       loadStreams(d.exchangeConnectionId),
       loadState(d.id),
-      loadConnectionEconomics(d.exchangeConnectionId),
       // Список подключений мог устареть — без него селект покажет голый UUID.
       connections.value.some(c => c.id === d.exchangeConnectionId) ? Promise.resolve() : loadConnections()
     ])
@@ -1102,6 +1114,18 @@ async function doDelete () {
   overflow: auto;
 }
 
+.runtime-range {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.runtime-ladder {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12px;
+}
+
 .accounting-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(140px, 1fr));
@@ -1126,6 +1150,13 @@ async function doDelete () {
   margin-top: 6px;
   font-size: 18px;
   font-weight: 600;
+  line-height: 1.2;
+}
+
+.metric-hint {
+  margin-top: 4px;
+  color: #9e9e9e;
+  font-size: 11px;
   line-height: 1.2;
 }
 
