@@ -77,47 +77,6 @@ public class TInvestTradingCalendarApi implements TradingCalendarApi {
         return new TradingCalendar(venues);
     }
 
-    @Override
-    public TradingState getState(Instant now) {
-        if (now == null) {
-            now = Instant.now();
-        }
-
-        TradingCalendar calendar = getCalendar(
-                new TradingCalendarQuery(null, now.minusSeconds(3600), now.plusSeconds(3600))
-        );
-
-        boolean tradable = false;
-        Instant nextClose = null;
-        Instant nextOpen = null;
-
-        for (TradingVenueSchedule venue : calendar.venues()) {
-            for (TradingDaySchedule day : venue.days()) {
-                if (day.date() == null) continue;
-
-                for (TradingInterval interval : day.intervals()) {
-                    Instant start = interval.startUtc();
-                    Instant end = interval.endUtc();
-
-                    if (start == null || end == null) continue;
-
-                    if (!now.isBefore(start) && now.isBefore(end)) {
-                        tradable = true;
-                        nextClose = end;
-                    }
-
-                    if (now.isBefore(start)) {
-                        if (nextOpen == null || start.isBefore(nextOpen)) {
-                            nextOpen = start;
-                        }
-                    }
-                }
-            }
-        }
-
-        return new TradingState(tradable, nextClose, nextOpen);
-    }
-
     private static LocalDate toLocalDate(Timestamp ts) {
         Instant i = toInstant(ts);
         if (i == null) {

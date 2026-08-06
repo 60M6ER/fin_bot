@@ -9,6 +9,7 @@ import ru.larionov.backend.exchange.api.model.market.LastPrice;
 import ru.larionov.backend.exchange.api.model.market.OrderBook;
 import ru.larionov.backend.exchange.api.model.market.OrderBookLevel;
 import ru.larionov.backend.exchange.api.model.market.Price;
+import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.tinkoff.piapi.contract.v1.*;
 
 import java.math.BigDecimal;
@@ -207,6 +208,44 @@ public class TInvestMarketDataApi implements MarketDataApi {
                 .setSeconds(instant.getEpochSecond())
                 .setNanos(instant.getNano())
                 .build();
+    }
+
+    /**
+     * Статус инструмента одним синхронным вызовом.
+     *
+     * Нужен при старте бота: подписка на стрим статусов присылает событие только при
+     * СМЕНЕ состояния, поэтому бот, запущенный посреди закрытой (или открытой) сессии,
+     * иначе не знал бы, можно ли ставить заявки, до следующего перехода — то есть часами.
+     */
+    @Override
+    public TradingStatusEvent getTradingStatus(InstrumentId instrumentId) {
+        Objects.requireNonNull(instrumentId, "instrumentId");
+        String id = instrumentId.primary();
+        if (id == null || id.isBlank()) {
+            throw new IllegalArgumentException("Не задан идентификатор инструмента");
+        }
+
+        GetTradingStatusResponse response = client.marketDataStub()
+                .callSyncMethod(
+                        MarketDataServiceGrpc.getGetTradingStatusMethod(),
+                        stub -> stub.getTradingStatus(
+                                GetTradingStatusRequest.newBuilder().setInstrumentId(id).build())
+                );
+
+        SecurityTradingStatus status = response.getTradingStatus();
+
+        // Ровно та же трактовка, что и в стриме: tradable — идут ли торги вообще,
+        // limitOrdersAvailable — примет ли биржа лимитную заявку. Для сетки значим второй:
+        // в аукционе торги идут, но лимитка может не приниматься.
+        return new TradingStatusEvent(
+                new InstrumentId(
+                        response.getInstrumentUid().isBlank() ? instrumentId.uid() : response.getInstrumentUid(),
+                        instrumentId.figi()),
+                status == SecurityTradingStatus.SECURITY_TRADING_STATUS_NORMAL_TRADING,
+                response.getLimitOrderAvailableFlag(),
+                status == null ? null : status.name(),
+                Instant.now()
+        );
     }
 
     private static CandleInterval mapInterval(ru.larionov.backend.exchange.api.enums.CandleInterval interval) {
