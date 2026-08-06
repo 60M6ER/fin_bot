@@ -58,7 +58,7 @@ public class BotValuationService {
         ParsedConfig cfg = config(bot);
         BotAccountingDto summary = summaryCache.computeIfAbsent(
                 bot.getId(), id -> accounting.summaryFast(id, cfg.dryRun()));
-        return enrich(bot.getId(), summary, cfg);
+        return enrich(bot, summary, cfg);
     }
 
     /** Для карточки бота: полный путь с ремонтом книги, семантика прежняя. */
@@ -69,7 +69,7 @@ public class BotValuationService {
         if (dryRunOverride == null || dryRunOverride == cfg.dryRun()) {
             summaryCache.put(bot.getId(), summary);
         }
-        return enrich(bot.getId(), summary, cfg);
+        return enrich(bot, summary, cfg);
     }
 
     /**
@@ -148,8 +148,21 @@ public class BotValuationService {
     // РАСЧЁТ
     // ==============================
 
-    private BotValuationDto enrich(UUID botId, BotAccountingDto s, ParsedConfig cfg) {
-        Optional<LastPriceCache.CachedPrice> cached = lastPriceCache.get(botId);
+    /**
+     * Валюта для показа.
+     *
+     * У бота без единой сделки денежная книга пуста, и валюты в ней ещё нет — а бюджет
+     * ему уже задан и показывать его без валюты некрасиво. Тогда берём валюту счёта.
+     */
+    private String displayCurrency(BotEntity bot, BotAccountingDto s) {
+        if (s.currency() != null && !s.currency().isBlank()) {
+            return s.currency();
+        }
+        return accountCash.dominantCurrency(bot.getExchangeConnectionId());
+    }
+
+    private BotValuationDto enrich(BotEntity bot, BotAccountingDto s, ParsedConfig cfg) {
+        Optional<LastPriceCache.CachedPrice> cached = lastPriceCache.get(bot.getId());
         BigDecimal lastPrice = cached.map(LastPriceCache.CachedPrice::price).orElse(null);
         Instant lastPriceAt = cached.map(LastPriceCache.CachedPrice::receivedAt).orElse(null);
 
@@ -188,7 +201,7 @@ public class BotValuationService {
 
         return new BotValuationDto(
                 s.dryRun(), s.cashFlow(), s.costBasisOpen(), s.realizedPnl(), s.paidCommission(),
-                s.openLots(), s.averageEntryPrice(), s.currency(), s.openShares(),
+                s.openLots(), s.averageEntryPrice(), displayCurrency(bot, s), s.openShares(),
                 lastPrice, lastPriceAt, marketValue, unrealizedPnl, totalPnl,
                 cfg.budget(), workingBudget, cfg.withdrawnProfit(s.realizedPnl()), equity,
                 cfg.profitPolicy(), cfg.sizingMode());

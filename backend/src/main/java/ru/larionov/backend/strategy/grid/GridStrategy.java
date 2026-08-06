@@ -77,6 +77,14 @@ public class GridStrategy implements Strategy {
     private BigDecimal reconciledPositionLots;
     private volatile StrategySnapshot snapshot;
 
+    /**
+     * Бот остановлен: события, дошедшие после этого, игнорируются.
+     *
+     * volatile, потому что это единственное поле стратегии, которое пишется НЕ из
+     * потока событийного цикла: остановку инициирует управляющий поток.
+     */
+    private volatile boolean stopped;
+
     /** Последняя известная цена: нужна, чтобы решать, где покупать, а где продавать. */
     private BigDecimal lastPrice;
 
@@ -257,10 +265,17 @@ public class GridStrategy implements Strategy {
 
     @Override
     public void onStop() {
-        this.ladder = null;
-        this.activeRange = null;
-        this.snapshot = null;
-        this.ctx = null;
+        // Флаг вместо обнуления полей — намеренно.
+        //
+        // Раньше здесь зануляли ctx, ladder и activeRange. Если бы событие всё же
+        // дошло сюда одновременно с остановкой (close() ждёт рабочий поток не
+        // бесконечно, а пять секунд), проверка готовности успевала бы пройти,
+        // а следом падало разыменование уже отобранного поля.
+        //
+        // Флага достаточно: сама стратегия живёт ровно столько же, сколько хендлер,
+        // так что освобождать здесь нечего.
+        this.stopped = true;
+        this.snapshot = null;   // только читается наружу, разыменований нет
     }
 
     private RangeResolution resolveActiveRange(ReconcileResult initialState, TradingConstraints constraints) {
@@ -1352,7 +1367,7 @@ public class GridStrategy implements Strategy {
     // ==============================
 
     private boolean isReady() {
-        return ctx != null && ladder != null && cfg.enabled();
+        return !stopped && ctx != null && ladder != null && cfg.enabled();
     }
 
     private FeeInfo resolveFeeInfo() {

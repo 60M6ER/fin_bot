@@ -141,14 +141,22 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
             task.cancel(false);
         }
 
+        // Сначала гасим цикл, и только потом сообщаем стратегии об остановке.
+        //
+        // Порядок был обратным, и это ломало обещание, на котором держится вся
+        // стратегия: «все вызовы строго последовательны». onStop() выполняется на
+        // управляющем потоке и сбрасывает состояние, а рабочий поток цикла в этот
+        // момент мог находиться внутри onTick — проверка готовности успевала пройти,
+        // после чего состояние исчезало прямо под ногами (NPE на ctx при остановке).
+        //
+        // Очередь при этом дорабатывается: close() даёт текущему событию досчитаться.
+        loop.close();
+
         try {
             strategy.onStop();
         } catch (Exception e) {
             log.warn("Bot {} strategy.onStop failed: {}", botId, e.getMessage(), e);
         }
-
-        // Очередь дорабатывается: не бросаем бота на полушаге.
-        loop.close();
 
         String cancelReport = cancelOutstandingOrders();
 
