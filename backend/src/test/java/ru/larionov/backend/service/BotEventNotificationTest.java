@@ -54,8 +54,7 @@ class BotEventNotificationTest {
         BotEntity bot = BotEntity.builder().id(botId).name("MAGN GRID").build();
         when(botRepo.findById(botId)).thenReturn(Optional.of(bot));
 
-        events = new BotEventService(repo, botRepo, notify,
-                new NotificationThrottle(), provider, new ObjectMapper());
+        events = new BotEventService(repo, botRepo, notify, provider, new ObjectMapper());
     }
 
     private BotValuationDto valued(String equity, String realized, String total) {

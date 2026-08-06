@@ -647,7 +647,6 @@ public class GridStrategy implements Strategy {
         Instant generationStart = activeRange == null ? null : activeRange.since();
 
         Map<Integer, Long> held = new HashMap<>();
-        Map<Integer, Instant> newestByLevel = new HashMap<>();
 
         for (BotOrderView o : ctx.gateway().recentOrders(ctx.botId())) {
             if (o.gridLevel() == null || o.executedLots() <= 0) {
@@ -659,58 +658,36 @@ public class GridStrategy implements Strategy {
             }
             long delta = o.side() == OrderSide.BUY ? o.executedLots() : -o.executedLots();
             held.merge(o.gridLevel(), delta, Long::sum);
-            if (o.createdAt() != null) {
-                newestByLevel.merge(o.gridLevel(), o.createdAt(),
-                        (a, b) -> a.isAfter(b) ? a : b);
-            }
         }
 
         held.values().removeIf(v -> v <= 0);
-        return capToActualPosition(held, newestByLevel);
+        return held;
     }
 
     /**
-     * Инвариант: разложенное по уровням не может превышать реально имеющуюся позицию.
+     * Уровни, которые нельзя занимать новой покупкой.
      *
-     * Поуровневый учёт — это реконструкция по журналу, а позиция известна точно
-     * (сюда мы попадаем только когда журнал сошёлся с биржей). Если реконструкция
-     * насчитала больше, чем есть, верить надо позиции: иначе сетка выставит продажу
-     * на то, чего у неё нет. Лишнее снимаем со старых уровней — свежие покупки
-     * достовернее всего.
+     * Занятость складывается из трёх независимых признаков, и пропуск любого из них
+     * означает повторную закупку уровня, цикл которого ещё не закрыт:
+     * <ul>
+     *   <li>на уровне уже висит наша покупка;</li>
+     *   <li>на уровне лежат купленные и не проданные лоты;</li>
+     *   <li>эти лоты уже выставлены на продажу — заявка ждёт исполнения.</li>
+     * </ul>
+     *
+     * Третий признак существеннее, чем кажется. Купленное на уровне и выставленное
+     * на продажу перестаёт быть «свободным» ровно до момента, когда продажа исполнится:
+     * до тех пор уровень занят, сколько бы раз цена ни возвращалась к цене покупки.
+     * Иначе откат к цене покупки докупает тот же уровень, лоты подмешиваются
+     * к незакрытому циклу, и вместо одной встречной продажи на уровне копится стопка.
      */
-    private Map<Integer, Long> capToActualPosition(Map<Integer, Long> held,
-                                                   Map<Integer, Instant> newestByLevel) {
-        if (reconciledPositionLots == null) {
-            return held;
-        }
-        long position = Math.max(0, reconciledPositionLots.longValue());
-        long total = held.values().stream().mapToLong(Long::longValue).sum();
-        if (total <= position) {
-            return held;
-        }
-
-        long excess = total - position;
-        List<Integer> oldestFirst = new java.util.ArrayList<>(held.keySet());
-        oldestFirst.sort(java.util.Comparator.comparing(
-                level -> newestByLevel.getOrDefault(level, Instant.EPOCH)));
-
-        for (Integer level : oldestFirst) {
-            if (excess <= 0) {
-                break;
-            }
-            long atLevel = held.get(level);
-            long take = Math.min(atLevel, excess);
-            excess -= take;
-            if (take == atLevel) {
-                held.remove(level);
-            } else {
-                held.put(level, atLevel - take);
-            }
-        }
-
-        log.warn("Bot {}: поуровневый учёт насчитал {} лот(ов) при позиции {} — лишнее списано",
-                ctx.botId(), total, position);
-        return held;
+    private boolean levelIsOccupied(int level,
+                                    Map<Integer, BotOrderView> openBuys,
+                                    Map<Integer, Long> openSellLotsByLevel,
+                                    Map<Integer, Long> heldByLevel) {
+        return openBuys.containsKey(level)
+                || heldByLevel.containsKey(level)
+                || openSellLotsByLevel.containsKey(level);
     }
 
     /**
@@ -766,14 +743,7 @@ public class GridStrategy implements Strategy {
             if (activeCount >= cfg.maxActiveOrders()) {
                 return;
             }
-            if (openBuys.containsKey(level)) {
-                continue;
-            }
-            // Уровень занят, если на нём висит наша продажа ИЛИ на нём лежит
-            // непроданное купленное. Второе условие и отсутствовало: без него
-            // исполненная покупка освобождала уровень под новую покупку,
-            // и позиция росла без ограничений.
-            if (openSellLotsByLevel.containsKey(level) || heldByLevel.containsKey(level)) {
+            if (levelIsOccupied(level, openBuys, openSellLotsByLevel, heldByLevel)) {
                 continue;
             }
             BigDecimal price = ladder.priceAt(level);

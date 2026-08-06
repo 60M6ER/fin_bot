@@ -4,7 +4,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,8 +30,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * Разделение ответственности намеренное:
  * <ul>
  *   <li>в журнал и консоль попадает ВСЁ — без этого разбор происшествия невозможен;</li>
- *   <li>в Telegram уходит только то, что меняет деньги или требует внимания,
- *       да и то через ограничитель частоты.</li>
+ *   <li>в Telegram уходит только то, что меняет деньги или требует внимания —
+ *       целиком, без подавления повторов: склейку пачки в одно сообщение делает
+ *       {@code NotificationAggregator}, и терять содержимое ради тишины не нужно.</li>
  * </ul>
  */
 @Slf4j
@@ -43,7 +43,6 @@ public class BotEventService {
     private final BotEventRepository repo;
     private final BotRepository botRepo;
     private final TelegramNotifyService notifyService;
-    private final NotificationThrottle throttle;
     /*
      * Через ObjectProvider, чтобы разорвать цикл зависимостей: оценка бота тянет
      * свободные деньги счёта, те — рантайм подключений, а тот в итоге возвращается
@@ -82,18 +81,22 @@ public class BotEventService {
         emit(botId, level, type, message, Map.of());
     }
 
+    /**
+     * Уведомления не фильтруются: что произошло, то и уходит.
+     *
+     * Раньше здесь подавлялись повторы одного и того же текста в окне пяти минут,
+     * а вместо них раз в минуту приходила строка «Скрыто повторов: N». На практике
+     * это оказалось худшим из вариантов: сама по себе такая строка не говорит ничего,
+     * а за ней пряталось именно то, что нужно было видеть — залипшая проблема,
+     * повторяющаяся из тика в тик.
+     *
+     * Ради чего подавление вводилось — чтобы телефон не разрывало, — уже решает
+     * {@code NotificationAggregator}: он ждёт тишины и склеивает пачку в одно
+     * сообщение, ничего не выбрасывая. Два механизма на одну задачу были лишними,
+     * и лишним оказался именно тот, который терял содержимое.
+     */
     private void maybeNotify(UUID botId, BotEventLevel level, BotEventType type, String message) {
         if (!type.isNotifiable()) {
-            return;
-        }
-
-        // Ключ дедупликации — тип плюс текст: повторяющаяся из тика в тик ошибка
-        // не должна уходить в Telegram десятки раз подряд.
-        String dedupKey = type.name() + '|' + (message == null ? "" : message);
-        NotificationThrottle.Decision decision = throttle.decide(botId, dedupKey);
-
-        if (decision != NotificationThrottle.Decision.SEND) {
-            log.debug("Уведомление подавлено ({}) для бота {}: {}", decision, botId, type);
             return;
         }
 
@@ -148,24 +151,6 @@ public class BotEventService {
         }
     }
 
-    /**
-     * Сводка о скрытых уведомлениях. Без неё тишина в Telegram была бы неотличима
-     * от отсутствия событий — а это разные вещи.
-     */
-    @Scheduled(initialDelayString = "PT1M", fixedDelayString = "PT1M")
-    public void flushSuppressedSummaries() {
-        for (UUID botId : throttle.knownBots()) {
-            try {
-                String summary = throttle.drainSummary(botId);
-                if (summary != null) {
-                    notifyService.broadcast("Бот: %s\n%s".formatted(botName(botId), summary));
-                }
-            } catch (Exception e) {
-                log.warn("Не удалось отправить сводку по боту {}: {}", botId, e.getMessage());
-            }
-        }
-    }
-
     @Transactional(readOnly = true)
     public List<BotEventEntity> recent(UUID botId, int limit) {
         return repo.findAllByBotIdOrderByTsDesc(botId, PageRequest.of(0, Math.min(Math.max(limit, 1), 500)));
@@ -175,7 +160,6 @@ public class BotEventService {
     public void deleteAllForBot(UUID botId) {
         repo.deleteAllByBotId(botId);
         nameCache.remove(botId);
-        throttle.forget(botId);
     }
 
     private String botName(UUID botId) {
