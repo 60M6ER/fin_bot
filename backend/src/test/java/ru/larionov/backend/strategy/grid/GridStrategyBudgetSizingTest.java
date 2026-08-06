@@ -13,6 +13,7 @@ import ru.larionov.backend.exchange.api.model.instrument.TradingConstraints;
 import ru.larionov.backend.exchange.api.model.market.Candle;
 import ru.larionov.backend.exchange.api.model.market.LastPrice;
 import ru.larionov.backend.exchange.api.model.market.Price;
+import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.larionov.backend.execution.BotExecutionContext;
 import ru.larionov.backend.execution.ExecutionGateway;
 import ru.larionov.backend.execution.PlaceIntent;
@@ -49,6 +50,7 @@ class GridStrategyBudgetSizingTest {
 
     private StrategyContext ctx;
     private ExecutionGateway gateway;
+    private MarketDataApi marketData;
     private AtomicReference<Instant> currentTime;
     private AtomicReference<BigDecimal> realizedPnl;
     private AtomicReference<GridStrategyState> saved;
@@ -57,7 +59,7 @@ class GridStrategyBudgetSizingTest {
     void setUp() {
         ctx = mock(StrategyContext.class);
         ExchangeClient exchange = mock(ExchangeClient.class);
-        MarketDataApi marketData = mock(MarketDataApi.class);
+        marketData = mock(MarketDataApi.class);
         gateway = mock(ExecutionGateway.class);
         currentTime = new AtomicReference<>(now);
         realizedPnl = new AtomicReference<>(BigDecimal.ZERO);
@@ -84,6 +86,7 @@ class GridStrategyBudgetSizingTest {
         when(exchange.fees()).thenReturn((accountId, id) -> new FeeInfo(
                 new BigDecimal("0.0005"), new BigDecimal("0.0005")));
         when(exchange.calendar()).thenThrow(new UnsupportedOperationException("calendar disabled in unit test"));
+        when(marketData.getTradingStatus(instrumentId)).thenReturn(tradingStatus(true));
         when(marketData.getLastPrice(instrumentId))
                 .thenReturn(new LastPrice(instrumentId, new Price(new BigDecimal("100"), "rub"), now));
         when(marketData.getCandles(any(), any())).thenReturn(candles());
@@ -216,14 +219,108 @@ class GridStrategyBudgetSizingTest {
     }
 
     // ==============================
+    // ТОРГОВАЯ СЕССИЯ
+    // ==============================
+
+    /**
+     * Регрессия: бот, поднятый при закрытой бирже, не должен выставить НИ ОДНОЙ заявки.
+     *
+     * Раньше признак «торги идут» брался из календаря площадок, причём запрос шёл без
+     * указания биржи и признак выставлялся, если открыта ХОТЬ ОДНА площадка из ответа.
+     * Ночью бот считал сессию открытой и до утра долбился заявками, ловя отказ на каждом тике.
+     */
+    @Test
+    void placesNothingWhileTheExchangeRejectsLimitOrders() {
+        when(marketData.getTradingStatus(instrumentId)).thenReturn(tradingStatus(false));
+
+        GridStrategy strategy = new GridStrategy(config(
+                "20000", GridConfig.SizingMode.UNIFORM, GridConfig.ProfitPolicy.WITHDRAW));
+        startTrading(strategy);
+
+        // Тики и цены не должны ничего менять, пока биржа не открылась.
+        currentTime.set(now.plusSeconds(120));
+        strategy.onTick();
+        strategy.onPrice(lastPrice("100"));
+
+        org.mockito.Mockito.verify(gateway, org.mockito.Mockito.never()).placeLimit(any(), any());
+    }
+
+    @Test
+    void startsPlacingAsSoonAsTheSessionOpens() {
+        when(marketData.getTradingStatus(instrumentId)).thenReturn(tradingStatus(false));
+
+        GridStrategy strategy = new GridStrategy(config(
+                "20000", GridConfig.SizingMode.UNIFORM, GridConfig.ProfitPolicy.WITHDRAW));
+        startTrading(strategy);
+        org.mockito.Mockito.verify(gateway, org.mockito.Mockito.never()).placeLimit(any(), any());
+
+        // Стрим сообщил об открытии — вот теперь можно.
+        strategy.onTradingStatus(tradingStatus(true));
+
+        org.mockito.Mockito.verify(gateway, org.mockito.Mockito.atLeastOnce()).placeLimit(any(), any());
+    }
+
+    /**
+     * Если стрим потеряет событие открытия сессии, бот обязан заметить это сам.
+     * Иначе поднятый ночью бот промолчал бы весь торговый день.
+     */
+    @Test
+    void noticesTheSessionOpeningEvenIfTheStreamMissesIt() {
+        when(marketData.getTradingStatus(instrumentId)).thenReturn(tradingStatus(false));
+
+        GridStrategy strategy = new GridStrategy(config(
+                "20000", GridConfig.SizingMode.UNIFORM, GridConfig.ProfitPolicy.WITHDRAW));
+        startTrading(strategy);
+        org.mockito.Mockito.verify(gateway, org.mockito.Mockito.never()).placeLimit(any(), any());
+
+        // Биржа открылась, но события из стрима так и не пришло.
+        when(marketData.getTradingStatus(instrumentId)).thenReturn(tradingStatus(true));
+        currentTime.set(now.plusSeconds(60));
+        strategy.onTick();
+
+        org.mockito.Mockito.verify(gateway, org.mockito.Mockito.atLeastOnce()).placeLimit(any(), any());
+    }
+
+    /** Пока сессия идёт, статус переспрашивать незачем — это лишний запрос на каждый тик. */
+    @Test
+    void doesNotRepollTheStatusWhileTheSessionIsOpen() {
+        GridStrategy strategy = new GridStrategy(config(
+                "20000", GridConfig.SizingMode.UNIFORM, GridConfig.ProfitPolicy.WITHDRAW));
+        startTrading(strategy);
+
+        currentTime.set(now.plusSeconds(60));
+        strategy.onTick();
+        currentTime.set(now.plusSeconds(120));
+        strategy.onTick();
+
+        // Ровно один вызов — тот, что при старте.
+        org.mockito.Mockito.verify(marketData, org.mockito.Mockito.times(1))
+                .getTradingStatus(instrumentId);
+    }
+
+    /** Сид обязан спрашивать инструмент, а не календарь площадок. */
+    @Test
+    void seedsSessionStateFromTheInstrumentNotTheVenueCalendar() {
+        GridStrategy strategy = new GridStrategy(config(
+                "20000", GridConfig.SizingMode.UNIFORM, GridConfig.ProfitPolicy.WITHDRAW));
+        strategy.onStart(ctx, reconciled("0"));
+
+        org.mockito.Mockito.verify(marketData).getTradingStatus(instrumentId);
+        // ctx.exchange().calendar() замокан на выброс — если бы сид его дёрнул, старт бы упал.
+    }
+
+    // ==============================
     // HELPERS
     // ==============================
 
     private void startTrading(GridStrategy strategy) {
         strategy.onStart(ctx, reconciled("0"));
-        strategy.onTradingStatus(new ru.larionov.backend.exchange.api.model.market.TradingStatusEvent(
-                instrumentId, true, true, "NORMAL_TRADING", now));
         strategy.onPrice(lastPrice("100"));
+    }
+
+    private TradingStatusEvent tradingStatus(boolean limitOrdersAvailable) {
+        return new TradingStatusEvent(instrumentId, limitOrdersAvailable, limitOrdersAvailable,
+                limitOrdersAvailable ? "NORMAL_TRADING" : "NOT_AVAILABLE_FOR_TRADING", now);
     }
 
     /** Что именно ушло в гейтвей: уровень покупки → число лотов. */

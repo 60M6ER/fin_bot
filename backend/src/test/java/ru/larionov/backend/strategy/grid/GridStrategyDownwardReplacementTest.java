@@ -8,7 +8,6 @@ import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.exchange.api.ExchangeClient;
 import ru.larionov.backend.exchange.api.MarketDataApi;
-import ru.larionov.backend.exchange.api.TradingCalendarApi;
 import ru.larionov.backend.exchange.api.enums.CandleInterval;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
@@ -16,9 +15,9 @@ import ru.larionov.backend.exchange.api.model.FeeInfo;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
 import ru.larionov.backend.exchange.api.model.id.InstrumentId;
 import ru.larionov.backend.exchange.api.model.instrument.TradingConstraints;
-import ru.larionov.backend.exchange.api.model.instrument.TradingState;
 import ru.larionov.backend.exchange.api.model.market.Candle;
 import ru.larionov.backend.exchange.api.model.market.LastPrice;
+import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.larionov.backend.exchange.api.model.market.OrderBook;
 import ru.larionov.backend.exchange.api.model.market.OrderBookLevel;
 import ru.larionov.backend.exchange.api.model.market.Price;
@@ -51,7 +50,6 @@ class GridStrategyDownwardReplacementTest {
     private StrategyContext ctx;
     private ExchangeClient exchange;
     private MarketDataApi marketData;
-    private TradingCalendarApi calendar;
     private ExecutionGateway gateway;
     private AtomicReference<Instant> currentTime;
     private AtomicReference<BigDecimal> position;
@@ -66,7 +64,6 @@ class GridStrategyDownwardReplacementTest {
         ctx = mock(StrategyContext.class);
         exchange = mock(ExchangeClient.class);
         marketData = mock(MarketDataApi.class);
-        calendar = mock(TradingCalendarApi.class);
         gateway = mock(ExecutionGateway.class);
         currentTime = new AtomicReference<>(now);
         position = new AtomicReference<>(BigDecimal.ZERO);
@@ -97,8 +94,10 @@ class GridStrategyDownwardReplacementTest {
         when(exchange.marketData()).thenReturn(marketData);
         when(exchange.fees()).thenReturn((accountId, id) ->
                 new FeeInfo(new BigDecimal("0.0005"), new BigDecimal("0.0005")));
-        when(exchange.calendar()).thenReturn(calendar);
-        when(calendar.getState(any())).thenReturn(new TradingState(true, null, null));
+        // Статус берётся по инструменту, а не из календаря площадок: календарь не знает,
+        // примет ли биржа лимитную заявку именно по этой бумаге.
+        when(marketData.getTradingStatus(instrumentId)).thenReturn(
+                new TradingStatusEvent(instrumentId, true, true, "NORMAL_TRADING", Instant.now()));
         when(marketData.getLastPrice(instrumentId)).thenReturn(lastPrice("100"));
         when(marketData.getCandles(any(), any())).thenReturn(candles());
         when(marketData.getOrderBook(instrumentId, 1)).thenAnswer(__ -> orderBook(bid.get()));

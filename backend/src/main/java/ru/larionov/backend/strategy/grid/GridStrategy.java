@@ -83,12 +83,11 @@ public class GridStrategy implements Strategy {
     /**
      * Торгуются ли сейчас лимитные заявки.
      *
-     * Источник правды — стрим статуса торгов, но при старте бот дополнительно
-     * спрашивает REST-календарь (см. {@link #seedTradingStatusFromCalendar()}):
-     * неизвестно наверняка, шлёт ли стрим снимок текущего статуса сразу при
-     * подписке или только при СМЕНЕ статуса. Если только при смене — бот,
-     * запущенный посреди открытой сессии, просидел бы без единого ордера
-     * до следующего перехода статуса, то есть часами.
+     * Источник правды — стрим статуса торгов, но он присылает событие только при
+     * СМЕНЕ состояния. Поэтому при старте бот дополнительно спрашивает текущий статус
+     * инструмента напрямую (см. {@link #seedTradingStatus()}): иначе бот, поднятый
+     * посреди сессии, просидел бы без единого ордера до следующего перехода статуса,
+     * то есть часами.
      */
     private boolean limitOrdersAvailable;
 
@@ -190,26 +189,69 @@ public class GridStrategy implements Strategy {
                                 sizingSummary(),
                                 fees.makerRoundTripRate().multiply(BigDecimal.valueOf(100)).toPlainString()));
 
-        seedTradingStatusFromCalendar();
+        seedTradingStatus();
     }
 
     /**
-     * Подстраховка на случай запуска посреди открытой сессии.
+     * Подстраховка на случай запуска посреди сессии.
      *
-     * Не блокирует старт при ошибке: если календарь недоступен, статус всё равно
-     * подтвердится стримом, когда/если тот пришлёт снимок или смену.
+     * Стрим статусов присылает событие только при СМЕНЕ состояния, поэтому бот,
+     * поднятый посреди открытой сессии, без этого запроса просидел бы без единой
+     * заявки до следующего перехода статуса, то есть часами.
+     *
+     * Спрашиваем статус САМОГО ИНСТРУМЕНТА, а не календарь площадок. Раньше здесь был
+     * календарь, и он врал: запрос шёл без указания биржи, а признак «торги идут»
+     * выставлялся, если открыта ХОТЬ ОДНА площадка из ответа. Ночью, когда нужная
+     * биржа закрыта, а какая-то другая работает, бот считал сессию открытой и до утра
+     * долбился в биржу заявками, ловя отказы на каждом тике.
+     *
+     * Не блокирует старт при ошибке: статус всё равно подтвердится стримом при
+     * ближайшей смене состояния.
      */
-    private void seedTradingStatusFromCalendar() {
+    private void seedTradingStatus() {
         try {
-            var state = ctx.exchange().calendar().getState(ctx.clock().instant());
-            if (state != null && state.tradableNow()) {
-                limitOrdersAvailable = true;
-                ctx.event(BotEventType.HOUSEKEEPING,
-                        "Календарь сообщает: рынок сейчас открыт — сетка расставится по первой цене, "
-                                + "не дожидаясь события стрима");
+            TradingStatusEvent status = ctx.exchange().marketData()
+                    .getTradingStatus(ctx.execution().instrumentId());
+            if (status == null) {
+                return;
+            }
+
+            limitOrdersAvailable = status.limitOrdersAvailable();
+            ctx.event(BotEventType.HOUSEKEEPING, limitOrdersAvailable
+                    ? "Биржа принимает лимитные заявки (%s) — сетка расставится по первой цене"
+                            .formatted(status.rawStatus())
+                    : "Биржа сейчас не принимает лимитные заявки (%s) — жду открытия торгов"
+                            .formatted(status.rawStatus()));
+
+        } catch (Exception e) {
+            log.warn("Не удалось получить торговый статус инструмента при старте: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Пока биржа закрыта — переспрашиваем её статус на каждом тике.
+     *
+     * Иначе бот, поднятый ночью, зависит от единственного события стрима об открытии
+     * сессии. Стрим события теряет (на этом построена вся логика реконнекта здесь),
+     * и потерянное открытие означало бы, что бот молчит весь торговый день — отказ
+     * куда неприятнее лишнего запроса.
+     *
+     * Обратное направление переспрашивать не нужно: пока заявки ставятся, о закрытии
+     * сессии сообщит стрим, а в худшем случае биржа просто отклонит заявку.
+     */
+    private void refreshTradingStatusIfClosed() {
+        if (limitOrdersAvailable) {
+            return;
+        }
+        try {
+            TradingStatusEvent status = ctx.exchange().marketData()
+                    .getTradingStatus(ctx.execution().instrumentId());
+            if (status != null && status.limitOrdersAvailable()) {
+                // Через общий обработчик: он сам напишет событие и расставит сетку.
+                onTradingStatus(status);
             }
         } catch (Exception e) {
-            log.warn("Не удалось получить статус торгов из календаря при старте: {}", e.getMessage());
+            log.debug("Не удалось переспросить торговый статус: {}", e.getMessage());
         }
     }
 
@@ -410,6 +452,11 @@ public class GridStrategy implements Strategy {
         // Сторож: периодическая сверка на случай, если стрим молчит не потому,
         // что рынок спокоен, а потому что мы ослепли.
         ReconcileResult reconciled = reconcileAndCheck();
+
+        // Тот же сторож для торговой сессии: потерянное стримом открытие иначе
+        // означало бы, что бот молчит весь день.
+        refreshTradingStatusIfClosed();
+
         if (awaitingDownwardReplacement) {
             manageDownwardLiquidation();
             return;
