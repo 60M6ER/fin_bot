@@ -27,6 +27,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * Сеточная стратегия, только в лонг.
@@ -45,6 +46,9 @@ import java.util.Optional;
  */
 @Slf4j
 public class GridStrategy implements Strategy {
+
+    /** Сколько сверок подряд должны показать расхождение, чтобы оно считалось настоящим. */
+    private static final int MISMATCH_CONFIRMATIONS = 2;
 
     private final GridConfig cfg;
 
@@ -113,6 +117,23 @@ public class GridStrategy implements Strategy {
      * то, из-за чего сетка продала больше, чем купила.
      */
     private boolean positionMismatched;
+
+    /**
+     * Сколько сверок подряд показали расхождение.
+     *
+     * Одной сверки мало. Журнал обновляется событием стрима сразу в момент сделки,
+     * а расчётная позиция у брокера — асинхронно, и между этими моментами сверка видит
+     * расхождение ровно на размер только что исполненной заявки. За торговый день это
+     * дало полтора десятка ложных остановок с уведомлениями, каждая из которых
+     * снималась сама на следующем же проходе.
+     *
+     * Настоящее расхождение никуда не девается и подтверждается вторым проходом,
+     * поэтому задержка на одну сверку ничего не стоит по риску.
+     */
+    private int consecutiveMismatches;
+
+    /** Об остановке ликвидации сообщаем один раз за эпизод, а не каждый тик. */
+    private boolean liquidationStallReported;
 
     public GridStrategy(GridConfig cfg) {
         this.cfg = cfg;
@@ -521,13 +542,20 @@ public class GridStrategy implements Strategy {
         }
 
         BigDecimal mismatch = reconciled.positionMismatch();
-        boolean mismatched = mismatch != null && mismatch.signum() != 0;
+        boolean diverged = mismatch != null && mismatch.signum() != 0;
+
+        consecutiveMismatches = diverged ? consecutiveMismatches + 1 : 0;
+
+        // Первое расхождение — почти всегда гонка расчётов у брокера, а не потеря сделки.
+        // Останавливаем торговлю только с подтверждения второй сверкой.
+        boolean mismatched = consecutiveMismatches >= MISMATCH_CONFIRMATIONS;
 
         if (mismatched && !positionMismatched) {
             ctx.event(BotEventType.RISK_BLOCKED,
-                    ("Позиция журнала расходится с биржей на %s лот(ов). Торговля приостановлена "
-                            + "до устранения расхождения — выставлять заявки, не зная своей позиции, опасно.")
-                            .formatted(mismatch.toPlainString()));
+                    ("Позиция журнала расходится с биржей на %s лот(ов), расхождение подтверждено "
+                            + "%d сверками подряд. Торговля приостановлена до его устранения — "
+                            + "выставлять заявки, не зная своей позиции, опасно.")
+                            .formatted(mismatch.toPlainString(), consecutiveMismatches));
         } else if (!mismatched && positionMismatched) {
             ctx.event(BotEventType.HOUSEKEEPING,
                     "Позиция сошлась с биржей — торговля возобновляется");
@@ -1005,9 +1033,25 @@ public class GridStrategy implements Strategy {
             manageDownwardLiquidation();
             return;
         }
-        if (!ctx.gateway().openOrders(ctx.botId()).isEmpty()) {
+        List<BotOrderView> stillOpen = ctx.gateway().openOrders(ctx.botId());
+        if (!stillOpen.isEmpty()) {
+            // Раньше здесь был молчаливый return, и это скрывало тупик: заявки, которые
+            // не удалось ни снять, ни разрешить, оставались «открытыми», ликвидация
+            // ждала пустого списка и не выставляла продажу вообще — при том что бот
+            // считался закрывающим позицию. Ждать по-прежнему правильно, но молча — нет.
+            // Сообщаем один раз за эпизод: тик частый, а журнал событий читают люди.
+            if (!liquidationStallReported) {
+                liquidationStallReported = true;
+                ctx.event(BotEventType.RISK_BLOCKED,
+                        "Ликвидация ждёт снятия заявок (%d): %s".formatted(
+                                stillOpen.size(),
+                                stillOpen.stream()
+                                        .map(o -> o.side() + " " + o.status())
+                                        .collect(Collectors.joining(", "))));
+            }
             return;
         }
+        liquidationStallReported = false;
 
         BigDecimal freshBid;
         try {

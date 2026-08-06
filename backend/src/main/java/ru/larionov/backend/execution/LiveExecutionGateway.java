@@ -22,7 +22,8 @@ import ru.larionov.backend.repository.BotOrderRepository;
 import ru.larionov.backend.service.BotEventService;
 
 import java.math.BigDecimal;
-import java.util.ArrayList;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,6 +45,16 @@ public class LiveExecutionGateway implements ExecutionGateway {
 
     private static final List<OrderStatus> OPEN_STATUSES =
             List.of(OrderStatus.PENDING, OrderStatus.NEW, OrderStatus.PARTIALLY_FILLED, OrderStatus.UNKNOWN);
+
+    /**
+     * Сколько ждём, прежде чем признать неподтверждённую запись непринятой.
+     *
+     * PENDING означает «мы не знаем», и это честно ровно до тех пор, пока у биржи есть
+     * шанс ответить. Дальше неопределённость перестаёт быть осторожностью и становится
+     * ловушкой: такая запись держит капитал в лимитах, считается открытой заявкой и
+     * блокирует ликвидацию — навсегда, потому что сама она не разрешится никогда.
+     */
+    private static final Duration STALE_PENDING_AFTER = Duration.ofMinutes(2);
 
     private final BotOrderRepository orderRepo;
     private final RiskGuard riskGuard;
@@ -138,7 +149,17 @@ public class LiveExecutionGateway implements ExecutionGateway {
         if (entity.getExchangeOrderId() == null) {
             // Биржевого id нет — сначала выясним, существует ли ордер вообще.
             resolvePending(ctx, entity);
+            if (entity.getStatus().isTerminal()) {
+                return;
+            }
             if (entity.getExchangeOrderId() == null) {
+                // Выяснить не удалось. Молча выйти нельзя: запись останется «открытой»
+                // и заблокирует того, кто снимает заявки перед ликвидацией, — он ждёт
+                // пустого списка, которого не дождётся. Но и списать её можно только
+                // убедившись, что среди живых заявок биржи её действительно нет.
+                if (isAbsentFromExchange(ctx, entity)) {
+                    abandonIfStale(ctx, entity);
+                }
                 return;
             }
         }
@@ -289,6 +310,15 @@ public class LiveExecutionGateway implements ExecutionGateway {
             // (для PENDING) вовсе не был принят. Выясняем точно.
             if (resolvePending(ctx, entity)) {
                 resolvedPending++;
+                continue;
+            }
+
+            // Состояние выяснить не удалось. Но listOpen выше отработал, то есть связь
+            // с биржей есть и полный список её живых заявок по этому счёту и инструменту
+            // мы уже видели — нашей записи в нём не было. Для давно висящей записи без
+            // биржевого id это достаточное основание считать её непринятой.
+            if (abandonIfStale(ctx, entity)) {
+                resolvedPending++;
             }
         }
 
@@ -353,6 +383,69 @@ public class LiveExecutionGateway implements ExecutionGateway {
             log.warn("Не удалось уточнить состояние ордера {}: {}", entity.getClientOrderId(), e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Есть ли запись среди живых заявок биржи.
+     *
+     * Вызывается там, где полного списка ещё не запрашивали. Если спросить не удалось —
+     * отвечаем «не знаем» в безопасную сторону: молчание биржи не доказательство
+     * отсутствия ордера.
+     */
+    private boolean isAbsentFromExchange(BotExecutionContext ctx, BotOrderEntity entity) {
+        try {
+            return orders().listOpen(ctx.accountId(), ctx.instrumentId()).stream()
+                    .noneMatch(s -> s.clientOrderId() != null
+                            && entity.getClientOrderId().equals(s.clientOrderId().value()));
+        } catch (Exception e) {
+            log.warn("Не удалось получить список живых заявок для {}: {}",
+                    entity.getClientOrderId(), e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Признаёт непринятой запись, которая давно висит в PENDING и не подтверждена биржей.
+     *
+     * Вызывать только убедившись, что среди живых заявок биржи её нет: списать ордер,
+     * который на самом деле стоит в стакане, — это ровно тот дубль, ради недопущения
+     * которого построена вся идемпотентность постановки.
+     *
+     * Остальные условия намеренно узкие. Биржевого id нет — значит подтверждения
+     * постановки мы не получали ни разу. Исполненных лотов нет — значит по ней не
+     * приходило ни одного события, а стрим адресует события по нашему же clientOrderId.
+     * Прошло больше {@link #STALE_PENDING_AFTER} — значит это не гонка с только что
+     * отправленным запросом.
+     *
+     * Ошибиться в другую сторону тоже дорого: не разрешив такую запись, мы навсегда
+     * оставляем боту фантомную заявку, которая занимает капитал и делает сетку
+     * неспособной ни торговать, ни закрыться.
+     *
+     * @return true, если запись переведена в терминальный статус
+     */
+    private boolean abandonIfStale(BotExecutionContext ctx, BotOrderEntity entity) {
+        if (entity.getStatus() != OrderStatus.PENDING
+                || entity.getExchangeOrderId() != null
+                || entity.getExecutedLots() > 0) {
+            return false;
+        }
+        Instant createdAt = entity.getCreatedAt();
+        if (createdAt == null || createdAt.isAfter(Instant.now().minus(STALE_PENDING_AFTER))) {
+            return false;
+        }
+
+        entity.setStatus(OrderStatus.REJECTED);
+        entity.setLastError("Постановка не подтверждена биржей за " + STALE_PENDING_AFTER.toMinutes()
+                + " мин, среди живых заявок её нет — считаю непринятой");
+        orderRepo.save(entity);
+
+        log.warn("Bot {}: запись {} висела в PENDING без подтверждения биржей, помечена непринятой",
+                ctx.botId(), entity.getClientOrderId());
+        events.emit(ctx.botId(), BotEventLevel.WARN, BotEventType.ORDER_REJECTED,
+                "Заявка %s так и не подтверждена биржей — считаю непринятой".formatted(entity.getClientOrderId()),
+                Map.of("clientOrderId", entity.getClientOrderId(),
+                        "gridLevel", String.valueOf(entity.getGridLevel())));
+        return true;
     }
 
     /**

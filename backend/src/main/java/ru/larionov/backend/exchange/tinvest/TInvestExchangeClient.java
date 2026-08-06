@@ -1,5 +1,6 @@
 package ru.larionov.backend.exchange.tinvest;
 
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.retry.RetryConfig;
 import ru.larionov.backend.exchange.api.*;
 import ru.larionov.backend.exchange.api.model.instrument.ExchangeMeta;
@@ -124,14 +125,34 @@ public final class TInvestExchangeClient implements ExchangeClient {
 
         ServiceStubFactory factory = ServiceStubFactory.create(connectorConfiguration);
 
-        // Base retry for unary calls. Later we can override per service/method.
+        /*
+         * Повторяем только то, что имеет шанс пройти со второй попытки.
+         *
+         * Предикат здесь обязателен. RetryConfig.custom() без retryOnException повторяет
+         * ЛЮБОЕ исключение, и именно это превратило штатный ответ «такого ордера нет»
+         * в отказ всей торговли: каждый запрос о несуществующем ордере стоил
+         * 5 попыток × 3 с = 12 секунд единственного потока бота, а его пять отказов
+         * подряд копились в circuit breaker, пока тот не размыкал цепь на GetOrderState
+         * целиком. Ретрай не должен спорить с биржей о фактах.
+         */
         RetryConfig retry = RetryConfig.custom()
                 .waitDuration(Duration.ofMillis(3000))
                 .maxAttempts(5)
+                .retryOnException(TInvestErrors::isRetryable)
+                .build();
+
+        /*
+         * Circuit breaker размыкается на поломках сервиса, а не на ответах по существу.
+         * NOT_FOUND, INVALID_ARGUMENT и отказ риск-контроля брокера — это ответы:
+         * они не значат, что метод недоступен, и не должны отнимать его у остальных.
+         */
+        CircuitBreakerConfig circuitBreaker = CircuitBreakerConfig.custom()
+                .ignoreException(t -> !TInvestErrors.isServiceFailure(t))
                 .build();
 
         ResilienceConfiguration rc = ResilienceConfiguration.builder(resilienceExecutor, connectorConfiguration)
                 .withDefaultRetry(retry)
+                .withDefaultCircuitBreaker(circuitBreaker)
                 .build();
 
         ResilienceSyncStubWrapper<InstrumentsServiceGrpc.InstrumentsServiceBlockingStub> instruments =

@@ -213,6 +213,9 @@ class GridStrategyAutoRangeTest {
     void positionMismatchPreventsBreakoutTransition() {
         GridStrategy strategy = new GridStrategy(replaceUpperConfig());
         strategy.onStart(ctx, reconciled("0"));
+        // Две сверки подряд: расхождение считается настоящим только с подтверждения.
+        strategy.onReconcile(new ReconcileResult(
+                List.of(), BigDecimal.ZERO, BigDecimal.ZERO, 0, 0, BigDecimal.ONE));
         strategy.onReconcile(new ReconcileResult(
                 List.of(), BigDecimal.ZERO, BigDecimal.ZERO, 0, 0, BigDecimal.ONE));
 
@@ -224,6 +227,28 @@ class GridStrategyAutoRangeTest {
         assertThat(saved.get().awaitingUpperReplacement()).isFalse();
         assertThat(strategy.snapshot().orElseThrow().buyingStopped()).isFalse();
         verify(marketData, times(1)).getCandles(any(), any());
+    }
+
+    /**
+     * Одиночное расхождение — это почти всегда гонка расчётов у брокера: журнал уже
+     * знает об исполнении, а расчётная позиция ещё нет. За торговый день такие
+     * «расхождения» останавливали торговлю полтора десятка раз, каждый раз снимаясь
+     * сами на следующей же сверке.
+     */
+    @Test
+    void singleTransientMismatchDoesNotBlockTrading() {
+        GridStrategy strategy = new GridStrategy(replaceUpperConfig());
+        strategy.onStart(ctx, reconciled("0"));
+        strategy.onReconcile(new ReconcileResult(
+                List.of(), BigDecimal.ONE, BigDecimal.ZERO, 0, 0, BigDecimal.ONE));
+        // Следующая сверка расхождения уже не видит — торговля не должна была вставать.
+        strategy.onReconcile(reconciled("1"));
+
+        strategy.onPrice(lastPrice("111"));
+        currentTime.set(now.plusSeconds(11));
+        strategy.onPrice(lastPrice("111"));
+
+        assertThat(saved.get().awaitingUpperReplacement()).isTrue();
     }
 
     @Test

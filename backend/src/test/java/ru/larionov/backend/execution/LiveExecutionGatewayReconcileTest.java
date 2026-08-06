@@ -19,6 +19,8 @@ import ru.larionov.backend.repository.MoneyLedgerRepository;
 import ru.larionov.backend.service.BotEventService;
 
 import java.math.BigDecimal;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
@@ -423,6 +425,71 @@ class LiveExecutionGatewayReconcileTest {
         assertThat(result.positionLots()).isEqualByComparingTo("3");
         assertThat(result.positionMismatch()).isEqualByComparingTo("2");
         assertThat(result.hasFindings()).isTrue();
+    }
+
+    /**
+     * Регрессия на отказ, остановивший торговлю на весь день.
+     *
+     * Запрос состояния падал (у нас — разомкнутый circuit breaker, в бою — необёрнутый
+     * NOT_FOUND), запись навсегда оставалась PENDING, и дальше по цепочке: она держала
+     * капитал в лимитах, числилась открытой заявкой и не давала ликвидации снять всё
+     * перед закрытием позиции. Девять таких записей пережили все перезапуски.
+     */
+    @Test
+    void unconfirmedPendingIsAbandonedOnceItIsOldEnough() {
+        exchange.rejectOutright = true;
+        assertThatThrownBy(() -> gateway.placeLimit(ctx, buyOne())).isInstanceOf(RuntimeException.class);
+        exchange.rejectOutright = false;
+        exchange.stateLookupFails = true;
+
+        // Пока запись свежая — не трогаем: биржа ещё может ответить, и объявить
+        // непринятым реально стоящий ордер было бы хуже, чем подождать.
+        gateway.reconcile(ctx);
+        assertThat(journal().get(0).getStatus()).isEqualTo(OrderStatus.PENDING);
+
+        backdate(journal().get(0), Duration.ofMinutes(5));
+        gateway.reconcile(ctx);
+
+        BotOrderEntity row = journal().get(0);
+        assertThat(row.getStatus())
+                .as("Списка живых заявок биржи мы дождались, нашей записи в нём нет — она не принята")
+                .isEqualTo(OrderStatus.REJECTED);
+        assertThat(gateway.openOrders(botId))
+                .as("Иначе ликвидация будет вечно ждать, пока список заявок опустеет")
+                .isEmpty();
+    }
+
+    /** Подтверждённый биржей ордер не должен пострадать от того же правила. */
+    @Test
+    void acceptedOrderIsNeverAbandonedByAge() {
+        gateway.placeLimit(ctx, buyOne());
+        backdate(journal().get(0), Duration.ofHours(3));
+        exchange.stateLookupFails = true;
+
+        gateway.reconcile(ctx);
+
+        assertThat(journal().get(0).getStatus()).isEqualTo(OrderStatus.NEW);
+        assertThat(gateway.openOrders(botId)).hasSize(1);
+    }
+
+    /** cancelAll перед ликвидацией не должен спотыкаться о неразрешимую запись. */
+    @Test
+    void cancelAllClearsStalePendingSoLiquidationCanProceed() {
+        exchange.rejectOutright = true;
+        assertThatThrownBy(() -> gateway.placeLimit(ctx, buyOne())).isInstanceOf(RuntimeException.class);
+        exchange.rejectOutright = false;
+        exchange.stateLookupFails = true;
+        backdate(journal().get(0), Duration.ofMinutes(5));
+
+        gateway.cancelAll(ctx);
+
+        assertThat(journal().get(0).getStatus().isTerminal()).isTrue();
+        assertThat(gateway.openOrders(botId)).isEmpty();
+    }
+
+    private void backdate(BotOrderEntity order, Duration age) {
+        order.setCreatedAt(Instant.now().minus(age));
+        orderRepo.save(order);
     }
 
     @Test
