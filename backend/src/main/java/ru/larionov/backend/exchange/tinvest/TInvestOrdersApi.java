@@ -1,8 +1,6 @@
 package ru.larionov.backend.exchange.tinvest;
 
 import com.google.protobuf.Timestamp;
-import io.grpc.Status;
-import io.grpc.StatusRuntimeException;
 import lombok.extern.slf4j.Slf4j;
 import ru.larionov.backend.exchange.api.OrdersApi;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
@@ -119,8 +117,10 @@ public class TInvestOrdersApi implements OrdersApi {
                             stub -> stub.getOrderState(request)
                     );
             return Optional.of(mapOrderState(accountId, s));
-        } catch (StatusRuntimeException e) {
-            if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
+        } catch (RuntimeException e) {
+            // Ловим RuntimeException, а не StatusRuntimeException: SDK оборачивает
+            // исходное исключение в ServiceRuntimeException, см. TInvestErrors.
+            if (TInvestErrors.isNotFound(e)) {
                 return Optional.empty();
             }
             throw e;
@@ -151,8 +151,8 @@ public class TInvestOrdersApi implements OrdersApi {
                             stub -> stub.getOrderState(request)
                     );
             return Optional.of(mapOrderState(accountId, s));
-        } catch (StatusRuntimeException e) {
-            if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
+        } catch (RuntimeException e) {
+            if (TInvestErrors.isNotFound(e)) {
                 // Ордера с таким clientOrderId у биржи нет — значит его не приняли.
                 return Optional.empty();
             }

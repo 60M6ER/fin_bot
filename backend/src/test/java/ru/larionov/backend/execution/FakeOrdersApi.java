@@ -37,6 +37,13 @@ public class FakeOrdersApi implements OrdersApi {
     /** Если true — постановка падает, не приняв ордер. */
     public boolean rejectOutright = false;
 
+    /**
+     * Если true — запрос состояния по clientOrderId падает.
+     * Так выглядит разомкнутый circuit breaker или недоступный метод: судьбу записи
+     * выяснить нельзя, при том что список живых заявок биржа отдаёт исправно.
+     */
+    public boolean stateLookupFails = false;
+
     @Override
     public OrderResponse placeLimit(OrderRequest req) {
         String clientOrderId = req.clientOrderId().value();
@@ -117,6 +124,9 @@ public class FakeOrdersApi implements OrdersApi {
 
     @Override
     public Optional<OrderState> getByClientOrderId(AccountId accountId, ClientOrderId clientOrderId) {
+        if (stateLookupFails) {
+            throw new RuntimeException("CircuitBreaker 'OrdersService/GetOrderState' is OPEN");
+        }
         return Optional.ofNullable(accepted.get(clientOrderId.value()));
     }
 
