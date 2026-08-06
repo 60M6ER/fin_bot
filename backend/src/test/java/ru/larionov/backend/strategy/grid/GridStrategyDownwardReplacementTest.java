@@ -296,6 +296,69 @@ class GridStrategyDownwardReplacementTest {
         assertThat(strategy.snapshot().orElseThrow().replacementDirection()).isEqualTo("DOWN");
     }
 
+    /**
+     * Регрессия на состояние, в которое бот попал сразу после того, как ликвидация
+     * впервые заработала.
+     *
+     * Принудительная продажа закрывает позицию целиком одной заявкой без уровня —
+     * сопоставить её конкретному уровню нельзя, она закрывает сразу несколько.
+     * Поуровневый учёт её поэтому не видел и продолжал считать старые покупки
+     * непроданными. В сетке нового поколения эти уровни оказывались занятыми
+     * несуществующей позицией: продажу на них запрещал риск-контроль (по журналу
+     * куплено ноль), а покупку — сама эта запись. В логе это шло как
+     * «Продажа вышла бы за пределы позиции ... куплено всего 0» каждый тик.
+     */
+    @Test
+    void levelsOfLiquidatedGenerationDoNotBlockTheNewGrid() {
+        GridStrategy strategy = start(config("50", 2));
+        position.set(BigDecimal.ONE);
+        inventory.set(new Inventory(1, new BigDecimal("100"), new BigDecimal("100"), 1));
+        strategy.onReconcile(reconciled(position.get()));
+
+        // Покупка старого поколения исполнилась и была закрыта ликвидационной
+        // продажей без уровня — ровно как в бою.
+        when(gateway.recentOrders(botId)).thenReturn(List.of(
+                executed(OrderSide.BUY, 0, 1, now),
+                executed(OrderSide.SELL, null, 1, now.plusSeconds(5))));
+
+        confirmLowerBreakout(strategy);
+
+        openOrders.clear();
+        position.set(BigDecimal.ZERO);
+        inventory.set(Inventory.empty());
+        currentTime.set(now.plusSeconds(30));
+        clearInvocations(gateway);
+        strategy.onReconcile(reconciled(BigDecimal.ZERO));
+
+        assertThat(saved.get().generation()).isEqualTo(2);
+        verify(gateway, never()).placeLimit(any(), argThat(i -> i.side() == OrderSide.SELL));
+        verify(ctx, never()).event(eq(BotEventType.RISK_BLOCKED), any());
+    }
+
+    /** Уровень действительно с позицией по-прежнему должен считаться занятым. */
+    @Test
+    void levelHeldWithinCurrentGenerationIsStillCounted() {
+        GridStrategy strategy = start(config("50", 2));
+        when(gateway.recentOrders(botId)).thenReturn(List.of(
+                executed(OrderSide.BUY, 0, 1, now.plusSeconds(1))));
+        position.set(BigDecimal.ONE);
+        strategy.onReconcile(reconciled(BigDecimal.ONE));
+        clearInvocations(gateway);
+
+        strategy.onPrice(lastPrice("100"));
+
+        verify(gateway).placeLimit(any(), argThat(i -> i.side() == OrderSide.SELL && i.gridLevel() == 0));
+    }
+
+    private BotOrderView executed(OrderSide side, Integer gridLevel, long lots, Instant createdAt) {
+        return new BotOrderView(
+                UUID.randomUUID(), UUID.randomUUID().toString(), "exch-1",
+                side, OrderStatus.FILLED, gridLevel, lots, lots,
+                new BigDecimal("100"), new BigDecimal("100"),
+                null, false, null, null, "rub", 1,
+                false, null, createdAt, createdAt);
+    }
+
     private GridStrategy start(GridConfig config) {
         GridStrategy strategy = new GridStrategy(config);
         strategy.onStart(ctx, reconciled(BigDecimal.ZERO));

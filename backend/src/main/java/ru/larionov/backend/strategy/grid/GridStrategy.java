@@ -634,19 +634,82 @@ public class GridStrategy implements Strategy {
      * Считается по журналу: исполненные покупки уровня минус исполненные продажи,
      * этот уровень закрывающие. По одним открытым заявкам это не выводится —
      * исполненная покупка из них исчезает, и уровень выглядел бы свободным.
+     *
+     * Учитываются только заявки текущего поколения. Номер уровня осмыслен лишь внутри
+     * своей лесенки: после перестановки диапазона уровень 7 — это уже другая цена.
+     * Вдобавок принудительная ликвидация продаёт позицию целиком, одной заявкой без
+     * уровня (её нечему сопоставить — она закрывает сразу несколько), и потому не
+     * гасит ни один уровень. Вместе это давало сетке нового поколения уровни, которые
+     * она считала занятыми несуществующей позицией: продажу на них запрещал
+     * риск-контроль, а покупку — сама эта запись.
      */
     private Map<Integer, Long> computeHeldLotsByLevel() {
+        Instant generationStart = activeRange == null ? null : activeRange.since();
+
         Map<Integer, Long> held = new HashMap<>();
+        Map<Integer, Instant> newestByLevel = new HashMap<>();
 
         for (BotOrderView o : ctx.gateway().recentOrders(ctx.botId())) {
             if (o.gridLevel() == null || o.executedLots() <= 0) {
                 continue;
             }
+            if (generationStart != null && o.createdAt() != null
+                    && o.createdAt().isBefore(generationStart)) {
+                continue;
+            }
             long delta = o.side() == OrderSide.BUY ? o.executedLots() : -o.executedLots();
             held.merge(o.gridLevel(), delta, Long::sum);
+            if (o.createdAt() != null) {
+                newestByLevel.merge(o.gridLevel(), o.createdAt(),
+                        (a, b) -> a.isAfter(b) ? a : b);
+            }
         }
 
         held.values().removeIf(v -> v <= 0);
+        return capToActualPosition(held, newestByLevel);
+    }
+
+    /**
+     * Инвариант: разложенное по уровням не может превышать реально имеющуюся позицию.
+     *
+     * Поуровневый учёт — это реконструкция по журналу, а позиция известна точно
+     * (сюда мы попадаем только когда журнал сошёлся с биржей). Если реконструкция
+     * насчитала больше, чем есть, верить надо позиции: иначе сетка выставит продажу
+     * на то, чего у неё нет. Лишнее снимаем со старых уровней — свежие покупки
+     * достовернее всего.
+     */
+    private Map<Integer, Long> capToActualPosition(Map<Integer, Long> held,
+                                                   Map<Integer, Instant> newestByLevel) {
+        if (reconciledPositionLots == null) {
+            return held;
+        }
+        long position = Math.max(0, reconciledPositionLots.longValue());
+        long total = held.values().stream().mapToLong(Long::longValue).sum();
+        if (total <= position) {
+            return held;
+        }
+
+        long excess = total - position;
+        List<Integer> oldestFirst = new java.util.ArrayList<>(held.keySet());
+        oldestFirst.sort(java.util.Comparator.comparing(
+                level -> newestByLevel.getOrDefault(level, Instant.EPOCH)));
+
+        for (Integer level : oldestFirst) {
+            if (excess <= 0) {
+                break;
+            }
+            long atLevel = held.get(level);
+            long take = Math.min(atLevel, excess);
+            excess -= take;
+            if (take == atLevel) {
+                held.remove(level);
+            } else {
+                held.put(level, atLevel - take);
+            }
+        }
+
+        log.warn("Bot {}: поуровневый учёт насчитал {} лот(ов) при позиции {} — лишнее списано",
+                ctx.botId(), total, position);
         return held;
     }
 
