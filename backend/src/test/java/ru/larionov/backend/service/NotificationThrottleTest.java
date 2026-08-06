@@ -8,9 +8,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static ru.larionov.backend.service.NotificationThrottle.Decision.*;
 
 /**
- * Ограничитель уведомлений: на стриме событий на порядки больше, чем при поллинге,
- * и без него залипший в ошибке бот утопит в сообщениях то единственное,
- * ради чего уведомления и нужны.
+ * Подавление повторов.
+ *
+ * Лимит частоты отсюда убран: он выбрасывал уведомления, а теперь поток склеивается
+ * в одно сообщение и ничего не теряется. Дедупликация осталась — залипшая ошибка
+ * повторяется часами, и склеивать сотню одинаковых строк так же бессмысленно,
+ * как слать их по одной.
  */
 class NotificationThrottleTest {
 
@@ -40,30 +43,32 @@ class NotificationThrottleTest {
         assertThat(throttle.decide(bot, "ORDER_PLACED|уровень 3")).isEqualTo(SEND);
     }
 
+    /**
+     * Регрессия на убранный лимит частоты: буря РАЗНЫХ событий больше не режется.
+     * Раньше одиннадцатое сообщение за минуту выбрасывалось — терялись как раз
+     * события бурного момента. Теперь их склеит агрегатор.
+     */
     @Test
-    void rateLimitStopsAStormOfDistinctMessages() {
+    void aStormOfDistinctMessagesIsNoLongerDropped() {
         UUID bot = UUID.randomUUID();
 
-        // Десять разных сообщений проходят...
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 50; i++) {
             assertThat(throttle.decide(bot, "ORDER_FILLED|уровень " + i))
-                    .as("сообщение %d должно пройти", i)
+                    .as("сообщение %d обязано пройти", i)
                     .isEqualTo(SEND);
         }
-        // ...одиннадцатое упирается в лимит частоты, хотя оно и не повтор.
-        assertThat(throttle.decide(bot, "ORDER_FILLED|уровень 10")).isEqualTo(SUPPRESSED_RATE);
     }
 
     @Test
-    void limitsAreCountedPerBotNotGlobally() {
+    void duplicatesAreCountedPerBotNotGlobally() {
         UUID noisy = UUID.randomUUID();
         UUID quiet = UUID.randomUUID();
 
         for (int i = 0; i < 12; i++) {
-            throttle.decide(noisy, "ERROR|разное " + i);
+            throttle.decide(noisy, "ERROR|один и тот же текст");
         }
         // Шумный бот не должен затыкать соседнего.
-        assertThat(throttle.decide(quiet, "ORDER_FILLED|первое сообщение")).isEqualTo(SEND);
+        assertThat(throttle.decide(quiet, "ERROR|один и тот же текст")).isEqualTo(SEND);
     }
 
     @Test
@@ -77,7 +82,7 @@ class NotificationThrottleTest {
         String summary = throttle.drainSummary(bot);
         assertThat(summary)
                 .as("Тишина в Telegram не должна быть неотличима от отсутствия событий")
-                .contains("2 повтор");
+                .contains("Скрыто повторов: 2");
 
         // Сводка одноразовая: повторно то же самое не отправляем.
         assertThat(throttle.drainSummary(bot)).isNull();

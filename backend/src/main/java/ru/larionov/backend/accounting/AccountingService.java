@@ -20,6 +20,7 @@ import ru.larionov.backend.repository.ExchangeConnectionRepository;
 import ru.larionov.backend.repository.InstrumentRepository;
 import ru.larionov.backend.repository.MoneyLedgerRepository;
 import ru.larionov.backend.service.BotEventService;
+import ru.larionov.backend.service.MoneyFormat;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -409,8 +410,9 @@ public class AccountingService {
                 .build());
         if (saved) {
             events.emit(order.getBotId(), BotEventLevel.INFO, BotEventType.CYCLE_CLOSED,
-                    "Цикл закрыт на уровне %s: результат %s"
-                            .formatted(order.getGridLevel(), result.toPlainString()));
+                    "Завершён цикл сетки на уровне %s. P/L цикла = %s"
+                            .formatted(order.getGridLevel(),
+                                    MoneyFormat.signed(result, order.getFeeCurrency())));
         }
     }
 

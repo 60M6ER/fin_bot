@@ -2,11 +2,15 @@ package ru.larionov.backend.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import ru.larionov.backend.accounting.BotValuationService;
+import ru.larionov.backend.dto.BotValuationDto;
+import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.entity.BotEventEntity;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
@@ -15,6 +19,7 @@ import ru.larionov.backend.repository.BotRepository;
 import ru.larionov.backend.telegram.service.TelegramNotifyService;
 import tools.jackson.databind.ObjectMapper;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -39,6 +44,12 @@ public class BotEventService {
     private final BotRepository botRepo;
     private final TelegramNotifyService notifyService;
     private final NotificationThrottle throttle;
+    /*
+     * Через ObjectProvider, чтобы разорвать цикл зависимостей: оценка бота тянет
+     * свободные деньги счёта, те — рантайм подключений, а тот в итоге возвращается
+     * сюда, в журнал событий.
+     */
+    private final ObjectProvider<BotValuationService> valuationService;
     private final ObjectMapper objectMapper;
 
     /** Имена ботов для читаемых уведомлений: UUID в телефоне бесполезен. */
@@ -86,8 +97,55 @@ public class BotEventService {
             return;
         }
 
-        notifyService.broadcast("%s %s\n\nБот: %s\n%s".formatted(
-                icon(level), humanType(type), botName(botId), message == null ? "" : message));
+        String block = "%s %s\nБот: %s\n%s".formatted(
+                icon(level), humanType(type), botHeadline(botId), message == null ? "" : message);
+
+        // Ошибка уходит отдельным сообщением и сразу: склеенная с housekeeping-строками,
+        // она теряется среди них, а увидеть её надо первой.
+        if (level == BotEventLevel.ERROR || type == BotEventType.ERROR) {
+            notifyService.broadcastIsolated(block);
+        } else {
+            notifyService.broadcast(block);
+        }
+    }
+
+    /**
+     * Имя бота вместе с его деньгами: «MAGN GRID · 10 000 ₽ · +12,34 ₽».
+     *
+     * Смысл в том, чтобы уведомление отвечало на вопрос «и что теперь» без похода
+     * в интерфейс: сколько у бота сейчас и сколько он на этом заработал.
+     */
+    private String botHeadline(UUID botId) {
+        String name = botName(botId);
+        try {
+            BotEntity bot = botRepo.findById(botId).orElse(null);
+            if (bot == null) {
+                return name;
+            }
+            BotValuationDto v = valuationService.getObject().valuation(bot);
+            String currency = v.currency();
+
+            // P/L с учётом позиции, если цена известна; иначе только реализованный.
+            BigDecimal pnl = v.totalPnl() != null ? v.totalPnl() : v.realizedPnl();
+
+            StringBuilder sb = new StringBuilder(name);
+            if (v.equity() != null) {
+                sb.append(" · ").append(MoneyFormat.money(v.equity(), currency));
+            }
+            if (pnl != null) {
+                sb.append(" · ").append(MoneyFormat.signed(pnl, currency));
+                if (v.totalPnl() == null) {
+                    // Честно помечаем неполноту: открытые лоты в этот P/L не вошли.
+                    sb.append(" (реализ.)");
+                }
+            }
+            return sb.toString();
+
+        } catch (Exception e) {
+            // Уведомление важнее украшений: без денег, но дойдёт.
+            log.debug("Не удалось добавить деньги бота {} в уведомление: {}", botId, e.getMessage());
+            return name;
+        }
     }
 
     /**
