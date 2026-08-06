@@ -13,15 +13,19 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Ограничитель уведомлений в Telegram.
+ * Подавление ПОВТОРОВ в уведомлениях.
  *
- * Зачем: при поллинге частоту событий естественно ограничивал период опроса.
- * На стриме такого ограничителя нет — залипший в ошибке бот способен отправить
- * сотни сообщений в минуту и утопить в них то единственное, ради которого
+ * Раньше здесь был ещё и лимит частоты, который просто выбрасывал лишние уведомления.
+ * Он убран: теперь поток не режется, а склеивается в одно сообщение
+ * ({@code NotificationAggregator}) — так ничего не теряется. Лимит частоты в паре
+ * с агрегацией только вредил бы: выбрасывал бы события бурного момента, ради которых
  * уведомления и нужны.
  *
- * Важно: троттлинг касается ТОЛЬКО уведомлений. В журнал и в консоль попадает
- * всё без исключений — иначе разбор происшествия задним числом станет невозможен.
+ * А вот дедупликация нужна и с агрегацией: залипшая ошибка повторяется из тика в тик
+ * часами, и склеивать сотню одинаковых строк так же бессмысленно, как слать их по одной.
+ *
+ * Важно: подавление касается ТОЛЬКО уведомлений. В журнал и в консоль попадает всё
+ * без исключений — иначе разбор происшествия задним числом станет невозможен.
  */
 @Slf4j
 @Component
@@ -30,24 +34,15 @@ public class NotificationThrottle {
     /** Повтор того же сообщения в этом окне подавляется. */
     private static final Duration DEDUP_WINDOW = Duration.ofMinutes(5);
 
-    /** Потолок уведомлений на бота в минуту. */
-    private static final int MAX_PER_MINUTE = 10;
-
-    private static final Duration RATE_WINDOW = Duration.ofMinutes(1);
-
     public enum Decision {
         SEND,
         /** Такое же сообщение уже уходило только что. */
-        SUPPRESSED_DUPLICATE,
-        /** Превышен лимит частоты. */
-        SUPPRESSED_RATE
+        SUPPRESSED_DUPLICATE
     }
 
     private static final class BotState {
         final Map<String, Instant> lastSentByKey = new ConcurrentHashMap<>();
-        final List<Instant> recentSends = new ArrayList<>();
         final AtomicInteger suppressedDuplicates = new AtomicInteger();
-        final AtomicInteger suppressedByRate = new AtomicInteger();
     }
 
     private final Map<UUID, BotState> states = new ConcurrentHashMap<>();
@@ -60,17 +55,6 @@ public class NotificationThrottle {
         if (lastSent != null && Duration.between(lastSent, now).compareTo(DEDUP_WINDOW) < 0) {
             state.suppressedDuplicates.incrementAndGet();
             return Decision.SUPPRESSED_DUPLICATE;
-        }
-
-        synchronized (state.recentSends) {
-            Instant cutoff = now.minus(RATE_WINDOW);
-            state.recentSends.removeIf(t -> t.isBefore(cutoff));
-
-            if (state.recentSends.size() >= MAX_PER_MINUTE) {
-                state.suppressedByRate.incrementAndGet();
-                return Decision.SUPPRESSED_RATE;
-            }
-            state.recentSends.add(now);
         }
 
         state.lastSentByKey.put(dedupKey, now);
@@ -89,24 +73,11 @@ public class NotificationThrottle {
             return null;
         }
         int duplicates = state.suppressedDuplicates.getAndSet(0);
-        int rate = state.suppressedByRate.getAndSet(0);
-
-        if (duplicates == 0 && rate == 0) {
+        if (duplicates == 0) {
             return null;
         }
-
-        StringBuilder sb = new StringBuilder("🔇 Часть уведомлений скрыта: ");
-        if (duplicates > 0) {
-            sb.append(duplicates).append(" повтор(ов)");
-        }
-        if (rate > 0) {
-            if (duplicates > 0) {
-                sb.append(", ");
-            }
-            sb.append(rate).append(" из-за лимита частоты");
-        }
-        sb.append(". Полная картина — в ленте событий бота.");
-        return sb.toString();
+        return "🔇 Скрыто повторов: %d. Полная картина — в ленте событий бота."
+                .formatted(duplicates);
     }
 
     public List<UUID> knownBots() {
