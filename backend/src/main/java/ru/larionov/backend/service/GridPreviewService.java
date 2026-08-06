@@ -86,7 +86,7 @@ public class GridPreviewService {
         // бот подмешает при старте, здесь её ещё неоткуда взять.
         GridValidator.Economics economics = GridValidator.validate(
                 config, range, ladder, constraints.minPriceIncrement(), fees,
-                constraints.lot(), runtimeConfig.maxCapital(), config.workingBudget(BigDecimal.ZERO));
+                constraints.lot(), runtimeConfig.maxCapital(), config.workingBudget(() -> BigDecimal.ZERO));
         GridSizing sizing = economics.sizing();
 
         BigDecimal availableCash = accountCash.available(

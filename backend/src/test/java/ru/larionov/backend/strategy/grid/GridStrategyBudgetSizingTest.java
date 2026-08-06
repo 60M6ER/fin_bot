@@ -298,6 +298,38 @@ class GridStrategyBudgetSizingTest {
                 .getTradingStatus(instrumentId);
     }
 
+    // ==============================
+    // ЦЕНА ЗАПУСКА
+    // ==============================
+
+    /**
+     * При выводе прибыли реализованный P/L в бюджете не участвует — значит и спрашивать
+     * его нельзя: это полная загрузка денежной книги с ремонтным проходом, на критическом
+     * пути запуска, для каждого бота по очереди.
+     */
+    @Test
+    void doesNotLoadTheLedgerOnStartWhenProfitIsWithdrawn() {
+        GridStrategy strategy = new GridStrategy(config(
+                "20000", GridConfig.SizingMode.UNIFORM, GridConfig.ProfitPolicy.WITHDRAW));
+        startTrading(strategy);
+
+        org.mockito.Mockito.verify(ctx, org.mockito.Mockito.never()).realizedPnl();
+        assertThat(strategy.snapshot().orElseThrow().workingBudget()).isEqualByComparingTo("20000");
+    }
+
+    /** А при реинвестировании — обязан: без него бюджет посчитается неверно. */
+    @Test
+    void doesLoadTheLedgerOnStartWhenProfitIsReinvested() {
+        realizedPnl.set(new BigDecimal("1500"));
+
+        GridStrategy strategy = new GridStrategy(config(
+                "20000", GridConfig.SizingMode.UNIFORM, GridConfig.ProfitPolicy.COMPOUND));
+        startTrading(strategy);
+
+        org.mockito.Mockito.verify(ctx, org.mockito.Mockito.atLeastOnce()).realizedPnl();
+        assertThat(strategy.snapshot().orElseThrow().workingBudget()).isEqualByComparingTo("21500");
+    }
+
     /** Сид обязан спрашивать инструмент, а не календарь площадок. */
     @Test
     void seedsSessionStateFromTheInstrumentNotTheVenueCalendar() {

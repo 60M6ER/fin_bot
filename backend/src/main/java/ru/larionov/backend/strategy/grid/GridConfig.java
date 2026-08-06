@@ -218,13 +218,25 @@ public record GridConfig(
      *
      * @return null, если бюджет не задан (старые боты)
      */
-    public BigDecimal workingBudget(BigDecimal realizedPnl) {
+    /**
+     * Реализованный P/L спрашивается ЛЕНИВО — отсюда Supplier, а не значение.
+     *
+     * Он нужен только при реинвестировании прибыли, а достаётся дорого: это полная
+     * загрузка денежной книги бота вместе с ремонтным проходом. Считать его для бота
+     * с выводом прибыли (режим по умолчанию) — чистая трата на критическом пути запуска.
+     *
+     * Перегрузки со значением намеренно нет: {@code workingBudget(null)} был бы
+     * двусмысленным, а такие ловушки потом стреляют.
+     */
+    public BigDecimal workingBudget(java.util.function.Supplier<BigDecimal> realizedPnl) {
         if (budget == null) {
             return null;
         }
-        return profitPolicy == ProfitPolicy.COMPOUND
-                ? budget.add(realizedPnl == null ? BigDecimal.ZERO : realizedPnl)
-                : budget;
+        if (profitPolicy != ProfitPolicy.COMPOUND) {
+            return budget;
+        }
+        BigDecimal pnl = realizedPnl.get();
+        return budget.add(pnl == null ? BigDecimal.ZERO : pnl);
     }
 
     /** Прибыль, выведенная из оборота бота. Только для отображения. */

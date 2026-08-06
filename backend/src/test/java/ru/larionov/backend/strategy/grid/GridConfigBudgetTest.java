@@ -38,7 +38,7 @@ class GridConfigBudgetTest {
         assertThat(cfg.lotsPerOrder()).isEqualTo(3L);
         assertThat(cfg.budget()).isNull();
         // Бюджета нет — рабочего бюджета тоже нет, и это не ошибка.
-        assertThat(cfg.workingBudget(new BigDecimal("500"))).isNull();
+        assertThat(cfg.workingBudget(() -> new BigDecimal("500"))).isNull();
     }
 
     @Test
@@ -97,10 +97,10 @@ class GridConfigBudgetTest {
                  "sizingMode":"UNIFORM","profitPolicy":"COMPOUND"}
                 """);
 
-        assertThat(cfg.workingBudget(new BigDecimal("750"))).isEqualByComparingTo("10750");
+        assertThat(cfg.workingBudget(() -> new BigDecimal("750"))).isEqualByComparingTo("10750");
         // Убыток тоже реинвестируется — рабочий бюджет честно уменьшается.
-        assertThat(cfg.workingBudget(new BigDecimal("-2000"))).isEqualByComparingTo("8000");
-        assertThat(cfg.workingBudget(null)).isEqualByComparingTo("10000");
+        assertThat(cfg.workingBudget(() -> new BigDecimal("-2000"))).isEqualByComparingTo("8000");
+        assertThat(cfg.workingBudget(() -> null)).isEqualByComparingTo("10000");
         assertThat(cfg.withdrawnProfit(new BigDecimal("750"))).isEqualByComparingTo("0");
     }
 
@@ -111,8 +111,8 @@ class GridConfigBudgetTest {
                  "sizingMode":"UNIFORM","profitPolicy":"WITHDRAW"}
                 """);
 
-        assertThat(cfg.workingBudget(new BigDecimal("750"))).isEqualByComparingTo("10000");
-        assertThat(cfg.workingBudget(new BigDecimal("-2000"))).isEqualByComparingTo("10000");
+        assertThat(cfg.workingBudget(() -> new BigDecimal("750"))).isEqualByComparingTo("10000");
+        assertThat(cfg.workingBudget(() -> new BigDecimal("-2000"))).isEqualByComparingTo("10000");
         assertThat(cfg.withdrawnProfit(new BigDecimal("750"))).isEqualByComparingTo("750");
     }
 

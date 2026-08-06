@@ -175,7 +175,11 @@ public class GridStrategy implements Strategy {
 
         // Стартовать с неизвестным бюджетом хуже, чем не стартовать: ошибку подхватит
         // BotRuntimeService.start и переведёт бота в ERROR, сохранив желаемое состояние.
-        this.activeBudget = cfg.workingBudget(ctx.realizedPnl());
+        //
+        // Ссылка на метод, а не вызов: при выводе прибыли (режим по умолчанию)
+        // реализованный P/L в бюджете не участвует, и загружать ради него всю
+        // денежную книгу на старте незачем.
+        this.activeBudget = cfg.workingBudget(ctx::realizedPnl);
 
         // Отказ стартовать — осознанное решение: сетка, не окупающая комиссию,
         // будет исправно терять деньги на каждом обороте.
@@ -890,7 +894,7 @@ public class GridStrategy implements Strategy {
             // нефинансируемый кандидат ДО распродажи позиции, а не после неё.
             GridValidator.validate(cfg, candidate, candidateLadder, ctx.constraints().minPriceIncrement(),
                     activeFees, ctx.constraints().lot(), ctx.execution().maxCapital(),
-                    cfg.workingBudget(ctx.realizedPnl()));
+                    cfg.workingBudget(ctx::realizedPnl));
         } catch (Exception e) {
             failLowerReplacement("Новый нижний диапазон не прошёл проверку: " + e.getMessage());
             return;
@@ -1110,7 +1114,7 @@ public class GridStrategy implements Strategy {
             // Пересчёт обязателен именно здесь: принудительная ликвидация только что
             // зафиксировала убыток, и при реинвестировании прибыли рабочий бюджет стал
             // меньше. Переиспользование старого размера означало бы перерасход бюджета.
-            candidateBudget = cfg.workingBudget(ctx.realizedPnl());
+            candidateBudget = cfg.workingBudget(ctx::realizedPnl);
             candidateSizing = GridValidator.validate(cfg, candidate, candidateLadder,
                     ctx.constraints().minPriceIncrement(), activeFees, ctx.constraints().lot(),
                     ctx.execution().maxCapital(), candidateBudget).sizing();
@@ -1261,7 +1265,7 @@ public class GridStrategy implements Strategy {
 
             // Перестройка сетки — одна из трёх точек, где размер заявки пересчитывается:
             // цены уровней изменились, значит изменилось и то, сколько лотов помещается в бюджет.
-            candidateBudget = cfg.workingBudget(ctx.realizedPnl());
+            candidateBudget = cfg.workingBudget(ctx::realizedPnl);
 
             // До этой точки старая сетка и её checkpoint не меняются.
             candidateSizing = GridValidator.validate(cfg, candidate, candidateLadder,

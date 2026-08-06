@@ -52,7 +52,7 @@ public final class GridValidator {
                                 BigDecimal maxCapital) {
         validate(cfg, GridRange.manual(cfg, null), ladder, priceIncrement,
                 new FeeInfo(commissionRate, commissionRate), lotSize, maxCapital,
-                cfg.workingBudget(BigDecimal.ZERO));
+                cfg.workingBudget(() -> BigDecimal.ZERO));
     }
 
     /**
@@ -69,7 +69,7 @@ public final class GridValidator {
                                 int lotSize,
                                 BigDecimal maxCapital) {
         validate(cfg, GridRange.manual(cfg, null), ladder, priceIncrement, fees, lotSize, maxCapital,
-                cfg.workingBudget(BigDecimal.ZERO));
+                cfg.workingBudget(() -> BigDecimal.ZERO));
     }
 
     /**

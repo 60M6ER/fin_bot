@@ -9,6 +9,7 @@ import ru.larionov.backend.dto.BotAccountingDto;
 import ru.larionov.backend.dto.BotValuationDto;
 import ru.larionov.backend.dto.ConnectionValuationDto;
 import ru.larionov.backend.entity.BotEntity;
+import ru.larionov.backend.repository.InstrumentRepository;
 import ru.larionov.backend.runtime.LastPriceCache;
 import ru.larionov.backend.service.AccountCashService;
 import ru.larionov.backend.strategy.BotRuntimeConfig;
@@ -48,6 +49,7 @@ public class BotValuationService {
     private final AccountingService accounting;
     private final LastPriceCache lastPriceCache;
     private final AccountCashService accountCash;
+    private final InstrumentRepository instrumentRepo;
     private final ObjectMapper objectMapper;
 
     private final Map<UUID, BotAccountingDto> summaryCache = new ConcurrentHashMap<>();
@@ -152,13 +154,19 @@ public class BotValuationService {
      * Валюта для показа.
      *
      * У бота без единой сделки денежная книга пуста, и валюты в ней ещё нет — а бюджет
-     * ему уже задан и показывать его без валюты некрасиво. Тогда берём валюту счёта.
+     * ему уже задан, и показывать его без валюты некрасиво. Тогда берём валюту
+     * инструмента из локального справочника.
+     *
+     * Именно из справочника, а НЕ у брокера: этот метод лежит на пути списка ботов
+     * (опрос раз в 4 секунды) и на пути уведомлений (внутри транзакции записи события,
+     * на критическом пути запуска бота). Сетевой вызов ради подписи к числу — плохой
+     * размен в любой из этих трёх точек.
      */
-    private String displayCurrency(BotEntity bot, BotAccountingDto s) {
+    private String displayCurrency(BotAccountingDto s, ParsedConfig cfg) {
         if (s.currency() != null && !s.currency().isBlank()) {
             return s.currency();
         }
-        return accountCash.dominantCurrency(bot.getExchangeConnectionId());
+        return cfg.instrumentCurrency();
     }
 
     private BotValuationDto enrich(BotEntity bot, BotAccountingDto s, ParsedConfig cfg) {
@@ -201,7 +209,7 @@ public class BotValuationService {
 
         return new BotValuationDto(
                 s.dryRun(), s.cashFlow(), s.costBasisOpen(), s.realizedPnl(), s.paidCommission(),
-                s.openLots(), s.averageEntryPrice(), displayCurrency(bot, s), s.openShares(),
+                s.openLots(), s.averageEntryPrice(), displayCurrency(s, cfg), s.openShares(),
                 lastPrice, lastPriceAt, marketValue, unrealizedPnl, totalPnl,
                 cfg.budget(), workingBudget, cfg.withdrawnProfit(s.realizedPnl()), equity,
                 cfg.profitPolicy(), cfg.sizingMode());
@@ -246,10 +254,31 @@ public class BotValuationService {
             log.debug("Бот {}: конфигурация стратегии не разобрана: {}", bot.getId(), e.getMessage());
         }
 
-        return new ParsedConfig(bot.getUpdatedAt(), dryRun, grid);
+        return new ParsedConfig(bot.getUpdatedAt(), dryRun, grid, instrumentCurrency(json));
     }
 
-    private record ParsedConfig(Instant updatedAt, boolean dryRun, GridConfig grid) {
+    /**
+     * Валюта инструмента из локального справочника. Разбирается один раз вместе
+     * с конфигурацией и живёт в том же кэше — на горячий путь запрос не попадает.
+     */
+    private String instrumentCurrency(String json) {
+        try {
+            String uid = objectMapper.readValue(json, BotRuntimeConfig.class).instrumentUid();
+            if (uid == null || uid.isBlank()) {
+                return null;
+            }
+            return instrumentRepo.findAllByInstrumentUid(uid).stream()
+                    .map(i -> i.getCurrency())
+                    .filter(c -> c != null && !c.isBlank())
+                    .findFirst()
+                    .orElse(null);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private record ParsedConfig(Instant updatedAt, boolean dryRun, GridConfig grid,
+                                String instrumentCurrency) {
 
         boolean matches(Instant botUpdatedAt) {
             return Objects.equals(updatedAt, botUpdatedAt);
@@ -260,7 +289,7 @@ public class BotValuationService {
         }
 
         BigDecimal workingBudget(BigDecimal realizedPnl) {
-            return grid == null ? null : grid.workingBudget(realizedPnl);
+            return grid == null ? null : grid.workingBudget(() -> realizedPnl);
         }
 
         BigDecimal withdrawnProfit(BigDecimal realizedPnl) {

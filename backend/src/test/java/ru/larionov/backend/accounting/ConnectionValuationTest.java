@@ -42,7 +42,8 @@ class ConnectionValuationTest {
         accounting = mock(AccountingService.class);
         prices = new LastPriceCache();
         accountCash = mock(AccountCashService.class);
-        service = new BotValuationService(accounting, prices, accountCash, new ObjectMapper());
+        service = new BotValuationService(accounting, prices, accountCash,
+                mock(ru.larionov.backend.repository.InstrumentRepository.class), new ObjectMapper());
         when(accountCash.dominantCurrency(any())).thenReturn("RUB");
     }
 
