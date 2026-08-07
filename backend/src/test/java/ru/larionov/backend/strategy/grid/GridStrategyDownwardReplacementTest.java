@@ -78,10 +78,10 @@ class GridStrategyDownwardReplacementTest {
         when(ctx.clock()).thenReturn(clock);
         when(ctx.botId()).thenReturn(botId);
         when(ctx.gateway()).thenReturn(gateway);
-        when(ctx.constraints()).thenReturn(new TradingConstraints(1, new BigDecimal("0.01"), "rub"));
+        when(ctx.constraints()).thenReturn(TradingConstraints.wholeLots(1, new BigDecimal("0.01"), "rub"));
         when(ctx.execution()).thenReturn(new BotExecutionContext(
                 botId, UUID.randomUUID(), new AccountId("acc"), instrumentId,
-                false, 1, null, null, null, null));
+                false, BigDecimal.ONE, BigDecimal.ONE, null, null, null, null, null));
         when(ctx.exchange()).thenReturn(exchange);
         when(ctx.inventory()).thenAnswer(__ -> inventory.get());
         when(ctx.realizedPnl()).thenAnswer(__ -> realizedPnl.get());
@@ -127,7 +127,7 @@ class GridStrategyDownwardReplacementTest {
     void liquidatesAtBestBidAndActivatesValidatedLowerRange() {
         GridStrategy strategy = start(config("50", 2));
         position.set(BigDecimal.ONE);
-        inventory.set(new Inventory(1, new BigDecimal("100"), new BigDecimal("100"), 1));
+        inventory.set(new Inventory(BigDecimal.ONE, new BigDecimal("100"), new BigDecimal("100")));
         strategy.onReconcile(reconciled(position.get()));
 
         confirmLowerBreakout(strategy);
@@ -136,7 +136,7 @@ class GridStrategyDownwardReplacementTest {
         verify(gateway, atLeastOnce()).placeLimit(any(), intent.capture());
         PlaceIntent liquidation = intent.getAllValues().get(intent.getAllValues().size() - 1);
         assertThat(liquidation.side()).isEqualTo(OrderSide.SELL);
-        assertThat(liquidation.lots()).isEqualTo(1);
+        assertThat(liquidation.quantity()).isEqualByComparingTo(BigDecimal.ONE);
         assertThat(liquidation.limitPrice()).isEqualByComparingTo("89");
         assertThat(liquidation.gridLevel()).isNull();
         assertThat(saved.get().awaitingDownwardReplacement()).isTrue();
@@ -161,7 +161,7 @@ class GridStrategyDownwardReplacementTest {
     void refusesLiquidationBeforeCancellingWhenProjectedLossExceedsBudget() {
         GridStrategy strategy = start(config("5", 2));
         position.set(BigDecimal.ONE);
-        inventory.set(new Inventory(1, new BigDecimal("100"), new BigDecimal("100"), 1));
+        inventory.set(new Inventory(BigDecimal.ONE, new BigDecimal("100"), new BigDecimal("100")));
         strategy.onReconcile(reconciled(position.get()));
 
         confirmLowerBreakout(strategy);
@@ -176,7 +176,7 @@ class GridStrategyDownwardReplacementTest {
     void cancelsExistingBuysWhileLowerBreakoutIsBeingConfirmed() {
         GridStrategy strategy = start(config("50", 2));
         BotOrderView openBuy = order(new PlaceIntent(
-                OrderSide.BUY, 1, new BigDecimal("92"), 0));
+                OrderSide.BUY, BigDecimal.ONE, new BigDecimal("92"), 0));
         openOrders.add(openBuy);
 
         strategy.onPrice(lastPrice("89"));
@@ -191,7 +191,7 @@ class GridStrategyDownwardReplacementTest {
     void worseningBidStopsBeforeLossBudgetCanBeExceeded() {
         GridStrategy strategy = start(config("15", 2));
         position.set(BigDecimal.ONE);
-        inventory.set(new Inventory(1, new BigDecimal("100"), new BigDecimal("100"), 1));
+        inventory.set(new Inventory(BigDecimal.ONE, new BigDecimal("100"), new BigDecimal("100")));
         strategy.onReconcile(reconciled(position.get()));
         confirmLowerBreakout(strategy);
 
@@ -213,7 +213,7 @@ class GridStrategyDownwardReplacementTest {
         saved.set(new GridStrategyState(active, 1, false, null,
                 true, pending, 0, BigDecimal.ZERO, BigDecimal.ZERO));
         position.set(BigDecimal.ONE);
-        inventory.set(new Inventory(1, new BigDecimal("100"), new BigDecimal("100"), 1));
+        inventory.set(new Inventory(BigDecimal.ONE, new BigDecimal("100"), new BigDecimal("100")));
 
         GridStrategy restarted = new GridStrategy(config("50", 2));
         restarted.onStart(ctx, reconciled(position.get()));
@@ -252,7 +252,7 @@ class GridStrategyDownwardReplacementTest {
     void doesNotTouchOrdersWhenLiquidationCheckpointCannotBeSaved() {
         GridStrategy strategy = start(config("50", 2));
         position.set(BigDecimal.ONE);
-        inventory.set(new Inventory(1, new BigDecimal("100"), new BigDecimal("100"), 1));
+        inventory.set(new Inventory(BigDecimal.ONE, new BigDecimal("100"), new BigDecimal("100")));
         strategy.onReconcile(reconciled(position.get()));
         doAnswer(invocation -> {
             GridStrategyState state = invocation.getArgument(0);
@@ -278,10 +278,10 @@ class GridStrategyDownwardReplacementTest {
     void doesNotPlaceLiquidationUntilEveryOldOrderIsCancelled() {
         GridStrategy strategy = start(config("50", 2));
         position.set(BigDecimal.ONE);
-        inventory.set(new Inventory(1, new BigDecimal("100"), new BigDecimal("100"), 1));
+        inventory.set(new Inventory(BigDecimal.ONE, new BigDecimal("100"), new BigDecimal("100")));
         strategy.onReconcile(reconciled(position.get()));
         openOrders.add(order(new PlaceIntent(
-                OrderSide.BUY, 1, new BigDecimal("92"), 0)));
+                OrderSide.BUY, BigDecimal.ONE, new BigDecimal("92"), 0)));
         doThrow(new IllegalStateException("cancel unavailable"))
                 .when(gateway).cancel(any(), any());
         doThrow(new IllegalStateException("cancel all unavailable"))
@@ -312,7 +312,7 @@ class GridStrategyDownwardReplacementTest {
     void levelsOfLiquidatedGenerationDoNotBlockTheNewGrid() {
         GridStrategy strategy = start(config("50", 2));
         position.set(BigDecimal.ONE);
-        inventory.set(new Inventory(1, new BigDecimal("100"), new BigDecimal("100"), 1));
+        inventory.set(new Inventory(BigDecimal.ONE, new BigDecimal("100"), new BigDecimal("100")));
         strategy.onReconcile(reconciled(position.get()));
 
         // Покупка старого поколения исполнилась и была закрыта ликвидационной
@@ -350,12 +350,13 @@ class GridStrategyDownwardReplacementTest {
         verify(gateway).placeLimit(any(), argThat(i -> i.side() == OrderSide.SELL && i.gridLevel() == 0));
     }
 
-    private BotOrderView executed(OrderSide side, Integer gridLevel, long lots, Instant createdAt) {
+    private BotOrderView executed(OrderSide side, Integer gridLevel, long quantity, Instant createdAt) {
+        BigDecimal q = BigDecimal.valueOf(quantity);
         return new BotOrderView(
                 UUID.randomUUID(), UUID.randomUUID().toString(), "exch-1",
-                side, OrderStatus.FILLED, gridLevel, lots, lots,
+                side, OrderStatus.FILLED, gridLevel, q, q,
                 new BigDecimal("100"), new BigDecimal("100"),
-                null, false, null, null, "rub", 1,
+                null, false, null, null, "rub", BigDecimal.ONE,
                 false, null, createdAt, createdAt);
     }
 
@@ -374,7 +375,7 @@ class GridStrategyDownwardReplacementTest {
 
     private GridConfig config(String maxLoss, int maxReplacements) {
         return new GridConfig(
-                null, null, 4, 1L, 4,
+                null, null, 4, new BigDecimal("1"), 4,
                 GridConfig.RangeExitAction.REPLACE_LOWER, null, 3600, true,
                 true, CandleInterval.H1, 6, new BigDecimal("2"),
                 new BigDecimal("0.01"), new BigDecimal("0.15"),
@@ -384,7 +385,7 @@ class GridStrategyDownwardReplacementTest {
     }
 
     private ReconcileResult reconciled(BigDecimal value) {
-        return new ReconcileResult(List.of(), value, BigDecimal.ZERO,
+        return new ReconcileResult(List.of(), value, value, BigDecimal.ZERO,
                 0, 0, BigDecimal.ZERO);
     }
 
@@ -401,8 +402,8 @@ class GridStrategyDownwardReplacementTest {
     private BotOrderView order(PlaceIntent intent) {
         return new BotOrderView(
                 UUID.randomUUID(), UUID.randomUUID().toString(), null,
-                intent.side(), OrderStatus.NEW, intent.gridLevel(), intent.lots(), 0,
-                intent.limitPrice(), null, null, false, null, null, "rub", 1,
+                intent.side(), OrderStatus.NEW, intent.gridLevel(), intent.quantity(), BigDecimal.ZERO,
+                intent.limitPrice(), null, null, false, null, null, "rub", BigDecimal.ONE,
                 false, null, currentTime.get(), currentTime.get());
     }
 

@@ -16,14 +16,18 @@ public interface MoneyLedgerRepository extends JpaRepository<MoneyLedgerEntity, 
 
     List<MoneyLedgerEntity> findTop200ByBotIdAndDryRunOrderBySeqDesc(UUID botId, boolean dryRun);
 
-    boolean existsByOrderIdAndEntryTypeAndExecutedLotsCum(UUID orderId, LedgerEntryType entryType, Long executedLotsCum);
+    boolean existsByOrderIdAndEntryTypeAndExecutedQuantityCum(
+            UUID orderId, LedgerEntryType entryType, BigDecimal executedQuantityCum);
+
+    List<MoneyLedgerEntity> findAllByOrderIdAndEntryTypeInOrderBySeqAsc(
+            UUID orderId, List<LedgerEntryType> entryTypes);
 
     @Query("""
-            select coalesce(max(l.executedLotsCum), 0)
+            select coalesce(max(l.executedQuantityCum), 0)
             from MoneyLedgerEntity l
             where l.orderId = :orderId and l.entryType in :types
             """)
-    Long maxExecutedLotsCum(@Param("orderId") UUID orderId, @Param("types") List<LedgerEntryType> types);
+    BigDecimal maxExecutedQuantityCum(@Param("orderId") UUID orderId, @Param("types") List<LedgerEntryType> types);
 
     @Query("""
             select coalesce(sum(l.commission), 0)
@@ -39,4 +43,16 @@ public interface MoneyLedgerRepository extends JpaRepository<MoneyLedgerEntity, 
             where l.botId = :botId and l.dryRun = :dryRun and l.affectsCash = true
             """)
     BigDecimal cashFlow(@Param("botId") UUID botId, @Param("dryRun") boolean dryRun);
+
+    /**
+     * Верхняя граница книги на сейчас — ею отрезаются поколения сетки друг от друга.
+     * Ноль на пустой книге означает «поколение видит её целиком», что для первого
+     * поколения и требуется.
+     */
+    @Query("""
+            select coalesce(max(l.seq), 0)
+            from MoneyLedgerEntity l
+            where l.botId = :botId and l.dryRun = :dryRun
+            """)
+    long maxSeq(@Param("botId") UUID botId, @Param("dryRun") boolean dryRun);
 }

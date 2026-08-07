@@ -39,6 +39,7 @@ class BotValuationServiceTest {
     private AccountingService accounting;
     private LastPriceCache prices;
     private AccountCashService accountCash;
+    private ru.larionov.backend.money.FxRateService fx;
     private BotValuationService service;
     private UUID botId;
 
@@ -47,8 +48,21 @@ class BotValuationServiceTest {
         accounting = mock(AccountingService.class);
         prices = new LastPriceCache();
         accountCash = mock(AccountCashService.class);
+        fx = mock(ru.larionov.backend.money.FxRateService.class);
+        // Курс по умолчанию известен: рубли к рублям — единица.
+        when(fx.rate(any(), any())).thenAnswer(i -> {
+            String from = i.getArgument(0);
+            String to = i.getArgument(1);
+            return ru.larionov.backend.money.CurrencyCode.sameMoney(from, to)
+                    ? java.util.Optional.of(ru.larionov.backend.money.FxRate.identity(to))
+                    : java.util.Optional.of(new ru.larionov.backend.money.FxRate(
+                            from, to, new java.math.BigDecimal("90"), "CBR", java.time.Instant.now()));
+        });
+        var appSettings = mock(ru.larionov.backend.service.AppSettingService.class);
+        when(appSettings.get(any(), any())).thenAnswer(i -> i.getArgument(1));
         service = new BotValuationService(accounting, prices, accountCash,
-                mock(ru.larionov.backend.repository.InstrumentRepository.class), new ObjectMapper());
+                mock(ru.larionov.backend.repository.InstrumentRepository.class), new ObjectMapper(),
+                fx, appSettings);
         botId = UUID.randomUUID();
     }
 
@@ -62,18 +76,18 @@ class BotValuationServiceTest {
         return b;
     }
 
-    /** 10 лотов по 10 штук, себестоимость 9500 — средняя 95 за штуку. */
+    /** 100 штук, себестоимость 9500 — средняя 95 за штуку. */
     private BotAccountingDto summary(String realizedPnl) {
         return new BotAccountingDto(false, new BigDecimal("-9500").add(new BigDecimal(realizedPnl)),
                 new BigDecimal("9500"), new BigDecimal(realizedPnl), new BigDecimal("50"),
-                10, new BigDecimal("95"), "rub", 100);
+                new BigDecimal("100"), new BigDecimal("95"), "rub");
     }
 
     /** Позиции нет: всё продано либо ещё ничего не куплено. */
     private BotAccountingDto empty(String realizedPnl) {
         return new BotAccountingDto(false, new BigDecimal(realizedPnl), BigDecimal.ZERO,
                 new BigDecimal(realizedPnl), new BigDecimal("50"),
-                0, null, "rub", 0);
+                BigDecimal.ZERO, null, "rub");
     }
 
     // ==============================
@@ -94,7 +108,7 @@ class BotValuationServiceTest {
         // Тот же результат через среднюю цену входа: 100 × (100 − 95).
         assertThat(v.unrealizedPnl()).isEqualByComparingTo(
                 new BigDecimal("100").subtract(v.averageEntryPrice())
-                        .multiply(BigDecimal.valueOf(v.openShares())));
+                        .multiply(v.openQuantity()));
     }
 
     @Test

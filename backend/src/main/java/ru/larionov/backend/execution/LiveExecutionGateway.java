@@ -74,7 +74,8 @@ public class LiveExecutionGateway implements ExecutionGateway {
 
     @Override
     public BotOrderView placeLimit(BotExecutionContext ctx, PlaceIntent intent) {
-        riskGuard.check(ctx, intent);
+        PlaceIntent tradable = toTradable(ctx, intent);
+        riskGuard.check(ctx, tradable);
 
         // Шаг 1: фиксируем намерение в журнале ДО обращения к бирже.
         // UUID даёт ровно 36 символов — предел поля orderId у T-Invest.
@@ -85,25 +86,25 @@ public class LiveExecutionGateway implements ExecutionGateway {
                 .accountId(ctx.accountId().value())
                 .instrumentUid(ctx.instrumentId().primary())
                 .clientOrderId(clientOrderId)
-                .side(intent.side())
+                .side(tradable.side())
                 .status(OrderStatus.PENDING)
-                .gridLevel(intent.gridLevel())
-                .requestedLots(intent.lots())
-                .executedLots(0)
-                .limitPrice(intent.limitPrice())
-                .lotSize(ctx.lotSize())
+                .gridLevel(tradable.gridLevel())
+                .requestedQuantity(tradable.quantity())
+                .executedQuantity(BigDecimal.ZERO)
+                .limitPrice(tradable.limitPrice())
+                .exchangeLotSize(ctx.exchangeLotSize())
                 .dryRun(false)
                 .build());
 
-        // Шаг 2: сетевой вызов.
+        // Шаг 2: сетевой вызов. В заявочные единицы биржи переводим здесь и только здесь.
         try {
             OrderResponse response = orders().placeLimit(new OrderRequest(
                     ctx.accountId(),
                     ctx.instrumentId(),
                     new ClientOrderId(clientOrderId),
-                    intent.side(),
-                    BigDecimal.valueOf(intent.lots()),
-                    intent.limitPrice(),
+                    tradable.side(),
+                    ctx.toExchangeUnits(tradable.quantity()),
+                    tradable.limitPrice(),
                     TimeInForce.GTC // у T-Invest всё равно DAY: GTC в протоколе нет
             ));
 
@@ -117,8 +118,9 @@ public class LiveExecutionGateway implements ExecutionGateway {
 
             riskGuard.recordPlacement(ctx.botId());
             events.emit(ctx.botId(), BotEventLevel.INFO, BotEventType.ORDER_PLACED,
-                    "%s %d лот(ов) по %s".formatted(intent.side(), intent.lots(), intent.limitPrice().toPlainString()),
-                    Map.of("clientOrderId", clientOrderId, "gridLevel", String.valueOf(intent.gridLevel())));
+                    "%s %s по %s".formatted(tradable.side(), plain(tradable.quantity()),
+                            tradable.limitPrice().toPlainString()),
+                    Map.of("clientOrderId", clientOrderId, "gridLevel", String.valueOf(tradable.gridLevel())));
 
             return BotOrderView.of(entity);
 
@@ -132,6 +134,41 @@ public class LiveExecutionGateway implements ExecutionGateway {
                     ctx.botId(), clientOrderId, e.getMessage(), e);
             throw e;
         }
+    }
+
+    /**
+     * Приводит намерение стратегии к тому, что биржа действительно примет.
+     *
+     * Живёт в гейтвее, а не в стратегии, по той же причине, что и риск-контроль:
+     * стратегия не обязана знать про шаг количества конкретной площадки, а нарушить
+     * его не должна даже по ошибке. Округляем ВНИЗ — заявка чуть меньше задуманной
+     * безопасна, чуть больше выходит за обеспеченный бюджет.
+     *
+     * Отказ здесь честнее молчаливой отправки: биржа всё равно отвергнет заявку,
+     * но уже без внятного объяснения, а запись останется висеть в PENDING.
+     */
+    private PlaceIntent toTradable(BotExecutionContext ctx, PlaceIntent intent) {
+        BigDecimal quantity = ctx.quantizeDown(intent.quantity());
+        if (quantity.signum() <= 0) {
+            throw new RiskRejectedException(
+                    ("Количество %s меньше шага биржи %s — заявка не имеет смысла. "
+                            + "Увеличьте бюджет или уменьшите число уровней.")
+                            .formatted(plain(intent.quantity()), plain(ctx.quantityStep())));
+        }
+
+        PlaceIntent tradable = quantity.compareTo(intent.quantity()) == 0
+                ? intent
+                : new PlaceIntent(intent.side(), quantity, intent.limitPrice(), intent.gridLevel());
+
+        BigDecimal minNotional = ctx.minNotional();
+        if (minNotional != null && tradable.notional().compareTo(minNotional) < 0) {
+            throw new RiskRejectedException(
+                    ("Сумма заявки %s меньше минимума биржи %s. "
+                            + "Увеличьте бюджет или уменьшите число уровней сетки.")
+                            .formatted(tradable.notional().stripTrailingZeros().toPlainString(),
+                                    minNotional.stripTrailingZeros().toPlainString()));
+        }
+        return tradable;
     }
 
     // ==============================
@@ -238,7 +275,7 @@ public class LiveExecutionGateway implements ExecutionGateway {
             return Optional.empty();
         }
         OrderStatus before = entity.getStatus();
-        long executedBefore = entity.getExecutedLots();
+        BigDecimal executedBefore = entity.getExecutedQuantity();
 
         persist(ctx, entity, fromStream);
 
@@ -254,11 +291,12 @@ public class LiveExecutionGateway implements ExecutionGateway {
     }
 
     private void emitFillEvents(BotExecutionContext ctx, BotOrderEntity entity,
-                                OrderStatus before, long executedBefore) {
-        if (entity.getExecutedLots() > executedBefore) {
+                                OrderStatus before, BigDecimal executedBefore) {
+        if (entity.getExecutedQuantity().compareTo(nvl(executedBefore)) > 0) {
             events.emit(ctx.botId(), BotEventLevel.INFO, BotEventType.ORDER_FILLED,
-                    "%s исполнено %d из %d по %s".formatted(
-                            entity.getSide(), entity.getExecutedLots(), entity.getRequestedLots(),
+                    "%s исполнено %s из %s по %s".formatted(
+                            entity.getSide(), plain(entity.getExecutedQuantity()),
+                            plain(entity.getRequestedQuantity()),
                             entity.getAvgPrice() == null ? "?" : entity.getAvgPrice().toPlainString()),
                     Map.of("clientOrderId", entity.getClientOrderId(),
                             "gridLevel", String.valueOf(entity.getGridLevel())));
@@ -281,8 +319,8 @@ public class LiveExecutionGateway implements ExecutionGateway {
         for (BotOrderEntity o : orderRepo.findAllByBotIdAndStatusIn(ctx.botId(), OPEN_STATUSES)) {
             toReconcile.put(o.getId(), o);
         }
-        for (BotOrderEntity o : orderRepo.findAllByBotIdAndDryRunAndFeeActualFalseAndExecutedLotsGreaterThan(
-                ctx.botId(), false, 0)) {
+        for (BotOrderEntity o : orderRepo.findAllByBotIdAndDryRunAndFeeActualFalseAndExecutedQuantityGreaterThan(
+                ctx.botId(), false, BigDecimal.ZERO)) {
             toReconcile.put(o.getId(), o);
         }
 
@@ -329,15 +367,17 @@ public class LiveExecutionGateway implements ExecutionGateway {
             log.warn("Bot {}: на бирже {} ордер(ов), которых нет в журнале", ctx.botId(), adoptedOrphans);
         }
 
-        BigDecimal journalPosition = BigDecimal.valueOf(orderRepo.sumPositionLots(ctx.botId(), ctx.dryRun()));
+        BigDecimal journalPosition = nvl(orderRepo.sumPositionQuantity(ctx.botId(), ctx.dryRun()));
         BigDecimal exchangePosition = fetchExchangePosition(ctx);
         BigDecimal mismatch = exchangePosition == null
                 ? BigDecimal.ZERO
                 : exchangePosition.subtract(journalPosition);
 
+        // Позиция бота — его журнал, а не остаток счёта: на счёте может лежать чужое.
         ReconcileResult result = new ReconcileResult(
                 openOrders(ctx.botId()),
-                exchangePosition == null ? journalPosition : exchangePosition,
+                journalPosition,
+                exchangePosition,
                 riskGuard.usedCapital(ctx),
                 resolvedPending,
                 adoptedOrphans,
@@ -349,6 +389,10 @@ public class LiveExecutionGateway implements ExecutionGateway {
                     "Сверка: дорешено %d, чужих на бирже %d, расхождение позиции %s"
                             .formatted(resolvedPending, adoptedOrphans, mismatch.toPlainString()),
                     Map.of());
+        } else if (mismatch.signum() > 0) {
+            // Излишек — не наше дело: чужой бот, ручная сделка или пыль прошлой жизни.
+            log.debug("Bot {}: на счёте на {} больше, чем числится за ботом — считаю чужим",
+                    ctx.botId(), mismatch.toPlainString());
         }
         return result;
     }
@@ -426,7 +470,7 @@ public class LiveExecutionGateway implements ExecutionGateway {
     private boolean abandonIfStale(BotExecutionContext ctx, BotOrderEntity entity) {
         if (entity.getStatus() != OrderStatus.PENDING
                 || entity.getExchangeOrderId() != null
-                || entity.getExecutedLots() > 0) {
+                || nvl(entity.getExecutedQuantity()).signum() > 0) {
             return false;
         }
         Instant createdAt = entity.getCreatedAt();
@@ -449,20 +493,20 @@ public class LiveExecutionGateway implements ExecutionGateway {
     }
 
     /**
-     * Позиция с биржи, приведённая к ЛОТАМ.
+     * Позиция с биржи в единицах базового актива.
      *
-     * Брокер отдаёт количество в штуках. Пропущенное деление на размер лота стоило
-     * реальных денег: при лотности 10 позиция в 1 лот выглядела как 10, и стратегия
-     * выставляла продажи на весь этот мнимый объём, то есть продавала втрое больше,
-     * чем купила.
+     * Приведения больше нет и не нужно: брокер отдаёт позицию в штуках, домен считает
+     * в них же. Раньше здесь стояло деление на размер лота, и пропуск этого деления
+     * однажды стоил реальных денег — при лотности 10 позиция в 1 лот выглядела как 10,
+     * и стратегия выставляла продажи на весь мнимый объём. Теперь у ошибки нет места:
+     * единица одна на всём пути.
      */
     private BigDecimal fetchExchangePosition(BotExecutionContext ctx) {
         try {
-            BigDecimal shares = clientSupplier.get().accounts()
+            return clientSupplier.get().accounts()
                     .getPosition(ctx.accountId(), ctx.instrumentId())
                     .map(p -> p.quantity())
                     .orElse(BigDecimal.ZERO);
-            return ctx.sharesToLots(shares);
         } catch (Exception e) {
             log.warn("Не удалось получить позицию с биржи: {}", e.getMessage());
             return null;
@@ -477,6 +521,15 @@ public class LiveExecutionGateway implements ExecutionGateway {
         return clientSupplier.get().orders();
     }
 
+    private static BigDecimal nvl(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value;
+    }
+
+    /** Количество для человека: 0.000001 не должно превратиться в 1E-6. */
+    private static String plain(BigDecimal value) {
+        return value == null ? "—" : value.stripTrailingZeros().toPlainString();
+    }
+
     private void persist(BotExecutionContext ctx, BotOrderEntity entity, OrderState state) {
         applyState(ctx, entity, state);
         BotOrderEntity saved = orderRepo.save(entity);
@@ -488,15 +541,25 @@ public class LiveExecutionGateway implements ExecutionGateway {
         if (state == null) {
             return;
         }
-        if (entity.getLotSize() <= 0) {
-            entity.setLotSize(ctx.lotSize());
+        if (entity.getExchangeLotSize() == null || entity.getExchangeLotSize().signum() <= 0) {
+            entity.setExchangeLotSize(ctx.exchangeLotSize());
         }
         if (state.status() != null && state.status() != OrderStatus.UNKNOWN) {
             entity.setStatus(state.status());
         }
         if (state.executedQuantity() != null) {
-            long executed = state.executedQuantity().longValue();
-            entity.setExecutedLots(Math.max(entity.getExecutedLots(), executed));
+            // Биржа отвечает СВОИМИ заявочными единицами — переводим в базовые здесь,
+            // на той же границе, где переводили в обратную сторону при постановке.
+            BigDecimal executed = ctx.fromExchangeUnits(state.executedQuantity());
+            // Количество растёт и только растёт: запоздалое или частичное чтение не должно
+            // занижать уже известное исполнение. Единственное исключение — биржа сама
+            // сообщила, что удержала комиссию монетой: тогда меньшее число не устаревшее
+            // чтение, а окончательный расчёт, и монотонность работает против нас. Раньше
+            // исключения не было, брутто побеждало по max() навсегда, и позиция журнала
+            // так и оставалась больше фактической ровно на комиссию.
+            entity.setExecutedQuantity(state.quantityNetOfFee()
+                    ? executed
+                    : nvl(entity.getExecutedQuantity()).max(executed));
         }
         if (state.averageExecutedPrice() != null) {
             entity.setAvgPrice(state.averageExecutedPrice());
@@ -509,7 +572,9 @@ public class LiveExecutionGateway implements ExecutionGateway {
 
     private void applyFee(BotExecutionContext ctx, BotOrderEntity entity, OrderState state) {
         OrderFee fee = state.fee();
-        if ((fee == null || fee.amount() == null) && entity.getExecutedLots() > 0 && !entity.isFeeActual()) {
+        if ((fee == null || fee.amount() == null)
+                && nvl(entity.getExecutedQuantity()).signum() > 0
+                && !entity.isFeeActual()) {
             fee = estimateFee(ctx, entity);
         }
         if (fee == null || fee.amount() == null) {
@@ -538,10 +603,7 @@ public class LiveExecutionGateway implements ExecutionGateway {
             if (rate == null || price == null) {
                 return null;
             }
-            BigDecimal amount = price
-                    .multiply(BigDecimal.valueOf(entity.getExecutedLots()))
-                    .multiply(BigDecimal.valueOf(entity.getLotSize() <= 0 ? ctx.lotSize() : entity.getLotSize()))
-                    .multiply(rate);
+            BigDecimal amount = price.multiply(nvl(entity.getExecutedQuantity())).multiply(rate);
             return OrderFee.estimated(rate, amount, null, CommissionSource.BROKER_RATE_ESTIMATE);
         } catch (Exception e) {
             log.debug("Не удалось оценить комиссию ордера {}: {}", entity.getClientOrderId(), e.getMessage());

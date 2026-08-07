@@ -127,7 +127,9 @@ public class TInvestInstrumentsApi implements InstrumentsApi {
     public TradingConstraints getConstraints(InstrumentId id) {
         InstrumentDetails details = get(id);
 
-        return new TradingConstraints(
+        // Целые лоты: дробить бумагу нельзя, поэтому шаг количества равен лоту,
+        // а отдельного минимума по сумме заявки у брокера нет.
+        return TradingConstraints.wholeLots(
                 details.lot(),
                 details.minPriceIncrement(),
                 details.brief().quoteCurrency()

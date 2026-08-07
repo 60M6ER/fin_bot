@@ -24,10 +24,11 @@ public record GridPreviewDto(
         BigDecimal commissionCoverageRatio,
         BigDecimal netPerCyclePercent,
         BigDecimal worstCaseCapital,
-        Integer lotSize,
+        /** Минимальный шаг количества биржи: им ограничен размер заявки. */
+        BigDecimal quantityStep,
         BigDecimal priceIncrement,
-        /** Размер заявки по уровням покупки: индекс — уровень. */
-        List<Long> lotsByLevel,
+        /** Размер заявки по уровням покупки в единицах базового актива: индекс — уровень. */
+        List<BigDecimal> quantityByLevel,
         String sizingMode,
         BigDecimal workingBudget,
         BigDecimal budgetLeftover,
@@ -37,7 +38,7 @@ public record GridPreviewDto(
 ) {
     public GridPreviewDto {
         ladderPrices = ladderPrices == null ? List.of() : List.copyOf(ladderPrices);
-        lotsByLevel = lotsByLevel == null ? List.of() : List.copyOf(lotsByLevel);
+        quantityByLevel = quantityByLevel == null ? List.of() : List.copyOf(quantityByLevel);
     }
 
     public static GridPreviewDto error(String message) {

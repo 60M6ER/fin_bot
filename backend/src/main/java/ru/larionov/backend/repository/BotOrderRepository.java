@@ -7,6 +7,7 @@ import org.springframework.stereotype.Repository;
 import ru.larionov.backend.entity.BotOrderEntity;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -19,8 +20,8 @@ public interface BotOrderRepository extends JpaRepository<BotOrderEntity, UUID> 
 
     List<BotOrderEntity> findAllByBotIdAndStatusIn(UUID botId, List<OrderStatus> statuses);
 
-    List<BotOrderEntity> findAllByBotIdAndDryRunAndFeeActualFalseAndExecutedLotsGreaterThan(
-            UUID botId, boolean dryRun, long executedLots);
+    List<BotOrderEntity> findAllByBotIdAndDryRunAndFeeActualFalseAndExecutedQuantityGreaterThan(
+            UUID botId, boolean dryRun, BigDecimal executedQuantity);
 
     List<BotOrderEntity> findTop200ByBotIdOrderByCreatedAtDesc(UUID botId);
 
@@ -30,14 +31,14 @@ public interface BotOrderRepository extends JpaRepository<BotOrderEntity, UUID> 
     long countByBotIdAndCreatedAtAfter(UUID botId, Instant after);
 
     /**
-     * Позиция по журналу: куплено минус продано, в лотах.
+     * Позиция по журналу: куплено минус продано, в единицах базового актива.
      * Считается по фактически исполненным объёмам, поэтому переживает рестарт.
      */
     @Query("""
             select coalesce(sum(case when o.side = ru.larionov.backend.exchange.api.enums.OrderSide.BUY
-                                     then o.executedLots else -o.executedLots end), 0)
+                                     then o.executedQuantity else -o.executedQuantity end), 0)
             from BotOrderEntity o
             where o.botId = :botId and o.dryRun = :dryRun
             """)
-    long sumPositionLots(@Param("botId") UUID botId, @Param("dryRun") boolean dryRun);
+    BigDecimal sumPositionQuantity(@Param("botId") UUID botId, @Param("dryRun") boolean dryRun);
 }

@@ -16,8 +16,8 @@ public record BotOrderView(
         OrderSide side,
         OrderStatus status,
         Integer gridLevel,
-        long requestedLots,
-        long executedLots,
+        BigDecimal requestedQuantity,
+        BigDecimal executedQuantity,
         BigDecimal limitPrice,
         BigDecimal avgPrice,
         BigDecimal fee,
@@ -25,7 +25,7 @@ public record BotOrderView(
         BigDecimal feeRate,
         String feeSource,
         String feeCurrency,
-        int lotSize,
+        BigDecimal exchangeLotSize,
         boolean dryRun,
         String lastError,
         Instant createdAt,
@@ -40,8 +40,8 @@ public record BotOrderView(
                 e.getSide(),
                 e.getStatus(),
                 e.getGridLevel(),
-                e.getRequestedLots(),
-                e.getExecutedLots(),
+                e.getRequestedQuantity(),
+                e.getExecutedQuantity(),
                 e.getLimitPrice(),
                 e.getAvgPrice(),
                 e.getFee(),
@@ -49,7 +49,7 @@ public record BotOrderView(
                 e.getFeeRate(),
                 e.getFeeSource(),
                 e.getFeeCurrency(),
-                e.getLotSize(),
+                e.getExchangeLotSize(),
                 e.isDryRun(),
                 e.getLastError(),
                 e.getCreatedAt(),
@@ -57,7 +57,13 @@ public record BotOrderView(
         );
     }
 
-    public long remainingLots() {
-        return Math.max(0, requestedLots - executedLots);
+    /** Сколько ещё не исполнено. Никогда не отрицательно. */
+    public BigDecimal remainingQuantity() {
+        BigDecimal remaining = nvl(requestedQuantity).subtract(nvl(executedQuantity));
+        return remaining.signum() < 0 ? BigDecimal.ZERO : remaining;
+    }
+
+    private static BigDecimal nvl(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value;
     }
 }

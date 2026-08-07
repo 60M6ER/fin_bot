@@ -66,14 +66,14 @@ class GridPreviewServiceTest {
         when(client.fees()).thenReturn(fees);
         when(client.marketData()).thenReturn(marketData);
         when(instruments.getConstraints(instrumentId))
-                .thenReturn(new TradingConstraints(10, new BigDecimal("0.01"), "rub"));
+                .thenReturn(TradingConstraints.wholeLots(10, new BigDecimal("0.01"), "rub"));
         when(fees.getFeeInfo(accountId, instrumentId))
                 .thenReturn(new FeeInfo(new BigDecimal("0.0004"), new BigDecimal("0.0006"),
                         new BigDecimal("0.0007"), new BigDecimal("0.0008")));
     }
 
     @Test
-    void returnsTheSameLadderEconomicsAndLotAwareCapitalAsValidator() throws Exception {
+    void returnsTheSameLadderEconomicsAndCapitalAsValidator() throws Exception {
         mockConfigs(manualConfig(), new BigDecimal("20000"));
 
         GridPreviewDto preview = service.preview(new GridPreviewRequest(connectionId, JSON));
@@ -89,7 +89,7 @@ class GridPreviewServiceTest {
         assertThat(preview.sellFeePercent()).isEqualByComparingTo("0.06");
         assertThat(preview.roundTripFeePercent()).isEqualByComparingTo("0.10");
         assertThat(preview.worstCaseCapital()).isEqualByComparingTo("10450");
-        assertThat(preview.lotSize()).isEqualTo(10);
+        assertThat(preview.quantityStep()).isEqualByComparingTo("10");
         assertThat(preview.priceIncrement()).isEqualByComparingTo("0.01");
     }
 
@@ -108,7 +108,7 @@ class GridPreviewServiceTest {
     @Test
     void calculatesAutoRangeFromTheSameMarketDataAsStrategy() throws Exception {
         GridConfig auto = new GridConfig(
-                null, null, 4, 1L, 4,
+                null, null, 4, new BigDecimal("10"), 4,
                 GridConfig.RangeExitAction.STOP_BUYING, null, 3600, true,
                 true, CandleInterval.H1, 6, new BigDecimal("2"),
                 new BigDecimal("0.01"), new BigDecimal("0.15"),
@@ -142,7 +142,8 @@ class GridPreviewServiceTest {
     private GridConfig manualConfig() {
         return new GridConfig(
                 new BigDecimal("100"), new BigDecimal("110"), 10,
-                1L, 10, GridConfig.RangeExitAction.STOP_BUYING,
+                // 10 штук: у инструмента заявочная единица 10, и мельче биржа не примет.
+                new BigDecimal("10"), 10, GridConfig.RangeExitAction.STOP_BUYING,
                 null, 3600, true,
                 false, CandleInterval.H1, 24, new BigDecimal("2"),
                 new BigDecimal("0.01"), new BigDecimal("0.15"),

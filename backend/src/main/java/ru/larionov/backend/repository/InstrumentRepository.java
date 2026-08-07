@@ -17,6 +17,10 @@ public interface InstrumentRepository extends JpaRepository<InstrumentEntity, UU
 
     Optional<InstrumentEntity> findByExchangeAndInstrumentUid(ExchangeType exchange, String instrumentUid);
 
+    /** Поиск по тикеру. Нужен курсу валют: пара USD/RUB известна именно тикером. */
+    Optional<InstrumentEntity> findFirstByExchangeAndTickerAndActiveTrue(
+            ExchangeType exchange, String ticker);
+
     List<InstrumentEntity> findAllByInstrumentUid(String instrumentUid);
 
     long countByExchangeAndActiveTrue(ExchangeType exchange);

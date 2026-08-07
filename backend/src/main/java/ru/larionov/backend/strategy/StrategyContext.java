@@ -4,12 +4,14 @@ import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.LedgerEntryType;
 import ru.larionov.backend.accounting.Inventory;
+import ru.larionov.backend.dto.GridGenerationDto;
 import ru.larionov.backend.exchange.api.ExchangeClient;
 import ru.larionov.backend.exchange.api.model.instrument.TradingConstraints;
 import ru.larionov.backend.execution.BotExecutionContext;
 import ru.larionov.backend.execution.ExecutionGateway;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.math.BigDecimal;
 import java.util.Optional;
 import java.util.UUID;
@@ -48,6 +50,18 @@ public interface StrategyContext {
     Inventory inventory();
 
     BigDecimal realizedPnl();
+
+    /**
+     * Отмечает начало нового поколения сетки и закрывает предыдущее.
+     *
+     * Вызов идемпотентен: повторный запуск бота в том же поколении ничего не меняет
+     * и возвращает пустой результат.
+     *
+     * @return итог закрытого поколения — то, что уходит в уведомление о перестановке
+     */
+    Optional<GridGenerationDto> rollGridGeneration(long generation, BigDecimal lowerPrice,
+                                                   BigDecimal upperPrice, Integer levels,
+                                                   String origin, Instant startedAt);
 
     /** Асинхронно и навсегда выключить runtime вместе с persisted desired-state. */
     void requestStop(String reason);

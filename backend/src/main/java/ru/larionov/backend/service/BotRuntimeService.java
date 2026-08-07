@@ -10,6 +10,7 @@ import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.runtime.StrategyBotHandler;
 import ru.larionov.backend.runtime.StrategyBotHandlerFactory;
+import ru.larionov.backend.strategy.StrategyCommand;
 import ru.larionov.backend.strategy.StrategySnapshot;
 import ru.larionov.backend.enums.RuntimeState;
 import ru.larionov.backend.exception.NotFoundException;
@@ -73,6 +74,20 @@ public class BotRuntimeService {
     public int queueSize(UUID botId) {
         BotHandler h = handlers.get(botId);
         return h instanceof StrategyBotHandler s ? s.queueSize() : 0;
+    }
+
+    /**
+     * Ручная команда работающему боту.
+     *
+     * Только работающему: команда исполняется стратегией на потоке её событийного
+     * цикла, а у остановленного бота ни того, ни другого не существует.
+     */
+    public void command(UUID botId, StrategyCommand command) {
+        BotHandler handler = handlers.get(botId);
+        if (!(handler instanceof StrategyBotHandler strategyHandler)) {
+            throw new IllegalStateException("Бот не запущен: выполнять команду некому.");
+        }
+        strategyHandler.submitCommand(command);
     }
 
     public Optional<StrategySnapshot> strategySnapshot(UUID botId) {

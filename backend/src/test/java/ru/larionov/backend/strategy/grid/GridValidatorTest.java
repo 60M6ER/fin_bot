@@ -17,12 +17,12 @@ class GridValidatorTest {
 
     private static GridConfig cfg(String low, String high, int levels, String ratio) {
         return new GridConfig(new BigDecimal(low), new BigDecimal(high), levels,
-                1L, 100, null, ratio == null ? null : new BigDecimal(ratio), true);
+                new BigDecimal("1"), 100, null, ratio == null ? null : new BigDecimal(ratio), true);
     }
 
     private static void validate(GridConfig cfg, String commissionRate, BigDecimal maxCapital) {
         GridLadder ladder = GridLadder.build(cfg, INCREMENT);
-        GridValidator.validate(cfg, ladder, INCREMENT, new BigDecimal(commissionRate), 1, maxCapital);
+        GridValidator.validate(cfg, ladder, INCREMENT, new BigDecimal(commissionRate), BigDecimal.ONE, maxCapital);
     }
 
     @Test

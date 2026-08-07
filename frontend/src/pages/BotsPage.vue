@@ -377,8 +377,8 @@
                     </div>
                   </div>
                   <div class="metric-tile">
-                    <div class="metric-label">Открыто лотов</div>
-                    <div class="metric-value mono">{{ accounting.openLots || 0 }}</div>
+                    <div class="metric-label">Открыто</div>
+                    <div class="metric-value mono">{{ formatQuantity(accounting.openQuantity) }}</div>
                   </div>
                   <div class="metric-tile">
                     <div class="metric-label">Средняя входа</div>
@@ -419,7 +419,7 @@
                       <span v-else>—</span>
                     </td>
                     <td class="text-right mono">{{ formatMoney(row.price) }}</td>
-                    <td class="text-right mono">{{ formatLots(row) }}</td>
+                    <td class="text-right mono">{{ formatQuantity(row.quantity) }}</td>
                     <td class="text-right mono">{{ formatMoneyWithCurrency(row.grossAmount, row.currency) }}</td>
                     <td class="text-right mono">
                       {{ formatFeeWithCurrency(row.commission, row.currency) }}
@@ -441,15 +441,110 @@
               </q-markup-table>
             </q-card>
 
+            <!--
+              Успешность каждого диапазона по отдельности. Сводная доходность выше
+              этого не показывает: она не различает, заработал бот на удачной сетке
+              или отбил ею убыток предыдущей перестановки.
+            -->
+            <q-card flat bordered class="q-mt-md">
+              <q-card-section class="row items-center justify-between">
+                <div class="text-subtitle2">Поколения сетки</div>
+                <div class="text-caption text-grey">
+                  итог = стоимость перехода + P/L циклов
+                </div>
+              </q-card-section>
+
+              <q-separator />
+
+              <q-markup-table flat dense wrap-cells class="generations-table">
+                <thead>
+                  <tr>
+                    <th class="text-left">Поколение</th>
+                    <th class="text-left">Диапазон</th>
+                    <th class="text-right">Циклов</th>
+                    <th class="text-right">Стоимость перехода</th>
+                    <th class="text-right">P/L циклов</th>
+                    <th class="text-right">Итого</th>
+                    <th class="text-left">Период</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="g in generations" :key="g.generation">
+                    <td>
+                      <span class="mono">#{{ g.generation }}</span>
+                      <q-badge
+                        v-if="g.active"
+                        color="primary"
+                        label="действующее"
+                        outline
+                        class="q-ml-xs"
+                      />
+                    </td>
+                    <td class="mono">
+                      {{ formatMoney(g.lowerPrice) }} — {{ formatMoney(g.upperPrice) }}
+                      <div class="text-caption text-grey">{{ rangeOriginLabel(g.origin) }}</div>
+                    </td>
+                    <td class="text-right mono">{{ g.cycles }}</td>
+                    <td class="text-right mono" :class="moneyTone(g.transitionCost)">
+                      {{ formatSignedMoney(g.transitionCost, g.currency) }}
+                      <q-tooltip v-if="Number(g.transitionCost) !== 0">
+                        Убыток, зафиксированный принудительным закрытием позиции
+                        перед этим диапазоном
+                      </q-tooltip>
+                    </td>
+                    <td class="text-right mono" :class="moneyTone(g.cyclesPnl)">
+                      {{ formatSignedMoney(g.cyclesPnl, g.currency) }}
+                    </td>
+                    <td class="text-right mono text-weight-medium" :class="moneyTone(g.totalPnl)">
+                      {{ formatSignedMoney(g.totalPnl, g.currency) }}
+                    </td>
+                    <td class="mono text-caption">
+                      {{ formatInstant(g.startedAt) }}
+                      <div class="text-grey">
+                        {{ g.endedAt ? formatInstant(g.endedAt) : 'по настоящее время' }}
+                      </div>
+                    </td>
+                  </tr>
+                  <tr v-if="generations.length === 0">
+                    <td colspan="7" class="text-grey">
+                      Поколений пока нет — бот ещё не строил сетку
+                    </td>
+                  </tr>
+                </tbody>
+              </q-markup-table>
+
+              <q-card-section class="text-caption text-grey">
+                P/L циклов — только закрытые циклы: открытая позиция действующего
+                поколения в него не входит.
+              </q-card-section>
+            </q-card>
+
             <!-- Что бот делает прямо сейчас -->
             <q-card flat bordered class="q-mt-md">
               <q-card-section class="row items-center justify-between">
                 <div class="text-subtitle2">
                   Состояние
                   <q-badge v-if="state.dryRun" color="purple" label="бумажный режим" outline class="q-ml-sm" />
+                  <!--
+                    Выход из штатного тупика: бюджет убытка исчерпан, цена ниже всего
+                    диапазона — купить нельзя, продать нельзя, сам бот не выберется.
+                  -->
+                  <q-btn
+                    v-if="canForceReplace"
+                    dense
+                    outline
+                    no-caps
+                    size="sm"
+                    color="deep-orange"
+                    icon="restart_alt"
+                    label="Перестроить сетку с фиксацией убытка"
+                    class="q-ml-md"
+                    :loading="forceLoading"
+                    @click="forceDialog = true"
+                  />
                 </div>
                 <div class="row items-center q-gutter-md text-caption">
-                  <div>Позиция: <b class="mono">{{ state.positionLots }}</b> лот(ов)</div>
+                  <div>Позиция: <b class="mono">{{ formatQuantity(state.position) }}</b></div>
                   <div>Занято: <b class="mono">{{ formatMoney(state.reservedByBuyOrders) }}</b></div>
                   <div>
                     Активных: <b class="mono">{{ state.openOrdersCount }}</b>
@@ -481,7 +576,13 @@
                     Поколение {{ state.strategySnapshot.generation }} · с {{ formatInstant(state.strategySnapshot.rangeSince) }}
                     <template v-if="state.strategySnapshot.downwardReplacements > 0">
                       · вниз {{ state.strategySnapshot.downwardReplacements }}
-                      · зафиксировано {{ formatMoney(state.strategySnapshot.realizedDownwardLoss) }}
+                      · израсходовано бюджета убытка
+                      {{ formatMoney(state.strategySnapshot.realizedDownwardLoss) }}
+                      <q-tooltip>
+                        Счётчик риск-бюджета, а не результат бота: он обнуляется при
+                        ручной перестройке сетки. Фактический убыток остаётся в P/L
+                        и в статистике поколений.
+                      </q-tooltip>
                     </template>
                   </div>
                   <div
@@ -602,6 +703,51 @@
       </q-card>
     </q-dialog>
 
+    <!-- Перестройка сетки с фиксацией убытка -->
+    <q-dialog v-model="forceDialog">
+      <q-card style="min-width: 520px; max-width: 640px">
+        <q-card-section class="row items-center q-gutter-sm">
+          <q-icon name="restart_alt" color="deep-orange" size="md" />
+          <div class="text-subtitle1">Перестроить сетку с фиксацией убытка?</div>
+        </q-card-section>
+
+        <q-card-section class="q-pt-none">
+          <div class="q-mb-sm">Бот сделает это по порядку:</div>
+          <ol class="force-steps">
+            <li>снимет все свои заявки;</li>
+            <li>
+              продаст позицию
+              <b class="mono">{{ formatQuantity(state.position) }}</b>
+              одной заявкой по лучшему биду — <b>по рынку, цена не гарантируется</b>;
+            </li>
+            <li>зафиксирует убыток: он останется в P/L и в статистике поколений;</li>
+            <li>построит новую сетку вокруг текущей цены и продолжит работу.</li>
+          </ol>
+
+          <q-banner dense class="bg-orange-1 text-orange-10 q-mt-md" rounded>
+            Потолок убытка и лимит перестановок для этой операции снимаются, а счётчик
+            риск-бюджета обнуляется — следующие автоматические перестановки начнут
+            считать его с нуля. На результативность бота это не влияет.
+          </q-banner>
+
+          <div v-if="currentRange" class="text-caption text-grey q-mt-md">
+            Текущий диапазон: <span class="mono">{{ currentRange }}</span>
+          </div>
+          <div class="text-caption text-grey q-mt-xs">Действие необратимо.</div>
+        </q-card-section>
+
+        <q-card-actions align="right" class="q-pa-md">
+          <q-btn flat label="Отмена" v-close-popup :disable="forceLoading" />
+          <q-btn
+            color="deep-orange"
+            label="Перестроить"
+            :loading="forceLoading"
+            @click="doForceReplace"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
     <!-- delete confirm -->
     <q-dialog v-model="confirmDelete">
       <q-card style="min-width: 420px">
@@ -658,6 +804,8 @@ const connections = ref([])
 
 const createDialog = ref(false)
 const createLoading = ref(false)
+const forceDialog = ref(false)
+const forceLoading = ref(false)
 const createForm = reactive({ name: '', strategyType: null, exchangeConnectionId: null })
 
 const editForm = reactive({ name: '', strategyType: null, exchangeConnectionId: null, strategyConfig: '{}' })
@@ -700,7 +848,7 @@ const isDirty = computed(() =>
 
 // Что бот делает прямо сейчас: позиция, заявки, очередь событий.
 const state = ref({
-  running: false, dryRun: false, positionLots: 0,
+  running: false, dryRun: false, position: 0,
   reservedByBuyOrders: null, openOrdersCount: 0, queueSize: 0,
   strategySnapshot: null, orders: []
 })
@@ -709,6 +857,7 @@ const eventLevelFilter = ref('все')
 const accountingLoading = ref(false)
 const accounting = ref(emptyAccounting())
 const ledger = ref([])
+const generations = ref([])
 
 const filteredEvents = computed(() =>
   eventLevelFilter.value === 'все'
@@ -735,10 +884,9 @@ function emptyAccounting () {
     costBasisOpen: 0,
     realizedPnl: 0,
     paidCommission: 0,
-    openLots: 0,
+    openQuantity: 0,
     averageEntryPrice: null,
     currency: null,
-    openShares: 0,
     lastPrice: null,
     lastPriceAt: null,
     marketValue: null,
@@ -753,10 +901,17 @@ function emptyAccounting () {
   }
 }
 
-function formatLots (row) {
-  if (row?.lots === null || row?.lots === undefined) return '—'
-  const lotSize = row.lotSize && row.lotSize !== 1 ? ` × ${row.lotSize}` : ''
-  return `${row.lots}${lotSize}`
+/**
+ * Количество: до восьми значащих знаков, без группировки.
+ *
+ * Округлять нельзя — 0.000001 BTC превратилось бы в ноль, и экран сообщал бы,
+ * что позиции нет, хотя она есть.
+ */
+function formatQuantity (value) {
+  if (value === null || value === undefined) return '—'
+  const number = Number(value)
+  if (Number.isNaN(number)) return String(value)
+  return number.toLocaleString('ru-RU', { maximumFractionDigits: 8, useGrouping: false })
 }
 
 function eventLevelColor (level) {
@@ -805,16 +960,18 @@ function rangeOriginLabel (origin) {
 async function loadState (id) {
   if (!id) return
   try {
-    const [s, ev, acc, led] = await Promise.all([
+    const [s, ev, acc, led, gen] = await Promise.all([
       apiClient.get(`/api/v1/bots/${id}/state`),
       apiClient.get(`/api/v1/bots/${id}/events`, { params: { limit: 100 } }),
       apiClient.get(`/api/v1/bots/${id}/accounting`),
-      apiClient.get(`/api/v1/bots/${id}/ledger`)
+      apiClient.get(`/api/v1/bots/${id}/ledger`),
+      apiClient.get(`/api/v1/bots/${id}/generations`)
     ])
     state.value = s
     botEvents.value = Array.isArray(ev) ? ev : []
     accounting.value = acc || emptyAccounting()
     ledger.value = Array.isArray(led) ? led : []
+    generations.value = Array.isArray(gen) ? gen : []
   } catch (e) {
     console.debug(e)
   }
@@ -824,12 +981,14 @@ async function loadAccounting (id) {
   if (!id) return
   accountingLoading.value = true
   try {
-    const [acc, led] = await Promise.all([
+    const [acc, led, gen] = await Promise.all([
       apiClient.get(`/api/v1/bots/${id}/accounting`),
-      apiClient.get(`/api/v1/bots/${id}/ledger`)
+      apiClient.get(`/api/v1/bots/${id}/ledger`),
+      apiClient.get(`/api/v1/bots/${id}/generations`)
     ])
     accounting.value = acc || emptyAccounting()
     ledger.value = Array.isArray(led) ? led : []
+    generations.value = Array.isArray(gen) ? gen : []
   } catch (e) {
     toast?.err(getErrorMessage(e, 'Не удалось загрузить доходность'))
   } finally {
@@ -869,6 +1028,40 @@ function needsAttention (bot) {
 const blockedByConnection = computed(() =>
   !!detail.value && detail.value.active && !isRuntimeActive(detail.value.exchangeConnectionState)
 )
+
+/**
+ * Команда исполняется стратегией на потоке её событийного цикла, поэтому
+ * остановленному боту её отдавать некому — кнопку показываем только работающему.
+ */
+const canForceReplace = computed(() =>
+  !!detail.value
+  && detail.value.strategyType === 'GRID'
+  && !!state.value.running
+)
+
+const currentRange = computed(() => {
+  const s = state.value.strategySnapshot
+  if (!s) return null
+  return `${formatMoney(s.lowerPrice)} — ${formatMoney(s.upperPrice)}`
+})
+
+async function doForceReplace () {
+  const id = detail.value?.id
+  if (!id) return
+  forceLoading.value = true
+  try {
+    await apiClient.post(`/api/v1/bots/${id}/force-grid-replacement`)
+    forceDialog.value = false
+    // Ответ означает только «команда принята»: работу бот делает у себя в цикле,
+    // и о результате сообщит событиями. Их и подтянем.
+    toast?.ok('Команда принята — смотрите события бота')
+    await loadState(id)
+  } catch (e) {
+    toast?.err(getErrorMessage(e, 'Не удалось перестроить сетку'), { timeout: 8000 })
+  } finally {
+    forceLoading.value = false
+  }
+}
 
 onMounted(async () => {
   await Promise.all([loadStrategyTypes(), loadConnections()])
@@ -1163,6 +1356,17 @@ async function doDelete () {
 .ledger-table {
   max-height: 320px;
   overflow: auto;
+}
+
+.generations-table {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.force-steps {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.7;
 }
 
 .events-list {

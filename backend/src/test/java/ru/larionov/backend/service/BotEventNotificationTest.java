@@ -60,7 +60,7 @@ class BotEventNotificationTest {
     private BotValuationDto valued(String equity, String realized, String total) {
         return new BotValuationDto(
                 false, BigDecimal.ZERO, BigDecimal.ZERO, new BigDecimal(realized), BigDecimal.ZERO,
-                0, null, "RUB", 0,
+                BigDecimal.ZERO, null, "RUB",
                 null, null, null, null, total == null ? null : new BigDecimal(total),
                 new BigDecimal("10000"), new BigDecimal("10000"), BigDecimal.ZERO,
                 equity == null ? null : new BigDecimal(equity), "WITHDRAW", "UNIFORM");

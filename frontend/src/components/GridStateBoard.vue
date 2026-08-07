@@ -19,11 +19,11 @@
       >
         <span class="grid-state__side">{{ o.side === 'BUY' ? '▼' : '▲' }}</span>
         <span class="grid-state__price mono">{{ formatMoney(o.limitPrice) }}</span>
-        <span class="grid-state__lots mono">{{ remaining(o) }} лот.</span>
+        <span class="grid-state__lots mono">{{ remaining(o) }}</span>
         <q-tooltip anchor="top middle" self="bottom middle">
           {{ o.side === 'BUY' ? 'Покупка' : 'Продажа' }} ·
           {{ orderStatusLabel(o.status) }} ·
-          {{ o.executedLots }}/{{ o.requestedLots }} лот.
+          {{ formatQuantity(o.executedQuantity) }}/{{ formatQuantity(o.requestedQuantity) }}
           <template v-if="o.gridLevel !== null && o.gridLevel !== undefined">
             <br>{{ o.side === 'BUY'
               ? `Уровень ${o.gridLevel}`
@@ -51,8 +51,8 @@
         <span class="grid-state__level">{{ row.level }}</span>
         <span class="grid-state__price mono">{{ formatMoney(row.price) }}</span>
 
-        <span v-if="row.plannedLots !== null" class="grid-state__planned mono">
-          {{ row.plannedLots }} лот.
+        <span v-if="row.plannedQuantity !== null" class="grid-state__planned mono">
+          {{ formatQuantity(row.plannedQuantity) }}
         </span>
         <span v-else class="grid-state__planned text-grey-5">
           только продажа
@@ -95,7 +95,7 @@
 <script setup>
 import { computed } from 'vue'
 import { formatMoney } from 'src/services/money'
-import { buildGridRows, offGridOrders, remainingLots } from 'src/services/gridBoard'
+import { buildGridRows, offGridOrders, remainingQuantity, formatQuantity } from 'src/services/gridBoard'
 
 const props = defineProps({
   snapshot: { type: Object, default: null },
@@ -113,7 +113,7 @@ function orderStatusLabel (status) {
   return STATUS_LABELS[status] || status
 }
 
-const remaining = remainingLots
+const remaining = remainingQuantity
 
 /** Дешевле сверху вниз — читается как ценовая шкала. */
 const sortedOrders = computed(() =>

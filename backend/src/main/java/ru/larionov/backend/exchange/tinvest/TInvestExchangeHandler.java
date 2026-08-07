@@ -55,6 +55,11 @@ public final class TInvestExchangeHandler implements ExchangeHandler {
         return ExchangeType.T_INVEST;
     }
 
+    @Override
+    public boolean sandbox() {
+        return connection.sandboxEnabled();
+    }
+
     public ExchangeConnectionContext context() {
         return connection;
     }

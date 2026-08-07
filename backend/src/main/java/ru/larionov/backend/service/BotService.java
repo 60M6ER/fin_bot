@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import ru.larionov.backend.accounting.AccountingService;
 import ru.larionov.backend.accounting.BotValuationService;
+import ru.larionov.backend.accounting.GridGenerationService;
 import ru.larionov.backend.dto.*;
 import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.entity.BotOrderEntity;
@@ -46,6 +47,7 @@ public class BotService {
     private final ExchangeRuntimeService exchangeRuntimeService;
     private final BotEventService eventService;
     private final AccountingService accountingService;
+    private final GridGenerationService gridGenerationService;
     private final BotValuationService valuationService;
     private final ObjectMapper objectMapper;
 
@@ -85,17 +87,14 @@ public class BotService {
         BigDecimal reserved = BigDecimal.ZERO;
         for (BotOrderEntity o : open) {
             if (o.getSide() == OrderSide.BUY && o.getLimitPrice() != null) {
-                int lotSize = o.getLotSize() <= 0 ? 1 : o.getLotSize();
-                reserved = reserved.add(o.getLimitPrice()
-                        .multiply(BigDecimal.valueOf(o.remainingLots()))
-                        .multiply(BigDecimal.valueOf(lotSize)));
+                reserved = reserved.add(o.getLimitPrice().multiply(o.remainingQuantity()));
             }
         }
 
         return new BotTradingStateDto(
                 botRuntimeService.isRunning(id),
                 dryRun,
-                orderRepo.sumPositionLots(id, dryRun),
+                orderRepo.sumPositionQuantity(id, dryRun),
                 reserved,
                 open.size(),
                 botRuntimeService.queueSize(id),
@@ -124,6 +123,12 @@ public class BotService {
     public List<MoneyLedgerDto> ledger(UUID id, Boolean dryRun) {
         requireBot(id);
         return accountingService.ledger(id, resolveDryRun(id, dryRun));
+    }
+
+    /** Успешность каждого диапазона по отдельности: от свежего поколения к старому. */
+    public List<GridGenerationDto> generations(UUID id, Boolean dryRun) {
+        requireBot(id);
+        return gridGenerationService.list(id, resolveDryRun(id, dryRun));
     }
 
     /** Боты конкретного подключения — для экрана биржи: видно, что остановит её выключение. */
@@ -181,6 +186,7 @@ public class BotService {
         // Журнал событий — лог, удаляем вместе с ботом.
         // Журнал ордеров (bot_order) остаётся намеренно: это финансовая запись.
         eventService.deleteAllForBot(id);
+        gridGenerationService.deleteAllForBot(id);
         botRepo.deleteById(id);
         valuationService.forget(id);
     }

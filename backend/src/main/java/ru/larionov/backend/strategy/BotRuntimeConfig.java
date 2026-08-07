@@ -22,7 +22,8 @@ public record BotRuntimeConfig(
          */
         Boolean dryRun,
         BigDecimal maxCapital,
-        Long maxPositionLots,
+        /** Потолок позиции в ЕДИНИЦАХ БАЗОВОГО АКТИВА (был в лотах, пересчитан миграцией 701). */
+        BigDecimal maxPositionQuantity,
         Integer maxOrdersPerDay,
         Integer maxOrdersPerMinute,
         Integer tickIntervalSeconds,

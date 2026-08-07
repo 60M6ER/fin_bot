@@ -21,7 +21,7 @@ import java.time.Instant;
  *
  * <h3>Формулы</h3>
  * <pre>
- * marketValue   = openShares × lastPrice
+ * marketValue   = openQuantity × lastPrice
  * unrealizedPnl = marketValue − costBasisOpen
  * totalPnl      = realizedPnl + unrealizedPnl
  * equity        = workingBudget + unrealizedPnl
@@ -37,10 +37,11 @@ public record BotValuationDto(
         BigDecimal costBasisOpen,
         BigDecimal realizedPnl,
         BigDecimal paidCommission,
-        long openLots,
+        /** Открытая позиция в ЕДИНИЦАХ БАЗОВОГО АКТИВА (штуки, монеты). */
+        BigDecimal openQuantity,
+        /** Средняя цена входа за одну такую единицу. */
         BigDecimal averageEntryPrice,
         String currency,
-        long openShares,
 
         BigDecimal lastPrice,
         Instant lastPriceAt,
@@ -60,7 +61,7 @@ public record BotValuationDto(
     public static BotValuationDto empty(boolean dryRun) {
         return new BotValuationDto(
                 dryRun, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
-                0, null, null, 0,
+                BigDecimal.ZERO, null, null,
                 null, null, null, null, null,
                 null, null, BigDecimal.ZERO, null, null, null);
     }

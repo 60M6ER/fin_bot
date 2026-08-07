@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import ru.larionov.backend.exchange.api.model.market.LastPrice;
 import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.larionov.backend.exchange.api.model.order.OrderState;
+import ru.larionov.backend.strategy.StrategyCommand;
 
 import java.util.UUID;
 import java.util.concurrent.PriorityBlockingQueue;
@@ -40,7 +41,7 @@ public final class BotEventLoop implements AutoCloseable {
     private static final int PRIORITY_PRICE = 2;
     private static final int PRIORITY_TICK = 3;
 
-    private enum Kind { RECONNECT, TRADING_STATUS, ORDER, PRICE, TICK }
+    private enum Kind { RECONNECT, TRADING_STATUS, COMMAND, ORDER, PRICE, TICK }
 
     private record Event(int priority, long seq, Kind kind, Object payload) implements Comparable<Event> {
         @Override
@@ -121,6 +122,17 @@ public final class BotEventLoop implements AutoCloseable {
         offer(new Event(PRIORITY_CONTROL, sequence.incrementAndGet(), Kind.TRADING_STATUS, event));
     }
 
+    /**
+     * Команда оператора идёт с управляющим приоритетом: человек уже видит,
+     * что бот стоит, и ждать своей очереди за котировками ей незачем.
+     */
+    public void submitCommand(StrategyCommand command) {
+        if (!running.get() || command == null) {
+            return;
+        }
+        offer(new Event(PRIORITY_CONTROL, sequence.incrementAndGet(), Kind.COMMAND, command));
+    }
+
     public void submitReconnect() {
         if (!running.get()) {
             return;
@@ -186,6 +198,7 @@ public final class BotEventLoop implements AutoCloseable {
                         listener.onPrice(price);
                     }
                 }
+                case COMMAND -> listener.onCommand((StrategyCommand) event.payload());
                 case ORDER -> listener.onOrderUpdate((OrderState) event.payload());
                 case TRADING_STATUS -> listener.onTradingStatus((TradingStatusEvent) event.payload());
                 case RECONNECT -> listener.onStreamReconnect();

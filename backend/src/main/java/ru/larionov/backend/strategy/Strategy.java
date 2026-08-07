@@ -71,6 +71,22 @@ public interface Strategy {
     default void onTick() {
     }
 
+    /**
+     * Принимает ли стратегия такую команду оператора.
+     *
+     * Спрашивается СИНХРОННО, до постановки команды в очередь: отказ должен дойти
+     * до нажавшего кнопку ответом на его запрос, а не строчкой в журнале спустя
+     * неопределённое время.
+     */
+    default boolean supports(StrategyCommand command) {
+        return false;
+    }
+
+    /** Выполняется на потоке событийного цикла, как и всё остальное. */
+    default void onCommand(StrategyCommand command) {
+        throw new UnsupportedOperationException("Стратегия не поддерживает команду " + command);
+    }
+
     default Optional<StrategySnapshot> snapshot() {
         return Optional.empty();
     }

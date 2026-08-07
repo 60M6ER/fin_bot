@@ -1,4 +1,4 @@
-package ru.larionov.backend.exchange.tinvest;
+package ru.larionov.backend.exchange.common;
 
 import ru.larionov.backend.exchange.api.model.stream.StreamHealth;
 
@@ -7,8 +7,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** Счётчики живости стрима. Пишутся с потоков SDK, читаются из UI и сторожевого таймера. */
-final class StreamHealthTracker {
+/**
+ * Счётчики живости стрима. Пишутся с потоков SDK, читаются из UI и сторожевого таймера.
+ *
+ * Общий для всех адаптеров: живость стрима устроена одинаково у любой биржи,
+ * а вот последствия разрыва — нет, и именно поэтому {@link #markConnected()}
+ * отличает первое подключение от переподключения.
+ */
+public final class StreamHealthTracker {
 
     private final AtomicBoolean connected = new AtomicBoolean(false);
     private final AtomicBoolean firstConnect = new AtomicBoolean(true);
@@ -23,7 +29,7 @@ final class StreamHealthTracker {
      *         а после переподключения обязательна сверка — за время разрыва
      *         события потерялись безвозвратно.
      */
-    boolean markConnected() {
+    public boolean markConnected() {
         lastConnectAt.set(Instant.now());
         lastError.set(null);
         connected.set(true);
@@ -35,21 +41,21 @@ final class StreamHealthTracker {
         return isReconnect;
     }
 
-    void markEvent() {
+    public void markEvent() {
         lastEventAt.set(Instant.now());
         connected.set(true);
     }
 
-    void markError(String message) {
+    public void markError(String message) {
         lastError.set(message);
         connected.set(false);
     }
 
-    void markClosed() {
+    public void markClosed() {
         connected.set(false);
     }
 
-    StreamHealth snapshot() {
+    public StreamHealth snapshot() {
         return new StreamHealth(
                 connected.get(),
                 lastEventAt.get(),

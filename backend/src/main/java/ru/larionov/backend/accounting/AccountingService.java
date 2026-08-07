@@ -1,6 +1,7 @@
 package ru.larionov.backend.accounting;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
@@ -8,7 +9,6 @@ import org.springframework.transaction.annotation.Transactional;
 import ru.larionov.backend.dto.BotAccountingDto;
 import ru.larionov.backend.dto.MoneyLedgerDto;
 import ru.larionov.backend.entity.BotOrderEntity;
-import ru.larionov.backend.entity.InstrumentEntity;
 import ru.larionov.backend.entity.MoneyLedgerEntity;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
@@ -16,8 +16,6 @@ import ru.larionov.backend.enums.LedgerEntryType;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.execution.BotExecutionContext;
 import ru.larionov.backend.repository.BotOrderRepository;
-import ru.larionov.backend.repository.ExchangeConnectionRepository;
-import ru.larionov.backend.repository.InstrumentRepository;
 import ru.larionov.backend.repository.MoneyLedgerRepository;
 import ru.larionov.backend.service.BotEventService;
 import ru.larionov.backend.service.MoneyFormat;
@@ -26,6 +24,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.*;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class AccountingService {
@@ -38,8 +37,6 @@ public class AccountingService {
     private final MoneyLedgerRepository ledgerRepo;
     private final MoneyLedgerWriter ledgerWriter;
     private final BotOrderRepository orderRepo;
-    private final ExchangeConnectionRepository connectionRepo;
-    private final InstrumentRepository instrumentRepo;
     private final BotEventService events;
     private final ApplicationEventPublisher publisher;
 
@@ -50,13 +47,17 @@ public class AccountingService {
      */
     @Transactional
     public void recordOrderState(BotExecutionContext ctx, BotOrderEntity order) {
-        if (order == null || order.getExecutedLots() <= 0 || order.getAvgPrice() == null) {
+        if (order == null || nvl(order.getExecutedQuantity()).signum() <= 0 || order.getAvgPrice() == null) {
             return;
         }
 
-        long previousCum = Optional.ofNullable(ledgerRepo.maxExecutedLotsCum(order.getId(), TRADE_TYPES)).orElse(0L);
-        if (order.getExecutedLots() > previousCum) {
-            recordTradeDelta(ctx, order, previousCum);
+        BigDecimal previousCum = nvl(ledgerRepo.maxExecutedQuantityCum(order.getId(), TRADE_TYPES));
+        // compareTo, а не >: у BigDecimal равные числа с разным масштабом не равны по equals,
+        // и наивное сравнение раз за разом дописывало бы в книгу нулевые дельты.
+        if (order.getExecutedQuantity().compareTo(previousCum) > 0) {
+            recordTradeDelta(order, previousCum);
+        } else if (order.getExecutedQuantity().compareTo(previousCum) < 0) {
+            reduceRecordedQuantity(order, previousCum);
         }
         recordCommissionCorrection(order);
         publishLedgerChanged(ctx.botId(), ctx.dryRun());
@@ -73,7 +74,7 @@ public class AccountingService {
                 .dryRun(ctx.dryRun())
                 .entryType(type)
                 .affectsCash(false)
-                .lotSize(ctx.lotSize())
+                .exchangeLotSize(ctx.exchangeLotSize())
                 .note(note)
                 .build());
         publishLedgerChanged(ctx.botId(), ctx.dryRun());
@@ -126,10 +127,9 @@ public class AccountingService {
                 inventory.costBasisOpen(),
                 realizedPnl,
                 paidCommission,
-                inventory.openLots(),
+                inventory.openQuantity(),
                 inventory.averageEntryPrice(),
-                firstCurrency(rows),
-                inventory.openShares()
+                firstCurrency(rows)
         );
     }
 
@@ -148,13 +148,11 @@ public class AccountingService {
                 .toList();
     }
 
-    private void recordTradeDelta(BotExecutionContext ctx, BotOrderEntity order, long previousCum) {
-        long currentCum = order.getExecutedLots();
-        long deltaLots = currentCum - previousCum;
-        int lotSize = resolveLotSize(order, ctx);
-        BigDecimal gross = order.getAvgPrice()
-                .multiply(BigDecimal.valueOf(deltaLots))
-                .multiply(BigDecimal.valueOf(lotSize));
+    private void recordTradeDelta(BotOrderEntity order, BigDecimal previousCum) {
+        BigDecimal currentCum = order.getExecutedQuantity();
+        BigDecimal delta = currentCum.subtract(previousCum);
+        // Множителя больше нет: цена за единицу базового актива, количество — в них же.
+        BigDecimal gross = order.getAvgPrice().multiply(delta);
 
         BigDecimal totalFee = nvl(order.getFee());
         BigDecimal alreadyCommission = nvl(ledgerRepo.sumCommission(order.getId(), COMMISSION_TYPES));
@@ -167,7 +165,7 @@ public class AccountingService {
                 ? gross.negate().subtract(commissionDelta)
                 : gross.subtract(commissionDelta);
         BigDecimal soldCost = order.getSide() == OrderSide.SELL
-                ? costBasisForSale(order.getBotId(), order.isDryRun(), order.getGridLevel(), deltaLots)
+                ? costBasisForSale(order.getBotId(), order.isDryRun(), order.getGridLevel(), delta)
                 : BigDecimal.ZERO;
 
         boolean tradeSaved = saveIdempotent(MoneyLedgerEntity.builder()
@@ -179,20 +177,60 @@ public class AccountingService {
                 .clientOrderId(order.getClientOrderId())
                 .side(order.getSide())
                 .gridLevel(order.getGridLevel())
-                .lots(deltaLots)
-                .lotSize(lotSize)
+                .quantity(delta)
+                .exchangeLotSize(order.getExchangeLotSize())
                 .price(order.getAvgPrice())
                 .grossAmount(gross)
                 .commission(commissionDelta)
                 .commissionEstimated(!order.isFeeActual())
                 .amount(amount)
-                .executedLotsCum(currentCum)
+                .executedQuantityCum(currentCum)
                 .currency(order.getFeeCurrency())
                 .build());
 
         if (tradeSaved && order.getSide() == OrderSide.SELL) {
-            recordCycleResult(order, deltaLots, gross, commissionDelta, soldCost);
+            recordCycleResult(order, delta, gross, commissionDelta, soldCost);
         }
+    }
+
+    /**
+     * Уменьшает уже записанное количество, когда биржа подтвердила расчёт.
+     *
+     * Это НЕ откат сделки: объём торга не изменился, изменилось то, сколько монет
+     * реально зачислено. Там, где комиссия удерживается из получаемой валюты
+     * (Poloniex берёт её монетой), зачисляется строго меньше исполненного, и точная
+     * величина приходит позже — со сделками заявки.
+     *
+     * Без этой правки книга навсегда осталась бы с брутто: строка пишется по первому
+     * известию об исполнении, а дельты считаются от неё и только вверх. Позиция и
+     * себестоимость расходились бы с журналом заявок на комиссию после каждой покупки —
+     * и, что хуже, тихо: расхождение видно лишь в отчётах, а не в отказе биржи.
+     *
+     * Правится последняя строка ордера: именно её дельта и оказалась завышенной.
+     */
+    private void reduceRecordedQuantity(BotOrderEntity order, BigDecimal previousCum) {
+        List<MoneyLedgerEntity> rows =
+                ledgerRepo.findAllByOrderIdAndEntryTypeInOrderBySeqAsc(order.getId(), TRADE_TYPES);
+        if (rows.isEmpty()) {
+            return;
+        }
+
+        MoneyLedgerEntity last = rows.get(rows.size() - 1);
+        BigDecimal shortfall = previousCum.subtract(order.getExecutedQuantity());
+        BigDecimal corrected = nvl(last.getQuantity()).subtract(shortfall);
+        if (corrected.signum() <= 0) {
+            // Уценка съедает всю дельту целиком — такого не бывает при удержании
+            // комиссии, и молча обнулять строку опаснее, чем оставить как есть.
+            log.warn("Bot {}: подтверждённое количество по ордеру {} меньше записанной дельты — "
+                            + "строку книги не трогаю",
+                    order.getBotId(), order.getClientOrderId());
+            return;
+        }
+
+        last.setQuantity(corrected);
+        last.setExecutedQuantityCum(order.getExecutedQuantity());
+        repairLedgerRowMoney(last);
+        ledgerRepo.save(last);
     }
 
     private void repairLedgerRows(UUID botId, boolean dryRun) {
@@ -215,11 +253,10 @@ public class AccountingService {
             }
 
             boolean rowChanged = false;
-            int lotSize = resolveLotSize(order, null);
-            if (row.getLotSize() != lotSize) {
-                row.setLotSize(lotSize);
-                rowChanged = true;
-            }
+
+            // Починки лотности здесь больше нет: сумма строки считается как price × quantity,
+            // и множитель на неё не влияет. Раньше неверная лотность искажала деньги —
+            // ради этого проход и был написан.
 
             // Старый mapper OrderStateStream принимал стоимость лота за цену бумаги.
             // REST-сверка сохраняет в bot_order нормализованную среднюю цену, поэтому
@@ -251,13 +288,11 @@ public class AccountingService {
         }
         if (!TRADE_TYPES.contains(row.getEntryType())
                 || row.getPrice() == null
-                || row.getLots() == null) {
+                || row.getQuantity() == null) {
             return true;
         }
 
-        BigDecimal gross = row.getPrice()
-                .multiply(BigDecimal.valueOf(row.getLots()))
-                .multiply(BigDecimal.valueOf(Math.max(1, row.getLotSize())));
+        BigDecimal gross = row.getPrice().multiply(row.getQuantity());
         BigDecimal commission = nvl(row.getCommission());
         row.setGrossAmount(gross);
         row.setAmount(row.getEntryType() == LedgerEntryType.TRADE_BUY
@@ -268,23 +303,23 @@ public class AccountingService {
 
     private boolean repairCycleResults(List<MoneyLedgerEntity> rows) {
         Map<String, ClosedSale> salesByFill = new HashMap<>();
-        Deque<OpenLot> lots = new ArrayDeque<>();
+        Deque<OpenParcel> parcels = new ArrayDeque<>();
         Map<UUID, BigDecimal> remainingBuyCorrections = commissionCorrections(rows, OrderSide.BUY);
-        Map<UUID, Long> remainingBuyLots = tradeLots(rows, OrderSide.BUY);
+        Map<UUID, BigDecimal> remainingBuyQuantity = tradeQuantities(rows, OrderSide.BUY);
         Map<UUID, BigDecimal> remainingSellCorrections = commissionCorrections(rows, OrderSide.SELL);
-        Map<UUID, Long> remainingSellLots = tradeLots(rows, OrderSide.SELL);
+        Map<UUID, BigDecimal> remainingSellQuantity = tradeQuantities(rows, OrderSide.SELL);
         boolean changed = false;
 
         for (MoneyLedgerEntity row : rows) {
             if (row.getEntryType() == LedgerEntryType.TRADE_BUY) {
                 BigDecimal cost = nvl(row.getGrossAmount())
                         .add(nvl(row.getCommission()))
-                        .add(takeCommissionCorrection(row, remainingBuyCorrections, remainingBuyLots));
-                lots.addLast(new OpenLot(row.getGridLevel(), nvl(row.getLots()), row.getLotSize(), cost));
+                        .add(takeCommissionCorrection(row, remainingBuyCorrections, remainingBuyQuantity));
+                parcels.addLast(new OpenParcel(row.getGridLevel(), nvl(row.getQuantity()), cost));
             } else if (row.getEntryType() == LedgerEntryType.TRADE_SELL) {
-                BigDecimal soldCost = consumeCost(lots, row.getGridLevel(), nvl(row.getLots()));
+                BigDecimal soldCost = consumeCost(parcels, row.getGridLevel(), nvl(row.getQuantity()));
                 BigDecimal commission = nvl(row.getCommission())
-                        .add(takeCommissionCorrection(row, remainingSellCorrections, remainingSellLots));
+                        .add(takeCommissionCorrection(row, remainingSellCorrections, remainingSellQuantity));
                 salesByFill.put(fillKey(row), new ClosedSale(
                         nvl(row.getGrossAmount()), soldCost, commission));
             } else if (row.getEntryType() == LedgerEntryType.CYCLE_RESULT) {
@@ -309,50 +344,17 @@ public class AccountingService {
         return changed;
     }
 
+    /**
+     * Ключ конкретного исполнения. Масштаб нормализуем: 1 и 1.0000000000 — одно
+     * исполнение, а как строки они разные, и результат цикла не нашёл бы свою продажу.
+     */
     private String fillKey(MoneyLedgerEntity row) {
-        return row.getOrderId() + ":" + row.getExecutedLotsCum();
-    }
-
-    private int resolveLotSize(BotOrderEntity order, BotExecutionContext ctx) {
-        int orderLot = order == null ? 1 : Math.max(1, order.getLotSize());
-        Optional<Integer> catalogLot = order == null ? Optional.empty() : resolveCatalogLotSize(order);
-        int lotSize = ctx != null && ctx.lotSize() > 0
-                ? ctx.lotSize()
-                : catalogLot.orElse(orderLot);
-
-        if (order != null && lotSize != order.getLotSize()) {
-            order.setLotSize(lotSize);
-            orderRepo.save(order);
-        }
-
-        return lotSize;
-    }
-
-    private Optional<Integer> resolveCatalogLotSize(BotOrderEntity order) {
-        if (order.getInstrumentUid() == null || order.getInstrumentUid().isBlank()) {
-            return Optional.empty();
-        }
-
-        Optional<Integer> byConnection = connectionRepo.findById(order.getConnectionId())
-                .flatMap(conn -> instrumentRepo.findByExchangeAndInstrumentUid(
-                        conn.getExchange(), order.getInstrumentUid()))
-                .map(InstrumentEntity::getLot)
-                .filter(lot -> lot > 0);
-        if (byConnection.isPresent()) {
-            return byConnection;
-        }
-
-        Set<Integer> lots = new HashSet<>();
-        for (InstrumentEntity instrument : instrumentRepo.findAllByInstrumentUid(order.getInstrumentUid())) {
-            if (instrument.getLot() > 0) {
-                lots.add(instrument.getLot());
-            }
-        }
-        return lots.size() == 1 ? Optional.of(lots.iterator().next()) : Optional.empty();
+        BigDecimal cum = row.getExecutedQuantityCum();
+        return row.getOrderId() + ":" + (cum == null ? "—" : cum.stripTrailingZeros().toPlainString());
     }
 
     private void recordCommissionCorrection(BotOrderEntity order) {
-        if (order.getFee() == null || order.getExecutedLots() <= 0) {
+        if (order.getFee() == null || nvl(order.getExecutedQuantity()).signum() <= 0) {
             return;
         }
         BigDecimal already = nvl(ledgerRepo.sumCommission(order.getId(), COMMISSION_TYPES));
@@ -360,8 +362,8 @@ public class AccountingService {
         if (correction.signum() == 0) {
             return;
         }
-        long executedCum = order.getExecutedLots();
-        if (ledgerRepo.existsByOrderIdAndEntryTypeAndExecutedLotsCum(
+        BigDecimal executedCum = order.getExecutedQuantity();
+        if (ledgerRepo.existsByOrderIdAndEntryTypeAndExecutedQuantityCum(
                 order.getId(), LedgerEntryType.COMMISSION_CORRECTION, executedCum)) {
             return;
         }
@@ -375,18 +377,18 @@ public class AccountingService {
                 .clientOrderId(order.getClientOrderId())
                 .side(order.getSide())
                 .gridLevel(order.getGridLevel())
-                .lots(0L)
-                .lotSize(order.getLotSize())
+                .quantity(BigDecimal.ZERO)
+                .exchangeLotSize(order.getExchangeLotSize())
                 .commission(correction)
                 .commissionEstimated(!order.isFeeActual())
                 .amount(correction.negate())
-                .executedLotsCum(executedCum)
+                .executedQuantityCum(executedCum)
                 .currency(order.getFeeCurrency())
                 .note(order.isFeeActual() ? "Уточнение фактической комиссии" : "Уточнение оценочной комиссии")
                 .build());
     }
 
-    private void recordCycleResult(BotOrderEntity order, long soldLots, BigDecimal gross,
+    private void recordCycleResult(BotOrderEntity order, BigDecimal soldQuantity, BigDecimal gross,
                                    BigDecimal sellCommission, BigDecimal soldCost) {
         BigDecimal result = gross.subtract(soldCost).subtract(sellCommission);
         boolean saved = saveIdempotent(MoneyLedgerEntity.builder()
@@ -398,13 +400,13 @@ public class AccountingService {
                 .clientOrderId(order.getClientOrderId())
                 .side(order.getSide())
                 .gridLevel(order.getGridLevel())
-                .lots(soldLots)
-                .lotSize(order.getLotSize())
+                .quantity(soldQuantity)
+                .exchangeLotSize(order.getExchangeLotSize())
                 .grossAmount(gross)
                 .commission(sellCommission)
                 .commissionEstimated(!order.isFeeActual())
                 .amount(result)
-                .executedLotsCum(order.getExecutedLots())
+                .executedQuantityCum(order.getExecutedQuantity())
                 .currency(order.getFeeCurrency())
                 .note("Результат закрытого цикла")
                 .build());
@@ -426,48 +428,40 @@ public class AccountingService {
         }
     }
 
-    private BigDecimal costBasisForSale(UUID botId, boolean dryRun, Integer gridLevel, long soldLots) {
+    private BigDecimal costBasisForSale(UUID botId, boolean dryRun, Integer gridLevel, BigDecimal sold) {
         List<MoneyLedgerEntity> rows = ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(botId, dryRun);
-        Deque<OpenLot> lots = openLotsBeforeSale(rows);
-        return consumeCost(lots, gridLevel, soldLots);
+        return consumeCost(rebuildOpenParcels(rows), gridLevel, sold);
     }
 
-    private Deque<OpenLot> openLotsBeforeSale(List<MoneyLedgerEntity> rows) {
-        return rebuildOpenLots(rows);
-    }
-
-    private Deque<OpenLot> rebuildOpenLots(List<MoneyLedgerEntity> rows) {
-        Deque<OpenLot> lots = new ArrayDeque<>();
+    private Deque<OpenParcel> rebuildOpenParcels(List<MoneyLedgerEntity> rows) {
+        Deque<OpenParcel> parcels = new ArrayDeque<>();
         Map<UUID, BigDecimal> remainingBuyCorrections = commissionCorrections(rows, OrderSide.BUY);
-        Map<UUID, Long> remainingBuyLots = tradeLots(rows, OrderSide.BUY);
+        Map<UUID, BigDecimal> remainingBuyQuantity = tradeQuantities(rows, OrderSide.BUY);
 
         for (MoneyLedgerEntity row : rows) {
             if (row.getEntryType() == LedgerEntryType.TRADE_BUY) {
                 BigDecimal cost = nvl(row.getGrossAmount())
                         .add(nvl(row.getCommission()))
-                        .add(takeCommissionCorrection(row, remainingBuyCorrections, remainingBuyLots));
-                lots.addLast(new OpenLot(row.getGridLevel(), nvl(row.getLots()), row.getLotSize(), cost));
+                        .add(takeCommissionCorrection(row, remainingBuyCorrections, remainingBuyQuantity));
+                parcels.addLast(new OpenParcel(row.getGridLevel(), nvl(row.getQuantity()), cost));
             } else if (row.getEntryType() == LedgerEntryType.TRADE_SELL) {
-                consumeCost(lots, row.getGridLevel(), nvl(row.getLots()));
+                consumeCost(parcels, row.getGridLevel(), nvl(row.getQuantity()));
             }
         }
-        return lots;
+        return parcels;
     }
 
     private Inventory rebuildInventory(List<MoneyLedgerEntity> rows) {
-        Deque<OpenLot> lots = rebuildOpenLots(rows);
-        long openLots = 0;
-        long openShares = 0;
+        BigDecimal openQuantity = BigDecimal.ZERO;
         BigDecimal cost = BigDecimal.ZERO;
-        for (OpenLot lot : lots) {
-            openLots += lot.lots();
-            openShares += lot.lots() * Math.max(1, lot.lotSize());
-            cost = cost.add(lot.costBasis());
+        for (OpenParcel parcel : rebuildOpenParcels(rows)) {
+            openQuantity = openQuantity.add(parcel.quantity());
+            cost = cost.add(parcel.costBasis());
         }
-        BigDecimal avg = openShares == 0
+        BigDecimal avg = openQuantity.signum() == 0
                 ? null
-                : cost.divide(BigDecimal.valueOf(openShares), 9, RoundingMode.HALF_UP);
-        return new Inventory(openLots, cost, avg, openShares);
+                : cost.divide(openQuantity, 9, RoundingMode.HALF_UP);
+        return new Inventory(openQuantity, cost, avg);
     }
 
     private Map<UUID, BigDecimal> commissionCorrections(
@@ -485,14 +479,14 @@ public class AccountingService {
         return result;
     }
 
-    private Map<UUID, Long> tradeLots(List<MoneyLedgerEntity> rows, OrderSide side) {
-        Map<UUID, Long> result = new HashMap<>();
+    private Map<UUID, BigDecimal> tradeQuantities(List<MoneyLedgerEntity> rows, OrderSide side) {
+        Map<UUID, BigDecimal> result = new HashMap<>();
+        LedgerEntryType tradeType = side == OrderSide.BUY
+                ? LedgerEntryType.TRADE_BUY
+                : LedgerEntryType.TRADE_SELL;
         for (MoneyLedgerEntity row : rows) {
-            LedgerEntryType tradeType = side == OrderSide.BUY
-                    ? LedgerEntryType.TRADE_BUY
-                    : LedgerEntryType.TRADE_SELL;
             if (row.getEntryType() == tradeType && row.getOrderId() != null) {
-                result.merge(row.getOrderId(), nvl(row.getLots()), Long::sum);
+                result.merge(row.getOrderId(), nvl(row.getQuantity()), BigDecimal::add);
             }
         }
         return result;
@@ -501,60 +495,61 @@ public class AccountingService {
     private BigDecimal takeCommissionCorrection(
             MoneyLedgerEntity row,
             Map<UUID, BigDecimal> remainingCorrections,
-            Map<UUID, Long> remainingLots
+            Map<UUID, BigDecimal> remainingQuantity
     ) {
         UUID orderId = row.getOrderId();
         if (orderId == null) {
             return BigDecimal.ZERO;
         }
         BigDecimal correction = remainingCorrections.get(orderId);
-        long lotsLeft = remainingLots.getOrDefault(orderId, 0L);
-        long rowLots = nvl(row.getLots());
-        if (correction == null || correction.signum() == 0 || lotsLeft <= 0 || rowLots <= 0) {
+        BigDecimal left = remainingQuantity.getOrDefault(orderId, BigDecimal.ZERO);
+        BigDecimal rowQuantity = nvl(row.getQuantity());
+        if (correction == null || correction.signum() == 0
+                || left.signum() <= 0 || rowQuantity.signum() <= 0) {
             return BigDecimal.ZERO;
         }
 
-        BigDecimal allocated = rowLots >= lotsLeft
+        BigDecimal allocated = rowQuantity.compareTo(left) >= 0
                 ? correction
-                : correction.multiply(BigDecimal.valueOf(rowLots))
-                        .divide(BigDecimal.valueOf(lotsLeft), 18, RoundingMode.HALF_UP);
+                : correction.multiply(rowQuantity).divide(left, 18, RoundingMode.HALF_UP);
         remainingCorrections.put(orderId, correction.subtract(allocated));
-        remainingLots.put(orderId, Math.max(0, lotsLeft - rowLots));
+        BigDecimal quantityLeft = left.subtract(rowQuantity);
+        remainingQuantity.put(orderId, quantityLeft.signum() < 0 ? BigDecimal.ZERO : quantityLeft);
         return allocated;
     }
 
-    private BigDecimal consumeCost(Deque<OpenLot> lots, Integer gridLevel, long toSell) {
-        ConsumeResult result = consumeMatching(lots, gridLevel, toSell);
+    private BigDecimal consumeCost(Deque<OpenParcel> parcels, Integer gridLevel, BigDecimal toSell) {
+        ConsumeResult result = consumeMatching(parcels, gridLevel, toSell);
         BigDecimal cost = result.cost();
-        if (result.left() > 0) {
-            cost = cost.add(consumeMatching(lots, null, result.left()).cost());
+        if (result.left().signum() > 0) {
+            cost = cost.add(consumeMatching(parcels, null, result.left()).cost());
         }
         return cost;
     }
 
-    private ConsumeResult consumeMatching(Deque<OpenLot> lots, Integer gridLevel, long toSell) {
-        if (toSell <= 0) {
-            return new ConsumeResult(0, BigDecimal.ZERO);
+    private ConsumeResult consumeMatching(Deque<OpenParcel> parcels, Integer gridLevel, BigDecimal toSell) {
+        if (toSell == null || toSell.signum() <= 0) {
+            return new ConsumeResult(BigDecimal.ZERO, BigDecimal.ZERO);
         }
-        Deque<OpenLot> rebuilt = new ArrayDeque<>();
-        long left = toSell;
+        Deque<OpenParcel> rebuilt = new ArrayDeque<>();
+        BigDecimal left = toSell;
         BigDecimal cost = BigDecimal.ZERO;
-        while (!lots.isEmpty()) {
-            OpenLot lot = lots.removeFirst();
-            boolean match = gridLevel == null || Objects.equals(gridLevel, lot.gridLevel());
-            if (!match || left <= 0) {
-                rebuilt.addLast(lot);
+        while (!parcels.isEmpty()) {
+            OpenParcel parcel = parcels.removeFirst();
+            boolean match = gridLevel == null || Objects.equals(gridLevel, parcel.gridLevel());
+            if (!match || left.signum() <= 0) {
+                rebuilt.addLast(parcel);
                 continue;
             }
-            long taken = Math.min(left, lot.lots());
-            left -= taken;
-            cost = cost.add(lot.take(taken).costBasis());
-            OpenLot rest = lot.remainingAfter(taken);
+            BigDecimal taken = left.min(parcel.quantity());
+            left = left.subtract(taken);
+            cost = cost.add(parcel.take(taken).costBasis());
+            OpenParcel rest = parcel.remainingAfter(taken);
             if (rest != null) {
                 rebuilt.addLast(rest);
             }
         }
-        lots.addAll(rebuilt);
+        parcels.addAll(rebuilt);
         return new ConsumeResult(left, cost);
     }
 
@@ -574,11 +569,7 @@ public class AccountingService {
         return left == null ? right == null : right != null && left.compareTo(right) == 0;
     }
 
-    private static long nvl(Long value) {
-        return value == null ? 0 : value;
-    }
-
-    private record ConsumeResult(long left, BigDecimal cost) {
+    private record ConsumeResult(BigDecimal left, BigDecimal cost) {
     }
 
     private record ClosedSale(BigDecimal gross, BigDecimal cost, BigDecimal commission) {

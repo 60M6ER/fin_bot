@@ -6,13 +6,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.transaction.annotation.Transactional;
 import ru.larionov.backend.entity.BotOrderEntity;
-import ru.larionov.backend.entity.ExchangeConnectionEntity;
-import ru.larionov.backend.entity.InstrumentEntity;
 import ru.larionov.backend.entity.MoneyLedgerEntity;
-import ru.larionov.backend.enums.ExchangeType;
 import ru.larionov.backend.enums.LedgerEntryType;
-import ru.larionov.backend.exchange.api.enums.InstrumentKind;
-import ru.larionov.backend.exchange.api.enums.MarketSegment;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
@@ -20,8 +15,6 @@ import ru.larionov.backend.exchange.api.model.id.InstrumentId;
 import ru.larionov.backend.execution.BotExecutionContext;
 import ru.larionov.backend.repository.BotEventRepository;
 import ru.larionov.backend.repository.BotOrderRepository;
-import ru.larionov.backend.repository.ExchangeConnectionRepository;
-import ru.larionov.backend.repository.InstrumentRepository;
 import ru.larionov.backend.repository.MoneyLedgerRepository;
 
 import java.math.BigDecimal;
@@ -29,13 +22,22 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Учёт считает в ЕДИНИЦАХ БАЗОВОГО АКТИВА. Числа в тестах сохранены прежними:
+ * там, где раньше было «1 лот при лотности 10», теперь стоит «10 штук», и все
+ * денежные ожидания обязаны совпасть до копейки — это и есть проверка того, что
+ * переход на дробное количество не сдвинул ни одной суммы.
+ */
 @SpringBootTest
 class AccountingServiceTest {
+
+    /** Заявочная единица инструмента: 10 штук в лоте. */
+    private static final BigDecimal LOT = BigDecimal.TEN;
 
     private final UUID botId = UUID.randomUUID();
     private final BotExecutionContext ctx = new BotExecutionContext(
             botId, UUID.randomUUID(), new AccountId("acc-1"), new InstrumentId("uid-1", null),
-            false, 10, null, null, null, null);
+            false, LOT, LOT, null, null, null, null, null);
 
     @Autowired
     private AccountingService accounting;
@@ -45,18 +47,12 @@ class AccountingServiceTest {
     private MoneyLedgerRepository ledgerRepo;
     @Autowired
     private BotEventRepository eventRepo;
-    @Autowired
-    private ExchangeConnectionRepository connectionRepo;
-    @Autowired
-    private InstrumentRepository instrumentRepo;
 
     @AfterEach
     void cleanUp() {
         ledgerRepo.deleteAll(ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(botId, false));
         orderRepo.deleteAll(orderRepo.findAll().stream().filter(o -> o.getBotId().equals(botId)).toList());
         eventRepo.deleteAll(eventRepo.findAll().stream().filter(e -> e.getBotId().equals(botId)).toList());
-        instrumentRepo.deleteAll(instrumentRepo.findAllByInstrumentUid(ctx.instrumentId().primary()));
-        connectionRepo.findById(ctx.connectionId()).ifPresent(connectionRepo::delete);
     }
 
     @Test
@@ -86,16 +82,35 @@ class AccountingServiceTest {
                 .isEqualByComparingTo("2.10");
     }
 
+    /** Сумма строки книги — это цена за единицу × количество, без всяких множителей. */
     @Test
-    void runtimeLotSizeOverridesLegacyDefaultLotSize() {
-        BotOrderEntity buy = saveOrder(OrderSide.BUY, 6, "22", "0.11", 1);
+    void ledgerAmountIsPriceTimesQuantity() {
+        BotOrderEntity buy = saveOrder(OrderSide.BUY, 6, "22", "0.11");
 
         accounting.recordOrderState(ctx, buy);
 
         var trade = ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(botId, false).get(0);
-        assertThat(trade.getLotSize()).isEqualTo(10);
+        assertThat(trade.getQuantity()).isEqualByComparingTo("10");
         assertThat(trade.getGrossAmount()).isEqualByComparingTo("220");
         assertThat(trade.getAmount()).isEqualByComparingTo("-220.11");
+    }
+
+    /** Дробное количество: криптобиржевой случай проходит тот же путь, что и биржевой. */
+    @Test
+    void fractionalQuantityIsAccountedExactly() {
+        BotOrderEntity buy = orderRepo.save(order(OrderSide.BUY, 0, "60000", "0.06")
+                .requestedQuantity(new BigDecimal("0.000500"))
+                .executedQuantity(new BigDecimal("0.000500"))
+                .exchangeLotSize(BigDecimal.ONE)
+                .build());
+
+        accounting.recordOrderState(ctx, buy);
+
+        var summary = accounting.summary(botId, false);
+        assertThat(summary.openQuantity()).isEqualByComparingTo("0.0005");
+        // 0.0005 × 60000 = 30, плюс комиссия 0.06
+        assertThat(summary.costBasisOpen()).isEqualByComparingTo("30.06");
+        assertThat(summary.averageEntryPrice()).isEqualByComparingTo("60120");
     }
 
     @Test
@@ -109,42 +124,13 @@ class AccountingServiceTest {
         assertThat(accounting.summary(botId, false).cashFlow()).isEqualByComparingTo(BigDecimal.ZERO);
     }
 
-    @Test
-    void summaryRepairsLegacyLedgerLotSizeFromInstrumentCatalog() {
-        saveConnectionAndInstrument(10);
-        BotOrderEntity buy = saveOrder(OrderSide.BUY, 6, "22", "0.11", 1);
-        ledgerRepo.save(MoneyLedgerEntity.builder()
-                .botId(botId)
-                .dryRun(false)
-                .entryType(LedgerEntryType.TRADE_BUY)
-                .affectsCash(true)
-                .orderId(buy.getId())
-                .clientOrderId(buy.getClientOrderId())
-                .side(OrderSide.BUY)
-                .gridLevel(6)
-                .lots(1L)
-                .lotSize(1)
-                .price(new BigDecimal("22"))
-                .grossAmount(new BigDecimal("22"))
-                .commission(new BigDecimal("0.11"))
-                .amount(new BigDecimal("-22.11"))
-                .executedLotsCum(1L)
-                .currency("rub")
-                .build());
-
-        var summary = accounting.summary(botId, false);
-
-        var repaired = ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(botId, false).get(0);
-        assertThat(repaired.getLotSize()).isEqualTo(10);
-        assertThat(repaired.getGrossAmount()).isEqualByComparingTo("220");
-        assertThat(repaired.getAmount()).isEqualByComparingTo("-220.11");
-        assertThat(summary.costBasisOpen()).isEqualByComparingTo("220.11");
-        assertThat(summary.averageEntryPrice()).isEqualByComparingTo("22.011");
-    }
-
+    /**
+     * Старый mapper принимал стоимость лота за цену бумаги. Ремонтный проход обязан
+     * это чинить и после перехода на количество: цена в книге — всегда за единицу.
+     */
     @Test
     void summaryRepairsLotAmountStoredAsPerSharePrice() {
-        BotOrderEntity buy = saveOrder(OrderSide.BUY, 6, "22.36", "0.11", 10);
+        BotOrderEntity buy = saveOrder(OrderSide.BUY, 6, "22.36", "0.11");
         ledgerRepo.save(MoneyLedgerEntity.builder()
                 .botId(botId)
                 .dryRun(false)
@@ -154,13 +140,13 @@ class AccountingServiceTest {
                 .clientOrderId(buy.getClientOrderId())
                 .side(OrderSide.BUY)
                 .gridLevel(6)
-                .lots(1L)
-                .lotSize(10)
+                .quantity(BigDecimal.TEN)
+                .exchangeLotSize(LOT)
                 .price(new BigDecimal("223.60"))
                 .grossAmount(new BigDecimal("2236.00"))
                 .commission(new BigDecimal("0.11"))
                 .amount(new BigDecimal("-2236.11"))
-                .executedLotsCum(1L)
+                .executedQuantityCum(BigDecimal.TEN)
                 .currency("rub")
                 .build());
 
@@ -175,9 +161,9 @@ class AccountingServiceTest {
 
     @Test
     void summaryRepairsLegacyCycleResultFromTradeRows() {
-        BotOrderEntity buy = saveOrder(OrderSide.BUY, 6, "22.27", "0.11", 10);
+        BotOrderEntity buy = saveOrder(OrderSide.BUY, 6, "22.27", "0.11");
         accounting.recordOrderState(ctx, buy);
-        BotOrderEntity sell = saveOrder(OrderSide.SELL, 6, "22.36", "0.11", 10);
+        BotOrderEntity sell = saveOrder(OrderSide.SELL, 6, "22.36", "0.11");
         accounting.recordOrderState(ctx, sell);
 
         MoneyLedgerEntity cycle = ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(botId, false).stream()
@@ -200,43 +186,10 @@ class AccountingServiceTest {
     }
 
     @Test
-    void catalogCorrectsHistoricalLotSizeThatIsTooLarge() {
-        saveConnectionAndInstrument(1);
-        BotOrderEntity buy = saveOrder(OrderSide.BUY, 6, "50.85", "0.03", 10);
-        ledgerRepo.save(MoneyLedgerEntity.builder()
-                .botId(botId)
-                .dryRun(false)
-                .entryType(LedgerEntryType.TRADE_BUY)
-                .affectsCash(true)
-                .orderId(buy.getId())
-                .clientOrderId(buy.getClientOrderId())
-                .side(OrderSide.BUY)
-                .gridLevel(6)
-                .lots(1L)
-                .lotSize(10)
-                .price(new BigDecimal("50.85"))
-                .grossAmount(new BigDecimal("508.50"))
-                .commission(new BigDecimal("0.03"))
-                .amount(new BigDecimal("-508.53"))
-                .executedLotsCum(1L)
-                .currency("rub")
-                .build());
-
-        var summary = accounting.summary(botId, false);
-
-        var repairedOrder = orderRepo.findById(buy.getId()).orElseThrow();
-        var repairedLedger = ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(botId, false).get(0);
-        assertThat(repairedOrder.getLotSize()).isEqualTo(1);
-        assertThat(repairedLedger.getLotSize()).isEqualTo(1);
-        assertThat(repairedLedger.getGrossAmount()).isEqualByComparingTo("50.85");
-        assertThat(summary.costBasisOpen()).isEqualByComparingTo("50.88");
-    }
-
-    @Test
-    void buyCommissionCorrectionIsAllocatedBetweenSoldAndOpenLots() {
+    void buyCommissionCorrectionIsAllocatedBetweenSoldAndOpenParcels() {
         BotOrderEntity buy = saveOrder(OrderSide.BUY, 6, "100", "0.20");
-        buy.setRequestedLots(2);
-        buy.setExecutedLots(2);
+        buy.setRequestedQuantity(new BigDecimal("20"));
+        buy.setExecutedQuantity(new BigDecimal("20"));
         buy.setFeeActual(false);
         orderRepo.save(buy);
         accounting.recordOrderState(ctx, buy);
@@ -250,7 +203,7 @@ class AccountingServiceTest {
         accounting.recordOrderState(ctx, sell);
 
         var summary = accounting.summary(botId, false);
-        assertThat(summary.openLots()).isEqualTo(1);
+        assertThat(summary.openQuantity()).isEqualByComparingTo("10");
         assertThat(summary.costBasisOpen()).isEqualByComparingTo("1000.07");
         assertThat(summary.realizedPnl()).isEqualByComparingTo("98.83");
     }
@@ -269,30 +222,53 @@ class AccountingServiceTest {
         assertThat(ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(botId, false)).hasSize(2);
     }
 
+    /**
+     * Уникальный ключ книги живёт поверх numeric. Одно и то же исполнение, записанное
+     * с разной шкалой (10 и 10.0000000000), обязано остаться ОДНОЙ строкой — иначе
+     * стрим и сверка, принеся один fill одновременно, задвоили бы сделку в книге.
+     */
+    @Test
+    @Transactional
+    void duplicateIsDetectedRegardlessOfDecimalScale() {
+        UUID orderId = UUID.randomUUID();
+
+        assertThat(accounting.saveIdempotent(ledgerEntry(orderId, new BigDecimal("10")))).isTrue();
+        assertThat(accounting.saveIdempotent(ledgerEntry(orderId, new BigDecimal("10.0000000000")))).isFalse();
+    }
+
     private MoneyLedgerEntity ledgerEntry(UUID orderId) {
+        return ledgerEntry(orderId, BigDecimal.TEN);
+    }
+
+    private MoneyLedgerEntity ledgerEntry(UUID orderId, BigDecimal executedCum) {
         return MoneyLedgerEntity.builder()
                 .botId(botId)
                 .dryRun(false)
                 .entryType(LedgerEntryType.TRADE_BUY)
                 .affectsCash(true)
                 .orderId(orderId)
-                .lots(1L)
-                .lotSize(ctx.lotSize())
+                .quantity(BigDecimal.TEN)
+                .exchangeLotSize(ctx.exchangeLotSize())
                 .price(new BigDecimal("100"))
                 .grossAmount(new BigDecimal("1000"))
                 .commission(BigDecimal.ZERO)
                 .amount(new BigDecimal("-1000"))
-                .executedLotsCum(1L)
+                .executedQuantityCum(executedCum)
                 .currency("rub")
                 .build();
     }
 
+    /** Одна заявочная единица инструмента, то есть 10 штук. */
     private BotOrderEntity saveOrder(OrderSide side, int level, String price, String fee) {
-        return saveOrder(side, level, price, fee, ctx.lotSize());
+        return orderRepo.save(order(side, level, price, fee)
+                .requestedQuantity(LOT)
+                .executedQuantity(LOT)
+                .exchangeLotSize(LOT)
+                .build());
     }
 
-    private BotOrderEntity saveOrder(OrderSide side, int level, String price, String fee, int lotSize) {
-        return orderRepo.save(BotOrderEntity.builder()
+    private BotOrderEntity.BotOrderEntityBuilder order(OrderSide side, int level, String price, String fee) {
+        return BotOrderEntity.builder()
                 .botId(botId)
                 .connectionId(ctx.connectionId())
                 .accountId(ctx.accountId().value())
@@ -301,39 +277,11 @@ class AccountingServiceTest {
                 .side(side)
                 .status(OrderStatus.FILLED)
                 .gridLevel(level)
-                .requestedLots(1)
-                .executedLots(1)
                 .limitPrice(new BigDecimal(price))
                 .avgPrice(new BigDecimal(price))
                 .fee(new BigDecimal(fee))
                 .feeActual(true)
                 .feeCurrency("rub")
-                .lotSize(lotSize)
-                .dryRun(false)
-                .build());
-    }
-
-    private void saveConnectionAndInstrument(int lot) {
-        connectionRepo.save(ExchangeConnectionEntity.builder()
-                .id(ctx.connectionId())
-                .exchange(ExchangeType.T_INVEST)
-                .name("test")
-                .settings("{}")
-                .active(true)
-                .build());
-        instrumentRepo.save(InstrumentEntity.builder()
-                .exchange(ExchangeType.T_INVEST)
-                .instrumentUid(ctx.instrumentId().primary())
-                .kind(InstrumentKind.SHARE)
-                .segment(MarketSegment.SPOT)
-                .ticker("TEST")
-                .name("Test share")
-                .lot(lot)
-                .currency("rub")
-                .buyAvailable(true)
-                .sellAvailable(true)
-                .apiTradeAvailable(true)
-                .active(true)
-                .build());
+                .dryRun(false);
     }
 }

@@ -70,10 +70,10 @@ class GridStrategyBudgetSizingTest {
         when(clock.instant()).thenAnswer(__ -> currentTime.get());
         when(ctx.clock()).thenReturn(clock);
         when(ctx.gateway()).thenReturn(gateway);
-        when(ctx.constraints()).thenReturn(new TradingConstraints(1, new BigDecimal("0.01"), "rub"));
+        when(ctx.constraints()).thenReturn(TradingConstraints.wholeLots(1, new BigDecimal("0.01"), "rub"));
         when(ctx.execution()).thenReturn(new BotExecutionContext(
                 botId, UUID.randomUUID(), new AccountId("acc"), instrumentId,
-                false, 1, null, null, null, null));
+                false, BigDecimal.ONE, BigDecimal.ONE, null, null, null, null, null));
         when(ctx.exchange()).thenReturn(exchange);
         when(ctx.realizedPnl()).thenAnswer(__ -> realizedPnl.get());
         when(ctx.loadState(GridStrategyState.class)).thenAnswer(__ -> Optional.ofNullable(saved.get()));
@@ -99,31 +99,34 @@ class GridStrategyBudgetSizingTest {
     // ==============================
 
     @Test
-    void perLevelPlacesDifferentLotCountsPerLevel() {
+    void perLevelPlacesDifferentQuantitiesPerLevel() {
         GridStrategy strategy = new GridStrategy(config(
                 "20000", GridConfig.SizingMode.PER_LEVEL, GridConfig.ProfitPolicy.WITHDRAW));
         startTrading(strategy);
 
-        Map<Integer, Long> placed = placedBuyLots();
+        Map<Integer, BigDecimal> placed = placedBuyQuantities();
         assertThat(placed).isNotEmpty();
 
         GridSizing expected = expectedSizing(strategy, GridConfig.SizingMode.PER_LEVEL,
                 new BigDecimal("20000"));
-        placed.forEach((level, lots) ->
-                assertThat(lots).as("уровень %d", level).isEqualTo(expected.lotsAt(level)));
+        placed.forEach((level, quantity) ->
+                assertThat(quantity).as("уровень %d", level)
+                        .isEqualByComparingTo(expected.quantityAt(level)));
 
-        // Дешёвые уровни внизу получают больше лотов, чем дорогие вверху.
-        assertThat(expected.lotsAt(0)).isGreaterThan(expected.lotsAt(expected.lotsByLevel().size() - 1));
+        // Дешёвые уровни внизу получают больше, чем дорогие вверху.
+        assertThat(expected.quantityAt(0))
+                .isGreaterThan(expected.quantityAt(expected.quantityByLevel().size() - 1));
     }
 
     @Test
-    void uniformPlacesTheSameLotCountOnEveryLevel() {
+    void uniformPlacesTheSameQuantityOnEveryLevel() {
         GridStrategy strategy = new GridStrategy(config(
                 "20000", GridConfig.SizingMode.UNIFORM, GridConfig.ProfitPolicy.WITHDRAW));
         startTrading(strategy);
 
-        assertThat(placedBuyLots().values()).isNotEmpty().containsOnly(
-                expectedSizing(strategy, GridConfig.SizingMode.UNIFORM, new BigDecimal("20000")).lotsAt(0));
+        assertThat(placedBuyQuantities().values()).isNotEmpty().containsOnly(
+                expectedSizing(strategy, GridConfig.SizingMode.UNIFORM,
+                        new BigDecimal("20000")).quantityAt(0));
     }
 
     @Test
@@ -135,7 +138,7 @@ class GridStrategyBudgetSizingTest {
         var snapshot = strategy.snapshot().orElseThrow();
         assertThat(snapshot.sizingMode()).isEqualTo("PER_LEVEL");
         assertThat(snapshot.workingBudget()).isEqualByComparingTo("20000");
-        assertThat(snapshot.lotsByLevel()).isNotEmpty();
+        assertThat(snapshot.quantityByLevel()).isNotEmpty();
         assertThat(snapshot.worstCaseNotional()).isLessThanOrEqualTo(new BigDecimal("20000"));
     }
 
@@ -149,7 +152,7 @@ class GridStrategyBudgetSizingTest {
                 "20000", GridConfig.SizingMode.UNIFORM, GridConfig.ProfitPolicy.COMPOUND));
         startTrading(strategy);
 
-        long before = strategy.snapshot().orElseThrow().lotsByLevel().get(0);
+        BigDecimal before = strategy.snapshot().orElseThrow().quantityByLevel().get(0);
 
         // Прибыль выросла вдвое от бюджета — но сетка уже расставлена.
         realizedPnl.set(new BigDecimal("20000"));
@@ -157,9 +160,9 @@ class GridStrategyBudgetSizingTest {
         strategy.onPrice(lastPrice("100"));
         strategy.onTick();
 
-        assertThat(strategy.snapshot().orElseThrow().lotsByLevel().get(0))
+        assertThat(strategy.snapshot().orElseThrow().quantityByLevel().get(0))
                 .as("размер заявки не должен меняться между перестройками сетки")
-                .isEqualTo(before);
+                .isEqualByComparingTo(before);
         assertThat(strategy.snapshot().orElseThrow().workingBudget()).isEqualByComparingTo("20000");
     }
 
@@ -168,7 +171,7 @@ class GridStrategyBudgetSizingTest {
         GridStrategy first = new GridStrategy(config(
                 "20000", GridConfig.SizingMode.UNIFORM, GridConfig.ProfitPolicy.COMPOUND));
         startTrading(first);
-        long before = first.snapshot().orElseThrow().lotsByLevel().get(0);
+        BigDecimal before = first.snapshot().orElseThrow().quantityByLevel().get(0);
 
         // Перезапуск после заработанной прибыли: бюджет пересчитывается на onStart.
         realizedPnl.set(new BigDecimal("20000"));
@@ -177,7 +180,7 @@ class GridStrategyBudgetSizingTest {
         restarted.onStart(ctx, reconciled("0"));
 
         assertThat(restarted.snapshot().orElseThrow().workingBudget()).isEqualByComparingTo("40000");
-        assertThat(restarted.snapshot().orElseThrow().lotsByLevel().get(0)).isGreaterThan(before);
+        assertThat(restarted.snapshot().orElseThrow().quantityByLevel().get(0)).isGreaterThan(before);
     }
 
     @Test
@@ -185,7 +188,7 @@ class GridStrategyBudgetSizingTest {
         GridStrategy first = new GridStrategy(config(
                 "20000", GridConfig.SizingMode.UNIFORM, GridConfig.ProfitPolicy.WITHDRAW));
         startTrading(first);
-        long before = first.snapshot().orElseThrow().lotsByLevel().get(0);
+        BigDecimal before = first.snapshot().orElseThrow().quantityByLevel().get(0);
 
         realizedPnl.set(new BigDecimal("20000"));
         GridStrategy restarted = new GridStrategy(config(
@@ -193,7 +196,7 @@ class GridStrategyBudgetSizingTest {
         restarted.onStart(ctx, reconciled("0"));
 
         assertThat(restarted.snapshot().orElseThrow().workingBudget()).isEqualByComparingTo("20000");
-        assertThat(restarted.snapshot().orElseThrow().lotsByLevel().get(0)).isEqualTo(before);
+        assertThat(restarted.snapshot().orElseThrow().quantityByLevel().get(0)).isEqualByComparingTo(before);
     }
 
     // ==============================
@@ -201,9 +204,9 @@ class GridStrategyBudgetSizingTest {
     // ==============================
 
     @Test
-    void fixedLotsPlacesExactlyTheConfiguredSize() {
+    void fixedQuantityPlacesExactlyTheConfiguredSize() {
         GridConfig cfg = new GridConfig(
-                null, null, 4, 5L, 4, null, null, null, true,
+                null, null, 4, new BigDecimal("5"), 4, null, null, null, true,
                 true, null, 6, new BigDecimal("2"),
                 new BigDecimal("0.01"), new BigDecimal("0.15"),
                 null, 300, new BigDecimal("0.002"), 1200, 0, null,
@@ -212,9 +215,10 @@ class GridStrategyBudgetSizingTest {
         GridStrategy strategy = new GridStrategy(cfg);
         startTrading(strategy);
 
-        // Старое поведение до байта: одинаково 5 лотов, бюджет ни при чём.
-        assertThat(placedBuyLots().values()).isNotEmpty().containsOnly(5L);
-        assertThat(strategy.snapshot().orElseThrow().sizingMode()).isEqualTo("FIXED_LOTS");
+        // Старое поведение до байта: одинаково 5 штук, бюджет ни при чём.
+        assertThat(placedBuyQuantities().values()).isNotEmpty()
+                .allSatisfy(q -> assertThat(q).isEqualByComparingTo("5"));
+        assertThat(strategy.snapshot().orElseThrow().sizingMode()).isEqualTo("FIXED_QUANTITY");
         assertThat(strategy.snapshot().orElseThrow().workingBudget()).isNull();
     }
 
@@ -355,24 +359,24 @@ class GridStrategyBudgetSizingTest {
                 limitOrdersAvailable ? "NORMAL_TRADING" : "NOT_AVAILABLE_FOR_TRADING", now);
     }
 
-    /** Что именно ушло в гейтвей: уровень покупки → число лотов. */
-    private Map<Integer, Long> placedBuyLots() {
+    /** Что именно ушло в гейтвей: уровень покупки → количество. */
+    private Map<Integer, BigDecimal> placedBuyQuantities() {
         ArgumentCaptor<PlaceIntent> captor = ArgumentCaptor.forClass(PlaceIntent.class);
         org.mockito.Mockito.verify(gateway, org.mockito.Mockito.atLeastOnce())
                 .placeLimit(any(), captor.capture());
         return captor.getAllValues().stream()
                 .filter(intent -> intent.side() == OrderSide.BUY && intent.gridLevel() != null)
-                .collect(Collectors.toMap(PlaceIntent::gridLevel, PlaceIntent::lots, (a, b) -> a));
+                .collect(Collectors.toMap(PlaceIntent::gridLevel, PlaceIntent::quantity, (a, b) -> a));
     }
 
     private GridSizing expectedSizing(GridStrategy strategy, GridConfig.SizingMode mode, BigDecimal budget) {
         var snapshot = strategy.snapshot().orElseThrow();
         GridLadder ladder = GridLadder.build(
                 GridRange.manual(new GridConfig(snapshot.lowerPrice(), snapshot.upperPrice(),
-                        snapshot.ladderPrices().size() - 1, 1L, 10, null, null, true), null),
+                        snapshot.ladderPrices().size() - 1, BigDecimal.ONE, 10, null, null, true), null),
                 new BigDecimal("0.01"));
         return GridSizing.fromBudget(config(budget.toPlainString(), mode, GridConfig.ProfitPolicy.WITHDRAW),
-                ladder, 1, budget);
+                ladder, BigDecimal.ONE, budget);
     }
 
     private GridConfig config(String budget, GridConfig.SizingMode mode, GridConfig.ProfitPolicy policy) {
@@ -389,7 +393,7 @@ class GridStrategyBudgetSizingTest {
     }
 
     private ReconcileResult reconciled(String position) {
-        return new ReconcileResult(List.of(), new BigDecimal(position), BigDecimal.ZERO,
+        return new ReconcileResult(List.of(), new BigDecimal(position), new BigDecimal(position), BigDecimal.ZERO,
                 0, 0, BigDecimal.ZERO);
     }
 

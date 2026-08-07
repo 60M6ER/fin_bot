@@ -65,10 +65,10 @@ class GridStrategyAutoRangeTest {
         when(clock.instant()).thenAnswer(__ -> currentTime.get());
         when(ctx.clock()).thenReturn(clock);
         when(ctx.gateway()).thenReturn(gateway);
-        when(ctx.constraints()).thenReturn(new TradingConstraints(1, new BigDecimal("0.01"), "rub"));
+        when(ctx.constraints()).thenReturn(TradingConstraints.wholeLots(1, new BigDecimal("0.01"), "rub"));
         when(ctx.execution()).thenReturn(new BotExecutionContext(
                 botId, UUID.randomUUID(), new AccountId("acc"), instrumentId,
-                false, 1, null, null, null, null));
+                false, BigDecimal.ONE, BigDecimal.ONE, null, null, null, null, null));
         when(ctx.exchange()).thenReturn(exchange);
         when(ctx.loadState(GridStrategyState.class)).thenAnswer(__ -> Optional.ofNullable(saved.get()));
         org.mockito.Mockito.doAnswer(invocation -> {
@@ -119,6 +119,29 @@ class GridStrategyAutoRangeTest {
         assertThatThrownBy(() -> new GridStrategy(autoConfig()).onStart(ctx, reconciled("1")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("сохранённый диапазон отсутствует");
+    }
+
+    /**
+     * Свежий бот с ПУСТЫМ журналом обязан стартовать, даже если на счёте что-то лежит.
+     *
+     * Отказ выше защищает случай «бот покупал по уровням, а диапазон потерялся» —
+     * там пересчёт уровней действительно потеряет цены встречных продаж. Но судить
+     * об этом надо по журналу бота, а не по остатку счёта: счёт общий. Пока проверялся
+     * остаток, только что созданный бот считал своей чужую позицию и не стартовал —
+     * ровно так его и заперла неторгуемая пыль в 0.000348 от прошлой жизни.
+     *
+     * Признать чужое своим — не мелочь: два бота по разным стратегиям на одном
+     * инструменте иначе не уживаются в принципе.
+     */
+    @Test
+    void freshBotStartsEvenWhenSomebodyElsesCoinsSitOnTheAccount() {
+        // Журнал пуст, а на счёте — пыль от прошлой жизни бота, продать её нельзя.
+        ReconcileResult foreignDustOnly = new ReconcileResult(
+                List.of(), BigDecimal.ZERO, new BigDecimal("0.000348"), BigDecimal.ZERO,
+                0, 0, new BigDecimal("0.000348"));
+
+        assertThatCode(() -> new GridStrategy(autoConfig()).onStart(ctx, foreignDustOnly))
+                .doesNotThrowAnyException();
     }
 
     @Test
@@ -214,10 +237,8 @@ class GridStrategyAutoRangeTest {
         GridStrategy strategy = new GridStrategy(replaceUpperConfig());
         strategy.onStart(ctx, reconciled("0"));
         // Две сверки подряд: расхождение считается настоящим только с подтверждения.
-        strategy.onReconcile(new ReconcileResult(
-                List.of(), BigDecimal.ZERO, BigDecimal.ZERO, 0, 0, BigDecimal.ONE));
-        strategy.onReconcile(new ReconcileResult(
-                List.of(), BigDecimal.ZERO, BigDecimal.ZERO, 0, 0, BigDecimal.ONE));
+        strategy.onReconcile(shortfall());
+        strategy.onReconcile(shortfall());
 
         strategy.onPrice(lastPrice("111"));
         currentTime.set(now.plusSeconds(20));
@@ -239,8 +260,7 @@ class GridStrategyAutoRangeTest {
     void singleTransientMismatchDoesNotBlockTrading() {
         GridStrategy strategy = new GridStrategy(replaceUpperConfig());
         strategy.onStart(ctx, reconciled("0"));
-        strategy.onReconcile(new ReconcileResult(
-                List.of(), BigDecimal.ONE, BigDecimal.ZERO, 0, 0, BigDecimal.ONE));
+        strategy.onReconcile(shortfall());
         // Следующая сверка расхождения уже не видит — торговля не должна была вставать.
         strategy.onReconcile(reconciled("1"));
 
@@ -255,7 +275,8 @@ class GridStrategyAutoRangeTest {
     void rejectedCandidateKeepsOldRangeAndStopsBuying() {
         when(ctx.execution()).thenReturn(new BotExecutionContext(
                 botId, UUID.randomUUID(), new AccountId("acc"), instrumentId,
-                false, 1, new BigDecimal("400"), null, null, null));
+                false, BigDecimal.ONE, BigDecimal.ONE, null,
+                new BigDecimal("400"), null, null, null));
         GridStrategy strategy = new GridStrategy(replaceUpperConfig());
         strategy.onStart(ctx, reconciled("0"));
         strategy.onReconcile(reconciled("0"));
@@ -273,7 +294,7 @@ class GridStrategyAutoRangeTest {
 
     private GridConfig autoConfig() {
         return new GridConfig(
-                null, null, 4, 1L, 4,
+                null, null, 4, new BigDecimal("1"), 4,
                 GridConfig.RangeExitAction.STOP_BUYING, null, 3600, true,
                 true, CandleInterval.H1, 6, new BigDecimal("2"),
                 new BigDecimal("0.01"), new BigDecimal("0.15"),
@@ -284,7 +305,7 @@ class GridStrategyAutoRangeTest {
 
     private GridConfig replaceUpperConfig() {
         return new GridConfig(
-                null, null, 4, 1L, 4,
+                null, null, 4, new BigDecimal("1"), 4,
                 GridConfig.RangeExitAction.STOP_BUYING, null, 3600, true,
                 true, CandleInterval.H1, 6, new BigDecimal("2"),
                 new BigDecimal("0.01"), new BigDecimal("0.15"),
@@ -297,8 +318,14 @@ class GridStrategyAutoRangeTest {
         return new LastPrice(instrumentId, new Price(new BigDecimal(value), "rub"), currentTime.get());
     }
 
+    /** Недостача: журнал числит за ботом единицу, а на счёте пусто. */
+    private ReconcileResult shortfall() {
+        return new ReconcileResult(List.of(), BigDecimal.ONE, BigDecimal.ZERO, BigDecimal.ZERO,
+                0, 0, BigDecimal.ONE.negate());
+    }
+
     private ReconcileResult reconciled(String position) {
-        return new ReconcileResult(List.of(), new BigDecimal(position), BigDecimal.ZERO,
+        return new ReconcileResult(List.of(), new BigDecimal(position), new BigDecimal(position), BigDecimal.ZERO,
                 0, 0, BigDecimal.ZERO);
     }
 

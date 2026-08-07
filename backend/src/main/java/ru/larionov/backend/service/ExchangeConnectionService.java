@@ -20,6 +20,7 @@ import ru.larionov.backend.repository.ExchangeConnectionRepository;
 import ru.larionov.backend.security.SecretCipher;
 import tools.jackson.databind.ObjectMapper;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -56,8 +57,16 @@ public class ExchangeConnectionService {
         return toDetail(requireConnection(id));
     }
 
+    /**
+     * Биржи, которые можно выбрать при создании подключения.
+     *
+     * Спрашиваем у рантайма, а не перечисляем значения enum: биржа без адаптера
+     * появлялась бы в выпадающем списке и падала бы только при активации.
+     */
     public List<ExchangeType> getExchangeTypes() {
-        return List.of(ExchangeType.values());
+        return Arrays.stream(ExchangeType.values())
+                .filter(runtimeService.supportedExchanges()::contains)
+                .toList();
     }
 
     /**

@@ -89,6 +89,7 @@ public class FakeExchangeClient implements ExchangeClient {
 
     @Override
     public ExchangeMeta meta() {
-        return new ExchangeMeta(ExchangeType.T_INVEST, true, true, true, false, true);
+        return new ExchangeMeta(ExchangeType.T_INVEST, true, true, true, false, true,
+                java.util.List.of("RUB"), false);
     }
 }

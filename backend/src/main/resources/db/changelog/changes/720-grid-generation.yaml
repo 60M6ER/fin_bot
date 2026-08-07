@@ -1,0 +1,54 @@
+databaseChangeLog:
+  - changeSet:
+      id: 100-grid-generation
+      author: boris
+      comment: >
+        Поколение сетки: отрезок жизни бота от одного диапазона до следующего.
+
+        Здесь хранятся ТОЛЬКО границы отрезка — сам диапазон и окно в денежной книге.
+        Циклы и P/L поколения не дублируются: они считаются из money_ledger по этому
+        окну. Иначе ремонтный проход учёта, который уточняет суммы уже записанных
+        строк, расходился бы со снимком, и статистика поколения врала бы тем сильнее,
+        чем дольше живёт бот.
+
+        Окно задаётся по seq, а не по времени: seq монотонен и не зависит ни от часов
+        машины, ни от того, что запись строки и смена диапазона происходят в разных
+        транзакциях.
+      changes:
+        - createTable:
+            tableName: grid_generation
+            columns:
+              - column: { name: id, type: uuid, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: bot_id, type: uuid, constraints: { nullable: false } }
+              - column: { name: dry_run, type: boolean, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: generation, type: bigint, constraints: { nullable: false } }
+              - column: { name: lower_price, type: "numeric(24,9)", constraints: { nullable: false } }
+              - column: { name: upper_price, type: "numeric(24,9)", constraints: { nullable: false } }
+              - column: { name: levels, type: int }
+              - column: { name: origin, type: varchar(32) }
+              - column: { name: started_at, type: timestamp with time zone, constraints: { nullable: false } }
+              - column: { name: ended_at, type: timestamp with time zone }
+              # Открытая граница окна книги: строки поколения — это seq > start_seq.
+              - column: { name: start_seq, type: bigint, defaultValueNumeric: 0, constraints: { nullable: false } }
+              - column: { name: end_seq, type: bigint }
+
+        - addUniqueConstraint:
+            tableName: grid_generation
+            constraintName: uq_grid_generation_bot_generation
+            columnNames: bot_id, dry_run, generation
+
+        - createIndex:
+            tableName: grid_generation
+            indexName: idx_grid_generation_bot
+            columns:
+              - column: { name: bot_id }
+              - column: { name: dry_run }
+              - column: { name: generation }
+
+        - addForeignKeyConstraint:
+            baseTableName: grid_generation
+            baseColumnNames: bot_id
+            referencedTableName: bot
+            referencedColumnNames: id
+            constraintName: fk_grid_generation_bot
+            onDelete: CASCADE

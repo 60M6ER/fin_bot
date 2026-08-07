@@ -1,0 +1,20 @@
+databaseChangeLog:
+  - changeSet:
+      id: 090-fx-rate
+      author: boris
+      comment: >
+        Последний известный курс валютной пары.
+
+        Нужна ровно для одного сценария: рестарт приложения в момент, когда сети
+        до источника курса нет. Без сохранённого значения сводный баланс превратился бы
+        в прочерк, хотя вчерашний курс для ПОКАЗА вполне годится — лишь бы его возраст
+        был виден. Строк здесь единицы, поэтому ключ — сама пара.
+      changes:
+        - createTable:
+            tableName: fx_rate
+            columns:
+              - column: { name: pair, type: varchar(16), constraints: { primaryKey: true, nullable: false } }
+              - column: { name: rate, type: "numeric(24,10)", constraints: { nullable: false } }
+              - column: { name: source, type: varchar(32), constraints: { nullable: false } }
+              - column: { name: as_of, type: timestamp with time zone, constraints: { nullable: false } }
+              - column: { name: updated_at, type: timestamp with time zone, defaultValueComputed: CURRENT_TIMESTAMP, constraints: { nullable: false } }
