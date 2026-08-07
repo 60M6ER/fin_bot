@@ -47,7 +47,17 @@ public class AccountingService {
      */
     @Transactional
     public void recordOrderState(BotExecutionContext ctx, BotOrderEntity order) {
+        // ДО проверки исполнения. Книгу правит не эта заявка, а бот целиком, и повод
+        // заглянуть в неё может прийти только с пустой заявки: у бота, чьи сделки уже
+        // урегулированы, сверка трогает лишь ЖИВЫЕ заявки, а у них исполнения нет.
+        // Стояла эта строка ниже — и починка валюты не срабатывала ровно там, где была
+        // нужна: бот торгует, а книга по-прежнему подписана монетой.
+        boolean healed = healBookCurrency(ctx);
+
         if (order == null || nvl(order.getExecutedQuantity()).signum() <= 0 || order.getAvgPrice() == null) {
+            if (healed) {
+                publishLedgerChanged(ctx.botId(), ctx.dryRun());
+            }
             return;
         }
 
@@ -60,7 +70,6 @@ public class AccountingService {
             reduceRecordedQuantity(order, previousCum);
         }
         recordCommissionCorrection(ctx, order);
-        healBookCurrency(ctx);
         publishLedgerChanged(ctx.botId(), ctx.dryRun());
     }
 
@@ -172,16 +181,17 @@ public class AccountingService {
      * денег. Запрос трогает только расходящиеся строки, поэтому со второго раза он
      * не находит ничего и обходится бесплатно.
      */
-    private void healBookCurrency(BotExecutionContext ctx) {
+    private boolean healBookCurrency(BotExecutionContext ctx) {
         String quote = ctx.quoteCurrency();
         if (quote == null || quote.isBlank()) {
-            return;
+            return false;
         }
         int healed = ledgerRepo.normalizeCurrency(ctx.botId(), ctx.dryRun(), quote);
         if (healed > 0) {
             log.info("Bot {}: валюта книги приведена к {} в {} строк(ах) — раньше там стояла "
                     + "валюта комиссии", ctx.botId(), quote, healed);
         }
+        return healed > 0;
     }
 
     private static String bookCurrency(BotExecutionContext ctx, BotOrderEntity order) {

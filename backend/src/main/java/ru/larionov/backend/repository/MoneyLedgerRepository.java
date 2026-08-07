@@ -35,7 +35,7 @@ public interface MoneyLedgerRepository extends JpaRepository<MoneyLedgerEntity, 
     @Query("""
             update MoneyLedgerEntity l set l.currency = :currency
             where l.botId = :botId and l.dryRun = :dryRun
-              and l.currency is not null and l.currency <> :currency
+              and (l.currency is null or l.currency <> :currency)
             """)
     int normalizeCurrency(@Param("botId") UUID botId,
                           @Param("dryRun") boolean dryRun,

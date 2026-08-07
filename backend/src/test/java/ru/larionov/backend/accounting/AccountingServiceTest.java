@@ -295,6 +295,51 @@ class AccountingServiceTest {
     }
 
     /**
+     * Починка обязана срабатывать и по ЖИВОЙ заявке, у которой исполнения нет.
+     *
+     * Иначе она не срабатывает ровно там, где нужна. У бота, чьи сделки уже
+     * урегулированы (комиссия подтверждена), сверка трогает только живые заявки —
+     * а у них {@code executedQuantity == 0}. Пока проверка исполнения стояла раньше
+     * починки, боевые боты Poloniex продолжали показывать «DOGE» и «ETH» вместо USDT
+     * даже после выкатки: до починки управление просто не доходило.
+     */
+    @Test
+    void healingRunsEvenWhenTheOrderHasNoFillsYet() {
+        BotExecutionContext poloniex = poloniexCtx("USDT");
+
+        // Прошлая версия записала книгу валютой комиссии.
+        BotOrderEntity settled = orderRepo.save(order(OrderSide.BUY, 0, "0.07", "0.01")
+                .requestedQuantity(new BigDecimal("100"))
+                .executedQuantity(new BigDecimal("100"))
+                .exchangeLotSize(BigDecimal.ONE)
+                .feeCurrency("DOGE")
+                .build());
+        accounting.recordOrderState(poloniexCtx(null), settled);
+        assertThat(accounting.summary(botId, false).currency()).isEqualTo("DOGE");
+
+        // А теперь сверка приносит ЖИВУЮ заявку: исполнения нет, средней цены нет.
+        BotOrderEntity resting = orderRepo.save(order(OrderSide.BUY, 1, "0.06", "0")
+                .requestedQuantity(new BigDecimal("100"))
+                .executedQuantity(BigDecimal.ZERO)
+                .exchangeLotSize(BigDecimal.ONE)
+                .status(OrderStatus.NEW)
+                .build());
+        accounting.recordOrderState(poloniex, resting);
+
+        assertThat(accounting.summary(botId, false).currency())
+                .as("книга выправлена, хотя по этой заявке ещё ничего не исполнено")
+                .isEqualTo("USDT");
+    }
+
+    private BotExecutionContext poloniexCtx(String quoteCurrency) {
+        return new BotExecutionContext(
+                botId, ctx.connectionId(), new AccountId("acc-1"),
+                new InstrumentId("POLONIEX:DOGE_USDT", null),
+                false, BigDecimal.ONE, new BigDecimal("0.001"), null,
+                null, null, null, null, quoteCurrency);
+    }
+
+    /**
      * Строки, записанные до правки, подтягиваются к деньгам котировки.
      *
      * Сводка берёт валюту из ПЕРВОЙ строки книги, поэтому писать правильно только новые
