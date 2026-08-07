@@ -223,8 +223,10 @@ class GridStrategyDownwardReplacementTest {
         verify(gateway).placeLimit(any(), argThat(i -> i.side() == OrderSide.SELL
                 && i.gridLevel() == null && i.limitPrice().compareTo(new BigDecimal("89")) == 0));
         assertThat(restarted.snapshot().orElseThrow().replacementDirection()).isEqualTo("DOWN");
-        verify(marketData, never()).getLastPrice(instrumentId);
+        // Старая сетка не перестраивается: за свечами не ходим.
         verify(marketData, never()).getCandles(any(), any());
+        // Цену при рестарте берём у биржи — стрим присылает её только при сделке.
+        verify(marketData).getLastPrice(instrumentId);
     }
 
     @Test

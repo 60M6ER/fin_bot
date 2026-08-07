@@ -259,6 +259,78 @@ class AccountingServiceTest {
     }
 
     /** Одна заявочная единица инструмента, то есть 10 штук. */
+    /**
+     * Книга ведётся в деньгах КОТИРОВКИ, а не в валюте комиссии.
+     *
+     * На Poloniex комиссия покупки удерживается монетой, и {@code fee_currency} у ордера —
+     * «DOGE». Пока валюта книги бралась оттуда, вся доходность бота подписывалась монетой,
+     * хотя каждая сумма в ней — USDT. Это ломало не только подпись: по валюте бота портфель
+     * решает, складывать ли его P/L с остальными, и два бота одного подключения
+     * («DOGE» и «ETH») переставали суммироваться.
+     */
+    @Test
+    void bookIsDenominatedInQuoteMoneyEvenWhenTheFeeWasTakenInCoin() {
+        BotExecutionContext poloniex = new BotExecutionContext(
+                botId, UUID.randomUUID(), new AccountId("acc-1"),
+                new InstrumentId("POLONIEX:DOGE_USDT", null),
+                false, BigDecimal.ONE, new BigDecimal("0.001"), null,
+                null, null, null, null, "USDT");
+
+        BotOrderEntity buy = orderRepo.save(order(OrderSide.BUY, 0, "0.070013", "0.019719")
+                .requestedQuantity(new BigDecimal("140.826"))
+                .executedQuantity(new BigDecimal("140.544348"))
+                .exchangeLotSize(BigDecimal.ONE)
+                // Комиссия удержана монетой — это по-прежнему видно у ордера.
+                .feeCurrency("DOGE")
+                .build());
+
+        accounting.recordOrderState(poloniex, buy);
+
+        assertThat(accounting.summary(botId, false).currency())
+                .as("деньги книги — USDT, монета осталась лишь пометкой у комиссии")
+                .isEqualTo("USDT");
+        assertThat(buy.getFeeCurrency())
+                .as("происхождение комиссии не теряем: по нему видно, что число пересчитано")
+                .isEqualTo("DOGE");
+    }
+
+    /**
+     * Строки, записанные до правки, подтягиваются к деньгам котировки.
+     *
+     * Сводка берёт валюту из ПЕРВОЙ строки книги, поэтому писать правильно только новые
+     * было бы мало: бот, успевший поторговать раньше, до конца жизни показывал бы монету.
+     */
+    @Test
+    void alreadyWrittenRowsAreHealedToQuoteMoney() {
+        BotExecutionContext noCurrency = new BotExecutionContext(
+                botId, UUID.randomUUID(), new AccountId("acc-1"),
+                new InstrumentId("POLONIEX:DOGE_USDT", null),
+                false, BigDecimal.ONE, new BigDecimal("0.001"), null, null, null, null, null);
+
+        // Так писала прежняя версия: валюта книги = валюта комиссии.
+        BotOrderEntity old = orderRepo.save(order(OrderSide.BUY, 0, "0.07", "0.01")
+                .requestedQuantity(new BigDecimal("100"))
+                .executedQuantity(new BigDecimal("100"))
+                .exchangeLotSize(BigDecimal.ONE)
+                .feeCurrency("DOGE")
+                .build());
+        accounting.recordOrderState(noCurrency, old);
+        assertThat(accounting.summary(botId, false).currency()).isEqualTo("DOGE");
+
+        // Бот перезапущен уже с известной котировкой — книга обязана выправиться.
+        BotExecutionContext withCurrency = new BotExecutionContext(
+                botId, noCurrency.connectionId(), new AccountId("acc-1"),
+                new InstrumentId("POLONIEX:DOGE_USDT", null),
+                false, BigDecimal.ONE, new BigDecimal("0.001"), null,
+                null, null, null, null, "USDT");
+        accounting.recordOrderState(withCurrency, old);
+
+        assertThat(accounting.summary(botId, false).currency()).isEqualTo("USDT");
+        assertThat(ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(botId, false))
+                .as("выправлена вся книга, а не только новые строки")
+                .allSatisfy(row -> assertThat(row.getCurrency()).isEqualTo("USDT"));
+    }
+
     private BotOrderEntity saveOrder(OrderSide side, int level, String price, String fee) {
         return orderRepo.save(order(side, level, price, fee)
                 .requestedQuantity(LOT)

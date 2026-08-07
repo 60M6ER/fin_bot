@@ -209,6 +209,11 @@ public class GridStrategy implements Strategy {
         }
         this.buyingStopped = awaitingUpperReplacement || awaitingDownwardReplacement;
         this.lastPrice = resolution.referencePrice();
+        // Цена пришла REST-запросом оценщика диапазона, а не стримом. Сообщаем её
+        // наружу: иначе бот торгует по ней, а рыночная оценка позиции пустует.
+        if (this.lastPrice != null) {
+            ctx.observedPrice(this.lastPrice, ctx.clock().instant());
+        }
         this.ladder = GridLadder.build(activeRange, constraints.minPriceIncrement());
 
         FeeInfo fees = resolveFeeInfo();
@@ -247,6 +252,39 @@ public class GridStrategy implements Strategy {
                                 fees.makerRoundTripRate().multiply(BigDecimal.valueOf(100)).toPlainString()));
 
         seedTradingStatus();
+        seedLastPriceOnStart();
+    }
+
+    /**
+     * Та же подстраховка, что и для торгового статуса, но для ЦЕНЫ.
+     *
+     * Стрим последней цены присылает событие только при СДЕЛКЕ. Боту, поднятому с
+     * восстановленным диапазоном, цену взять неоткуда: оценщик ATR при рестарте не
+     * работает (диапазон уже известен), а {@link #ensureOrders} без цены выходит сразу.
+     * Пока по инструменту не пройдёт чужая сделка, бот стоит без единой заявки — на
+     * неликвидной бумаге это часы, а на выходных бесконечно.
+     *
+     * Ровно так 07.08.2026 на боевом сервере вели себя MAGN и RNFT: стартовали без
+     * ошибок, писали «GRID готов», и не выставляли ничего. Свежесозданный MVID на том
+     * же подключении торговал — потому что диапазон ему считали впервые и цена
+     * приезжала REST-запросом заодно с ATR.
+     *
+     * Отказ здесь не фатален: цена — не условие корректности, а лишь повод действовать
+     * раньше. Не получилось — дождёмся стрима или следующего тика.
+     */
+    private void seedLastPriceOnStart() {
+        if (lastPrice != null) {
+            return;
+        }
+        try {
+            LastPrice price = ctx.exchange().marketData().getLastPrice(ctx.execution().instrumentId());
+            if (price != null && price.price() != null && price.price().value() != null) {
+                lastPrice = price.price().value();
+                ctx.observedPrice(lastPrice, ctx.clock().instant());
+            }
+        } catch (Exception e) {
+            log.debug("Не удалось получить стартовую цену для бота {}: {}", ctx.botId(), e.getMessage());
+        }
     }
 
     /**
@@ -1442,6 +1480,7 @@ public class GridStrategy implements Strategy {
             LastPrice price = ctx.exchange().marketData().getLastPrice(ctx.execution().instrumentId());
             if (price != null && price.price() != null && price.price().value() != null) {
                 lastPrice = price.price().value();
+                ctx.observedPrice(lastPrice, ctx.clock().instant());
                 return;
             }
         } catch (Exception e) {

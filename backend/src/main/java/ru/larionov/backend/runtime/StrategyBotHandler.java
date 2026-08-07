@@ -90,7 +90,8 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
                 botId, execContext, gateway, constraints,
                 exchangeHandler::client, events, Clock.systemUTC(), stateService, accounting,
                 gridGenerations,
-                reason -> scheduler.executeControl(() -> onStopRequested.accept(reason)));
+                reason -> scheduler.executeControl(() -> onStopRequested.accept(reason)),
+                lastPriceCache);
 
         this.loop = new BotEventLoop(botId, this, QUEUE_CAPACITY, MAX_CONSECUTIVE_FAILURES, this::fatal);
     }

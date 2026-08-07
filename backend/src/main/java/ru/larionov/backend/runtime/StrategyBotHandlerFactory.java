@@ -84,7 +84,9 @@ public class StrategyBotHandlerFactory {
                 config.maxCapital(),
                 config.maxPositionQuantity(),
                 config.maxOrdersPerDay(),
-                config.maxOrdersPerMinute()
+                config.maxOrdersPerMinute(),
+                // Деньги книги — валюта котировки инструмента, а не валюта комиссии.
+                constraints.quoteCurrency()
         );
 
         ExecutionGateway gateway = config.dryRun()

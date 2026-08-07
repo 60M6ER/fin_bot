@@ -205,16 +205,40 @@ class GridStrategyForcedReplacementTest {
 
     /**
      * После рестарта цены из стрима ещё нет — а именно в этом состоянии кнопкой
-     * и пользуются. Центр нового диапазона приходится спросить у биржи.
+     * и пользуются. Центр нового диапазона всё равно должен найтись.
+     *
+     * Раньше цену спрашивала сама команда. Теперь бот берёт её у биржи ещё на старте
+     * (стрим последней цены присылает событие только при сделке, и без этого запроса
+     * бот с восстановленным диапазоном стоял бы без единой заявки), поэтому к моменту
+     * нажатия она уже известна. Проверяем не число запросов, а то, ради чего всё
+     * затевалось: ликвидация уходит на биржу.
      */
     @Test
-    void asksExchangeForPriceWhenStreamHasNotDeliveredOneYet() {
+    void forcedReplacementWorksEvenWhenStreamHasNotDeliveredAPriceYet() {
         GridStrategy strategy = deadlocked();
 
         strategy.onCommand(StrategyCommand.FORCE_GRID_REPLACEMENT);
 
-        verify(marketData).getLastPrice(instrumentId);
         verify(gateway, atLeastOnce()).placeLimit(any(), argThat(i -> i.side() == OrderSide.SELL));
+    }
+
+    /**
+     * И отдельно — то, что теперь делает старт: цена берётся у биржи, если стрим
+     * её ещё не принёс. Именно этого не хватало ботам T-Invest на боевом сервере
+     * 07.08.2026 — они поднимались с восстановленным диапазоном и не торговали.
+     */
+    @Test
+    void startupAsksExchangeForPriceWhenStreamHasNotDeliveredOneYet() {
+        GridRange active = new GridRange(new BigDecimal("92"), new BigDecimal("108"), 4,
+                GridRange.Origin.ATR_REPLACED_DOWN, now.minusSeconds(86400));
+        saved.set(new GridStrategyState(active, 2, false, now.minusSeconds(7200),
+                false, null, 2, new BigDecimal("100"), null));
+        position.set(BigDecimal.TEN);
+        inventory.set(new Inventory(BigDecimal.TEN, new BigDecimal("1000"), new BigDecimal("100")));
+
+        new GridStrategy(config()).onStart(ctx, reconciled(position.get()));
+
+        verify(marketData).getLastPrice(instrumentId);
     }
 
     /**

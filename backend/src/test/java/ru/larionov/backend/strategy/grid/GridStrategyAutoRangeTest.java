@@ -32,6 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -110,8 +111,29 @@ class GridStrategyAutoRangeTest {
                 .doesNotThrowAnyException();
 
         assertThat(restarted.snapshot().orElseThrow().lowerPrice()).isEqualByComparingTo("92");
-        verify(marketData, times(1)).getLastPrice(instrumentId);
+        // Диапазон восстановлен, а не пересчитан — за свечами повторно не ходим.
         verify(marketData, times(1)).getCandles(any(), any());
+        // А вот цену при рестарте спросить ОБЯЗАНЫ: оценщик ATR теперь не работает,
+        // и без этого запроса бот стоял бы без заявок до первой чужой сделки.
+        verify(marketData, times(2)).getLastPrice(instrumentId);
+    }
+
+    /**
+     * Цена, полученная REST-запросом, обязана уйти наружу — иначе бот торгует по ней,
+     * а рыночная оценка позиции пустует.
+     *
+     * Стрим последней цены присылает событие только при СДЕЛКЕ, поэтому на старте его
+     * может не быть вовсе; диапазон строится по цене из ответа брокера, и стратегия
+     * начинает торговать именно по ней. Пока эта цена никуда не сообщалась, боты
+     * T-Invest на боевом сервере 07.08.2026 выставляли сетку, покупали — и показывали
+     * прочерки вместо баланса, P/L и рыночной стоимости с подписью
+     * «цена из потока не получена».
+     */
+    @Test
+    void priceFetchedOverRestIsReportedForValuation() {
+        new GridStrategy(autoConfig()).onStart(ctx, reconciled("0"));
+
+        verify(ctx).observedPrice(eq(new BigDecimal("100")), any());
     }
 
     @Test

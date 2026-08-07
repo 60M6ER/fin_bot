@@ -42,8 +42,31 @@ public record BotExecutionContext(
         BigDecimal maxCapital,
         BigDecimal maxPositionQuantity,
         Integer maxOrdersPerDay,
-        Integer maxOrdersPerMinute
+        Integer maxOrdersPerMinute,
+
+        /**
+         * Валюта КОТИРОВКИ — те деньги, в которых ведётся вся книга бота: цена, бюджет,
+         * P/L, комиссия после пересчёта.
+         *
+         * Раньше валюту книги брали из комиссии ордера. У T-Invest это совпадало
+         * случайно — комиссия рублёвая, котировка рублёвая. На Poloniex комиссия покупки
+         * берётся МОНЕТОЙ, и книга подписывалась «DOGE», хотя все суммы в ней USDT.
+         * Портя не только подпись: по этой валюте портфель решает, складывать ли P/L
+         * ботов между собой, и два бота одного подключения переставали суммироваться.
+         */
+        String quoteCurrency
 ) {
+
+    /** Прежняя форма — только для тестов, которым валюта книги безразлична. */
+    public BotExecutionContext(UUID botId, UUID connectionId, AccountId accountId,
+                               InstrumentId instrumentId, boolean dryRun,
+                               BigDecimal exchangeLotSize, BigDecimal quantityStep,
+                               BigDecimal minNotional, BigDecimal maxCapital,
+                               BigDecimal maxPositionQuantity,
+                               Integer maxOrdersPerDay, Integer maxOrdersPerMinute) {
+        this(botId, connectionId, accountId, instrumentId, dryRun, exchangeLotSize, quantityStep,
+                minNotional, maxCapital, maxPositionQuantity, maxOrdersPerDay, maxOrdersPerMinute, null);
+    }
 
     public BotExecutionContext {
         if (exchangeLotSize == null || exchangeLotSize.signum() <= 0) {

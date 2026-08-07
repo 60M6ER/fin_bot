@@ -44,10 +44,18 @@ public class DefaultStrategyContext implements StrategyContext {
     private final AccountingService accounting;
     private final GridGenerationService gridGenerations;
     private final Consumer<String> stopRequester;
+    private final ru.larionov.backend.runtime.LastPriceCache lastPriceCache;
 
     @Override
     public UUID botId() {
         return botId;
+    }
+
+    @Override
+    public void observedPrice(BigDecimal price, Instant at) {
+        if (price != null) {
+            lastPriceCache.put(botId, price, at);
+        }
     }
 
     @Override

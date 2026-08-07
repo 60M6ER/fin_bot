@@ -55,11 +55,12 @@ public class AccountingService {
         // compareTo, а не >: у BigDecimal равные числа с разным масштабом не равны по equals,
         // и наивное сравнение раз за разом дописывало бы в книгу нулевые дельты.
         if (order.getExecutedQuantity().compareTo(previousCum) > 0) {
-            recordTradeDelta(order, previousCum);
+            recordTradeDelta(ctx, order, previousCum);
         } else if (order.getExecutedQuantity().compareTo(previousCum) < 0) {
             reduceRecordedQuantity(order, previousCum);
         }
-        recordCommissionCorrection(order);
+        recordCommissionCorrection(ctx, order);
+        healBookCurrency(ctx);
         publishLedgerChanged(ctx.botId(), ctx.dryRun());
     }
 
@@ -148,7 +149,49 @@ public class AccountingService {
                 .toList();
     }
 
-    private void recordTradeDelta(BotOrderEntity order, BigDecimal previousCum) {
+    /**
+     * Деньги, в которых ведётся книга, — валюта КОТИРОВКИ инструмента.
+     *
+     * Раньше сюда шла валюта комиссии ордера. У T-Invest это совпадало случайно:
+     * комиссия рублёвая, котировка рублёвая. На Poloniex комиссия покупки удерживается
+     * МОНЕТОЙ, и книга подписывалась «DOGE», хотя каждая сумма в ней — USDT.
+     *
+     * Портилась не только подпись. По валюте бота портфель решает, складывать ли его
+     * P/L с остальными ({@code CurrencyCode.sameMoney}) и какую валюту считать основной
+     * для подключения. Два бота на Poloniex получали «DOGE» и «ETH» и переставали
+     * суммироваться между собой, хотя считают в одних и тех же долларах.
+     *
+     * Исходная валюта комиссии при этом не теряется: она осталась в {@code bot_order.fee_currency}
+     * и по-прежнему показывает, что число получено пересчётом монеты в деньги.
+     */
+    /**
+     * Подтягивает валюту старых строк к деньгам котировки.
+     *
+     * Одной записи новых строк мало: сводка берёт валюту из ПЕРВОЙ строки книги, и бот,
+     * успевший поторговать до этой правки, до конца жизни показывал бы «DOGE» вместо
+     * денег. Запрос трогает только расходящиеся строки, поэтому со второго раза он
+     * не находит ничего и обходится бесплатно.
+     */
+    private void healBookCurrency(BotExecutionContext ctx) {
+        String quote = ctx.quoteCurrency();
+        if (quote == null || quote.isBlank()) {
+            return;
+        }
+        int healed = ledgerRepo.normalizeCurrency(ctx.botId(), ctx.dryRun(), quote);
+        if (healed > 0) {
+            log.info("Bot {}: валюта книги приведена к {} в {} строк(ах) — раньше там стояла "
+                    + "валюта комиссии", ctx.botId(), quote, healed);
+        }
+    }
+
+    private static String bookCurrency(BotExecutionContext ctx, BotOrderEntity order) {
+        String quote = ctx == null ? null : ctx.quoteCurrency();
+        // Запасной вариант нужен ровно для старых записей и тестов, где котировка
+        // неизвестна: он воспроизводит прежнее поведение, а не выдумывает валюту.
+        return quote != null && !quote.isBlank() ? quote : order.getFeeCurrency();
+    }
+
+    private void recordTradeDelta(BotExecutionContext ctx, BotOrderEntity order, BigDecimal previousCum) {
         BigDecimal currentCum = order.getExecutedQuantity();
         BigDecimal delta = currentCum.subtract(previousCum);
         // Множителя больше нет: цена за единицу базового актива, количество — в них же.
@@ -185,11 +228,11 @@ public class AccountingService {
                 .commissionEstimated(!order.isFeeActual())
                 .amount(amount)
                 .executedQuantityCum(currentCum)
-                .currency(order.getFeeCurrency())
+                .currency(bookCurrency(ctx, order))
                 .build());
 
         if (tradeSaved && order.getSide() == OrderSide.SELL) {
-            recordCycleResult(order, delta, gross, commissionDelta, soldCost);
+            recordCycleResult(ctx, order, delta, gross, commissionDelta, soldCost);
         }
     }
 
@@ -353,7 +396,7 @@ public class AccountingService {
         return row.getOrderId() + ":" + (cum == null ? "—" : cum.stripTrailingZeros().toPlainString());
     }
 
-    private void recordCommissionCorrection(BotOrderEntity order) {
+    private void recordCommissionCorrection(BotExecutionContext ctx, BotOrderEntity order) {
         if (order.getFee() == null || nvl(order.getExecutedQuantity()).signum() <= 0) {
             return;
         }
@@ -383,12 +426,12 @@ public class AccountingService {
                 .commissionEstimated(!order.isFeeActual())
                 .amount(correction.negate())
                 .executedQuantityCum(executedCum)
-                .currency(order.getFeeCurrency())
+                .currency(bookCurrency(ctx, order))
                 .note(order.isFeeActual() ? "Уточнение фактической комиссии" : "Уточнение оценочной комиссии")
                 .build());
     }
 
-    private void recordCycleResult(BotOrderEntity order, BigDecimal soldQuantity, BigDecimal gross,
+    private void recordCycleResult(BotExecutionContext ctx, BotOrderEntity order, BigDecimal soldQuantity, BigDecimal gross,
                                    BigDecimal sellCommission, BigDecimal soldCost) {
         BigDecimal result = gross.subtract(soldCost).subtract(sellCommission);
         boolean saved = saveIdempotent(MoneyLedgerEntity.builder()
@@ -407,7 +450,7 @@ public class AccountingService {
                 .commissionEstimated(!order.isFeeActual())
                 .amount(result)
                 .executedQuantityCum(order.getExecutedQuantity())
-                .currency(order.getFeeCurrency())
+                .currency(bookCurrency(ctx, order))
                 .note("Результат закрытого цикла")
                 .build());
         if (saved) {

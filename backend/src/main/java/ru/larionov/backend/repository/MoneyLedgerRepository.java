@@ -1,6 +1,7 @@
 package ru.larionov.backend.repository;
 
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import ru.larionov.backend.entity.MoneyLedgerEntity;
@@ -21,6 +22,24 @@ public interface MoneyLedgerRepository extends JpaRepository<MoneyLedgerEntity, 
 
     List<MoneyLedgerEntity> findAllByOrderIdAndEntryTypeInOrderBySeqAsc(
             UUID orderId, List<LedgerEntryType> entryTypes);
+
+    /**
+     * Приводит валюту книги к деньгам котировки.
+     *
+     * Нужна для строк, записанных до того, как валюту книги перестали брать из комиссии:
+     * на Poloniex они помечены монетой («DOGE»), хотя суммы в них — деньги котировки.
+     * Сводка берёт валюту из ПЕРВОЙ строки, поэтому одной записи новых строк мало —
+     * старую подпись пришлось бы терпеть до конца жизни бота.
+     */
+    @Modifying(flushAutomatically = true)
+    @Query("""
+            update MoneyLedgerEntity l set l.currency = :currency
+            where l.botId = :botId and l.dryRun = :dryRun
+              and l.currency is not null and l.currency <> :currency
+            """)
+    int normalizeCurrency(@Param("botId") UUID botId,
+                          @Param("dryRun") boolean dryRun,
+                          @Param("currency") String currency);
 
     @Query("""
             select coalesce(max(l.executedQuantityCum), 0)
