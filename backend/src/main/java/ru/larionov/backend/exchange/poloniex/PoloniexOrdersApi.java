@@ -1,6 +1,7 @@
 package ru.larionov.backend.exchange.poloniex;
 
 import com.poloniex.api.client.spot.model.response.spot.Order;
+import com.poloniex.api.client.spot.model.response.spot.Trade;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import ru.larionov.backend.exchange.api.OrdersApi;
@@ -17,7 +18,6 @@ import ru.larionov.backend.exchange.api.model.order.OrderResponse;
 import ru.larionov.backend.exchange.api.model.order.OrderState;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -49,6 +49,10 @@ import java.util.Optional;
  *       денежная книга осталась однородной. Исходная валюта комиссии при этом
  *       сохраняется в {@link OrderFee#currency()} и видна в журнале.</li>
  * </ul>
+ *
+ * Размер удержания берётся из СДЕЛОК заявки: в ответе на запрос заявки его нет
+ * и вывести его оттуда невозможно. Пока сделки не получены, отдаётся брутто с
+ * пометкой «комиссия не подтверждена» — сверка вернётся к такой записи снова.
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -147,61 +151,122 @@ public class PoloniexOrdersApi implements OrdersApi {
                 fee.orderFee(),
                 status(order.getState(), filled, requested),
                 order.getCreateTime() == null ? null : Instant.ofEpochMilli(order.getCreateTime()),
-                order.getUpdateTime() == null ? null : Instant.ofEpochMilli(order.getUpdateTime()));
+                order.getUpdateTime() == null ? null : Instant.ofEpochMilli(order.getUpdateTime()),
+                // Журналу нужно знать, что меньшее количество — окончательный расчёт,
+                // а не запоздалое чтение: иначе он оставит прежнее, большее.
+                fee.netOfFee());
     }
 
     /**
-     * Комиссия ордера и фактически полученное количество.
+     * Комиссия ордера и фактически полученное количество — по СДЕЛКАМ заявки.
      *
-     * Ответ ордера комиссию не содержит — она приходит в сделках. Поэтому здесь
-     * работает ОЦЕНКА по разнице «исполнено минус зачислено», когда биржа её даёт,
-     * и по ставке, когда не даёт. Точный факт подтягивает {@link PoloniexFeesApi}
-     * и сверка по сделкам — так же, как это устроено у T-Invest.
+     * Ответ на запрос заявки комиссии не содержит, и вывести её оттуда нельзя:
+     * {@code filledAmount} — это сумма сделки в валюте котировки, из которой комиссия
+     * НЕ вычтена, а {@code filledQuantity} — купленное количество ДО удержания. Их
+     * отношение всегда даёт ровно {@code filledQuantity}, поэтому попытка получить
+     * удержание как «исполнено минус зачислено» тихо возвращала брутто. Журнал
+     * записывал монеты, которых на счёте нет, встречную продажу биржа отбивала
+     * ошибкой 21721 «available insufficient», а сверка вставала на расхождении,
+     * равном комиссии.
+     *
+     * Поэтому величину удержания спрашиваем там, где она есть, — в сделках.
+     *
+     * <h3>Почему количество не округляется</h3>
+     * Зачисляется ровно {@code filledQuantity − комиссия}, с полной точностью, а шаг
+     * количества — ограничение на ЗАЯВКУ, не на баланс. У DOGE_USDT шаг 0.001 при
+     * комиссии с шестью знаками: округли мы нетто до шага, журнал разошёлся бы
+     * с биржей на остаток, а сверка не терпит расхождения даже в один знак.
      */
     private Fee feeOf(Order order, String symbol, OrderSide side,
                       BigDecimal filled, BigDecimal avgPrice) {
         if (filled.signum() <= 0) {
-            return new Fee(BigDecimal.ZERO, null);
+            return new Fee(BigDecimal.ZERO, null, false);
         }
 
         PoloniexSymbols.Limits limits = symbols.limits(symbol);
         String base = limits.base() == null ? null : limits.base().toUpperCase(Locale.ROOT);
 
-        // filledAmount — сколько денег котировки прошло по сделке. Для продажи из него
-        // видно, сколько реально получено, но количество базовой монеты оно не меняет.
-        // Комиссия базовой валютой бьёт только по ПОКУПКЕ: монет приходит меньше.
-        if (side == OrderSide.SELL) {
-            return new Fee(filled, null);
+        List<Trade> trades = tradesOf(order);
+        if (trades == null || trades.isEmpty()) {
+            // Сделок пока не видно. Отдаём БРУТТО и НЕ выдаём догадку за факт:
+            // запись останется неурегулированной, сверка вернётся к ней снова.
+            return new Fee(filled, null, false);
         }
 
-        BigDecimal netQuantity = filled;
-        BigDecimal feeInQuote = null;
+        BigDecimal tradedQuantity = BigDecimal.ZERO;
+        BigDecimal feeInBase = BigDecimal.ZERO;
+        BigDecimal feeInQuote = BigDecimal.ZERO;
 
-        if (avgPrice != null && avgPrice.signum() > 0 && order.getFilledAmount() != null) {
-            // Комиссию в базовой валюте оценить из ответа ордера нельзя; берём её
-            // как долю от суммы сделки только тогда, когда биржа отдала обе величины.
-            BigDecimal impliedQuantity = order.getFilledAmount().divide(avgPrice, 18, RoundingMode.DOWN);
-            if (impliedQuantity.signum() > 0 && impliedQuantity.compareTo(filled) < 0) {
-                BigDecimal feeInBase = filled.subtract(impliedQuantity);
-                netQuantity = quantizeDown(impliedQuantity, limits.quantityStep());
-                feeInQuote = feeInBase.multiply(avgPrice);
+        for (Trade trade : trades) {
+            tradedQuantity = tradedQuantity.add(nvl(decimal(trade.getQuantity()), BigDecimal.ZERO));
+            BigDecimal fee = decimal(trade.getFeeAmount());
+            if (fee == null || fee.signum() <= 0) {
+                continue;
+            }
+            if (base != null && base.equalsIgnoreCase(trade.getFeeCurrency())) {
+                feeInBase = feeInBase.add(fee);
+            } else {
+                feeInQuote = feeInQuote.add(fee);
             }
         }
 
-        if (feeInQuote == null) {
-            return new Fee(quantizeDown(netQuantity, limits.quantityStep()), null);
+        // Список сделок должен покрывать весь исполненный объём. Если он отстаёт,
+        // удержание окажется занижённым, а занижённое удержание — это снова позиция
+        // больше фактической. Такой ответ лучше не принимать вовсе.
+        if (tradedQuantity.compareTo(filled) != 0) {
+            log.debug("Сделки заявки {} покрывают {} из {} — комиссию пока не фиксирую",
+                    order.getId(), tradedQuantity.toPlainString(), filled.toPlainString());
+            return new Fee(filled, null, false);
         }
 
-        // Валютой комиссии остаётся базовая монета — так в журнале видно, что число
-        // получено пересчётом, а не пришло от биржи деньгами.
-        return new Fee(netQuantity, OrderFee.actual(feeInQuote, base, CommissionSource.EXCHANGE_EXECUTED));
+        // Комиссия базовой монетой уменьшает то, чем бот владеет; комиссия деньгами
+        // котировки количество не трогает. На продаже удержание всегда денежное.
+        BigDecimal netQuantity = side == OrderSide.SELL ? filled : filled.subtract(feeInBase);
+
+        BigDecimal bookFee = feeInQuote;
+        String feeCurrency = limits.quote();
+        if (feeInBase.signum() > 0) {
+            // Валютой комиссии остаётся базовая монета — так в журнале видно, что
+            // число получено пересчётом, а не пришло от биржи деньгами.
+            bookFee = bookFee.add(avgPrice == null || avgPrice.signum() <= 0
+                    ? feeInBase
+                    : feeInBase.multiply(avgPrice));
+            feeCurrency = base;
+        }
+
+        return new Fee(netQuantity,
+                OrderFee.actual(bookFee, feeCurrency, CommissionSource.EXCHANGE_EXECUTED),
+                feeInBase.signum() > 0);
     }
 
-    private static BigDecimal quantizeDown(BigDecimal quantity, BigDecimal step) {
-        if (quantity == null || quantity.signum() <= 0 || step == null || step.signum() <= 0) {
-            return quantity == null ? BigDecimal.ZERO : quantity;
+    /**
+     * Сделки заявки, или null — если спросить не удалось.
+     *
+     * Пустой список и отказ различаются намеренно: пустой список — это ответ биржи,
+     * а отказ означает, что комиссия по-прежнему неизвестна. Ронять из-за него разбор
+     * состояния заявки нельзя: без состояния сверка не сможет даже выяснить её судьбу.
+     */
+    private List<Trade> tradesOf(Order order) {
+        if (order.getId() == null || order.getId().isBlank()) {
+            return null;
         }
-        return quantity.divide(step, 0, RoundingMode.DOWN).multiply(step);
+        try {
+            return rest.call("сделки заявки " + order.getId(), rest.api().tradesByOrder(order.getId()));
+        } catch (Exception e) {
+            log.debug("Не удалось получить сделки заявки {}: {}", order.getId(), e.getMessage());
+            return null;
+        }
+    }
+
+    private static BigDecimal decimal(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return new BigDecimal(raw.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     /**
@@ -232,7 +297,12 @@ public class PoloniexOrdersApi implements OrdersApi {
         return value != null ? value : fallback;
     }
 
-    /** Что реально получено и во что обошлось. */
-    private record Fee(BigDecimal netQuantity, OrderFee orderFee) {
+    /**
+     * Что реально получено, во что обошлось и уменьшено ли количество комиссией.
+     *
+     * Третий признак несёт журнал заявок: только по нему видно, что меньшее количество —
+     * окончательный расчёт, а не запоздалое чтение.
+     */
+    private record Fee(BigDecimal netQuantity, OrderFee orderFee, boolean netOfFee) {
     }
 }

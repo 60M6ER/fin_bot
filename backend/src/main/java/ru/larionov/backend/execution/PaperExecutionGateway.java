@@ -181,9 +181,12 @@ public class PaperExecutionGateway implements ExecutionGateway {
     @Override
     public ReconcileResult reconcile(BotExecutionContext ctx) {
         BigDecimal position = orderRepo.sumPositionQuantity(ctx.botId(), true);
+        BigDecimal own = position == null ? BigDecimal.ZERO : position;
+        // На бумаге счёта нет: остаток по определению равен журналу, расхождению неоткуда взяться.
         return new ReconcileResult(
                 openOrders(ctx.botId()),
-                position == null ? BigDecimal.ZERO : position,
+                own,
+                own,
                 riskGuard.usedCapital(ctx),
                 0,
                 0,

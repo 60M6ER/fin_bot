@@ -153,7 +153,7 @@ class GridStrategyStopRaceTest {
     }
 
     private ReconcileResult reconciled() {
-        return new ReconcileResult(List.of(), BigDecimal.ZERO, BigDecimal.ZERO,
+        return new ReconcileResult(List.of(), BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
                 0, 0, BigDecimal.ZERO);
     }
 

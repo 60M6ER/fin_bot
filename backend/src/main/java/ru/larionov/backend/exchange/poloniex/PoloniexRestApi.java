@@ -109,4 +109,15 @@ public interface PoloniexRestApi {
     Call<List<Trade>> trades(@Query("limit") Integer limit,
                              @Query("startTime") Long startTime,
                              @Query("endTime") Long endTime);
+
+    /**
+     * Сделки КОНКРЕТНОЙ заявки — единственный источник фактической комиссии.
+     *
+     * Ответ на запрос заявки комиссии не содержит вовсе, а для Poloniex она берётся
+     * в получаемой валюте и потому меняет само количество зачисленных монет. Без
+     * этого запроса размер удержания взять неоткуда: вывести его из {@code filledAmount}
+     * нельзя, потому что там сумма СДЕЛКИ, из которой комиссия не вычтена.
+     */
+    @GET("/orders/{id}/trades")
+    Call<List<Trade>> tradesByOrder(@Path("id") String id);
 }

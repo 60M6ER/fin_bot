@@ -393,7 +393,7 @@ class GridStrategyBudgetSizingTest {
     }
 
     private ReconcileResult reconciled(String position) {
-        return new ReconcileResult(List.of(), new BigDecimal(position), BigDecimal.ZERO,
+        return new ReconcileResult(List.of(), new BigDecimal(position), new BigDecimal(position), BigDecimal.ZERO,
                 0, 0, BigDecimal.ZERO);
     }
 

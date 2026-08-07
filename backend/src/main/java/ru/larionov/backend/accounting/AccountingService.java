@@ -1,6 +1,7 @@
 package ru.larionov.backend.accounting;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
@@ -23,6 +24,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.*;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class AccountingService {
@@ -54,6 +56,8 @@ public class AccountingService {
         // и наивное сравнение раз за разом дописывало бы в книгу нулевые дельты.
         if (order.getExecutedQuantity().compareTo(previousCum) > 0) {
             recordTradeDelta(order, previousCum);
+        } else if (order.getExecutedQuantity().compareTo(previousCum) < 0) {
+            reduceRecordedQuantity(order, previousCum);
         }
         recordCommissionCorrection(order);
         publishLedgerChanged(ctx.botId(), ctx.dryRun());
@@ -187,6 +191,46 @@ public class AccountingService {
         if (tradeSaved && order.getSide() == OrderSide.SELL) {
             recordCycleResult(order, delta, gross, commissionDelta, soldCost);
         }
+    }
+
+    /**
+     * Уменьшает уже записанное количество, когда биржа подтвердила расчёт.
+     *
+     * Это НЕ откат сделки: объём торга не изменился, изменилось то, сколько монет
+     * реально зачислено. Там, где комиссия удерживается из получаемой валюты
+     * (Poloniex берёт её монетой), зачисляется строго меньше исполненного, и точная
+     * величина приходит позже — со сделками заявки.
+     *
+     * Без этой правки книга навсегда осталась бы с брутто: строка пишется по первому
+     * известию об исполнении, а дельты считаются от неё и только вверх. Позиция и
+     * себестоимость расходились бы с журналом заявок на комиссию после каждой покупки —
+     * и, что хуже, тихо: расхождение видно лишь в отчётах, а не в отказе биржи.
+     *
+     * Правится последняя строка ордера: именно её дельта и оказалась завышенной.
+     */
+    private void reduceRecordedQuantity(BotOrderEntity order, BigDecimal previousCum) {
+        List<MoneyLedgerEntity> rows =
+                ledgerRepo.findAllByOrderIdAndEntryTypeInOrderBySeqAsc(order.getId(), TRADE_TYPES);
+        if (rows.isEmpty()) {
+            return;
+        }
+
+        MoneyLedgerEntity last = rows.get(rows.size() - 1);
+        BigDecimal shortfall = previousCum.subtract(order.getExecutedQuantity());
+        BigDecimal corrected = nvl(last.getQuantity()).subtract(shortfall);
+        if (corrected.signum() <= 0) {
+            // Уценка съедает всю дельту целиком — такого не бывает при удержании
+            // комиссии, и молча обнулять строку опаснее, чем оставить как есть.
+            log.warn("Bot {}: подтверждённое количество по ордеру {} меньше записанной дельты — "
+                            + "строку книги не трогаю",
+                    order.getBotId(), order.getClientOrderId());
+            return;
+        }
+
+        last.setQuantity(corrected);
+        last.setExecutedQuantityCum(order.getExecutedQuantity());
+        repairLedgerRowMoney(last);
+        ledgerRepo.save(last);
     }
 
     private void repairLedgerRows(UUID botId, boolean dryRun) {

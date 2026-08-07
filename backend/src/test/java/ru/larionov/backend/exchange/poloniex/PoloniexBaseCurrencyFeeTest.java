@@ -1,162 +1,235 @@
 package ru.larionov.backend.exchange.poloniex;
 
-import com.poloniex.api.client.spot.model.event.spot.OrderEvent;
-import com.poloniex.api.client.spot.model.event.spot.PoloEvent;
 import com.poloniex.api.client.spot.model.response.spot.Market;
+import com.poloniex.api.client.spot.model.response.spot.Order;
 import com.poloniex.api.client.spot.model.response.spot.SymbolTradeLimit;
+import com.poloniex.api.client.spot.model.response.spot.Trade;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import ru.larionov.backend.exchange.api.enums.OrderSide;
-import ru.larionov.backend.exchange.api.enums.OrderStatus;
+import retrofit2.Call;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
+import ru.larionov.backend.exchange.api.model.id.ClientOrderId;
 import ru.larionov.backend.exchange.api.model.order.OrderState;
 
-import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
  * Комиссия Poloniex в БАЗОВОЙ валюте — отдельная ловушка, которой нет у T-Invest.
  *
- * При покупке BTC_USDT комиссия удерживается биткойном: в заявке 0.001 BTC,
- * а на баланс придёт 0.001 минус комиссия. Если записать в журнал заявленное
+ * При покупке DOGE_USDT комиссия удерживается монетой: в заявке 140.826 DOGE,
+ * а на баланс придёт 140.826 минус комиссия. Если записать в журнал заявленное
  * количество, произойдёт цепочка: позиция журнала больше фактической → встречную
- * продажу отбивает биржа → сверка бесконечно сообщает о расхождении → бот встаёт.
+ * продажу отбивает биржа с кодом 21721 «available insufficient» → сверка
+ * бесконечно сообщает о расхождении → бот встаёт.
  *
- * Тест фиксирует, что в журнал попадает НЕТТО.
+ * Ровно это и случилось на боевом прогоне 07.08.2026: расхождение −0.281652 DOGE,
+ * то есть в точности 0.2% от 140.826 — вся комиссия целиком.
+ *
+ * Числа в тесте настоящие, из того самого инцидента.
  */
 class PoloniexBaseCurrencyFeeTest {
 
-    private PoloniexSymbols symbols;
-    private PoloniexOrdersStreamService stream;
+    private PoloniexRest rest;
+    private PoloniexRestApi api;
+    private PoloniexOrdersApi orders;
 
     @BeforeEach
     void setUp() {
-        PoloniexRest rest = mock(PoloniexRest.class);
-        symbols = mock(PoloniexSymbols.class);
-        when(symbols.limits(anyString())).thenReturn(PoloniexSymbols.Limits.of(btcUsdt()));
+        rest = mock(PoloniexRest.class);
+        api = mock(PoloniexRestApi.class);
+        when(rest.api()).thenReturn(api);
 
-        // Вебсокет не поднимаем: проверяем чистое отображение события в состояние.
-        stream = new PoloniexOrdersStreamService("wss://example.invalid", "k", "s", symbols);
+        PoloniexSymbols symbols = mock(PoloniexSymbols.class);
+        when(symbols.limits(anyString())).thenReturn(PoloniexSymbols.Limits.of(dogeUsdt()));
+
+        orders = new PoloniexOrdersApi(rest, symbols);
     }
 
-    private static Market btcUsdt() {
+    /**
+     * Шаг количества у DOGE_USDT — 0.001, то есть ГРУБЕЕ комиссии с шестью знаками.
+     * Именно поэтому нетто нельзя округлять по этому шагу: на балансе лежит точное
+     * число, а сверка не прощает расхождения даже в последнем знаке.
+     */
+    private static Market dogeUsdt() {
         SymbolTradeLimit limit = new SymbolTradeLimit();
-        limit.setPriceScale(2);
-        limit.setQuantityScale(6);
-        limit.setMinQuantity("0.000001");
+        limit.setSymbol("DOGE_USDT");
+        limit.setPriceScale(6);
+        limit.setQuantityScale(3);
+        limit.setMinQuantity("0.001");
         limit.setMinAmount("1");
 
         Market market = new Market();
-        market.setSymbol("BTC_USDT");
-        market.setBaseCurrencyName("BTC");
+        market.setSymbol("DOGE_USDT");
+        market.setBaseCurrencyName("DOGE");
         market.setQuoteCurrencyName("USDT");
         market.setState("NORMAL");
         market.setSymbolTradeLimit(limit);
         return market;
     }
 
-    private static OrderEvent buyEvent(String filled, String fee, String feeCurrency) {
-        OrderEvent event = new OrderEvent();
-        event.setSymbol("BTC_USDT");
-        event.setSide("BUY");
-        event.setState("FILLED");
-        event.setOrderId("exch-1");
-        event.setClientOrderId("our-1");
-        event.setQuantity("0.001000");
-        event.setFilledQuantity(filled);
-        event.setPrice("60000");
-        event.setTradePrice("60000");
-        event.setTradeFee(fee);
-        event.setFeeCurrency(feeCurrency);
-        return event;
+    private static Order filledBuy() {
+        Order order = new Order();
+        order.setId("exch-1");
+        order.setClientOrderId("our-1");
+        order.setSymbol("DOGE_USDT");
+        order.setSide("BUY");
+        order.setState("FILLED");
+        order.setQuantity(new BigDecimal("140.826"));
+        order.setFilledQuantity(new BigDecimal("140.826"));
+        order.setPrice(new BigDecimal("0.070027"));
+        order.setAvgPrice(new BigDecimal("0.070013"));
+        // Сумма СДЕЛКИ, из которой комиссия не вычтена: ровно количество × цена.
+        // Из неё удержание не выводится — на этом и споткнулся прежний расчёт.
+        order.setFilledAmount(new BigDecimal("140.826").multiply(new BigDecimal("0.070013")));
+        return order;
     }
 
-    /** Достаём приватное отображение: поднимать вебсокет ради него незачем. */
+    private static Trade trade(String quantity, String fee, String feeCurrency) {
+        Trade trade = new Trade();
+        trade.setOrderId("exch-1");
+        trade.setSymbol("DOGE_USDT");
+        trade.setSide("BUY");
+        trade.setQuantity(quantity);
+        trade.setPrice("0.070013");
+        trade.setFeeAmount(fee);
+        trade.setFeeCurrency(feeCurrency);
+        return trade;
+    }
+
     @SuppressWarnings("unchecked")
-    private OrderState map(OrderEvent event) throws Exception {
-        Method method = PoloniexOrdersStreamService.class
-                .getDeclaredMethod("toState", OrderEvent.class, AccountId.class);
-        method.setAccessible(true);
-        return (OrderState) method.invoke(stream, event, new AccountId("acc-1"));
+    private void exchangeReturns(Order order, List<Trade> trades) {
+        Call<Order> orderCall = mock(Call.class);
+        when(api.orderByClientOrderId(anyString())).thenReturn(orderCall);
+        when(rest.callAllowingNotFound(anyString(), eq(orderCall))).thenReturn(Optional.of(order));
+
+        Call<List<Trade>> tradesCall = mock(Call.class);
+        when(api.tradesByOrder(anyString())).thenReturn(tradesCall);
+        if (trades == null) {
+            when(rest.call(anyString(), eq(tradesCall)))
+                    .thenThrow(new PoloniexRest.PoloniexApiException(500, "сделки", "boom"));
+        } else {
+            when(rest.call(anyString(), eq(tradesCall))).thenReturn(trades);
+        }
+    }
+
+    private OrderState fetch() {
+        return orders.getByClientOrderId(new AccountId("acc-1"), new ClientOrderId("our-1")).orElseThrow();
     }
 
     /**
-     * Главный случай: комиссия удержана биткойном. В журнал обязано попасть то,
-     * что реально зачислено, — иначе бот попытается продать монеты, которых нет.
+     * Главный случай инцидента: комиссия удержана монетой. В журнал обязано попасть
+     * то, что реально зачислено, — иначе бот попытается продать монеты, которых нет.
      */
     @Test
-    void buyFeeInBaseCurrencyReducesTheRecordedQuantity() throws Exception {
-        OrderState state = map(buyEvent("0.001000", "0.0000015", "BTC"));
+    void buyFeeInBaseCurrencyReducesTheRecordedQuantity() {
+        exchangeReturns(filledBuy(), List.of(trade("140.826", "0.281652", "DOGE")));
 
-        assertThat(state.executedQuantity())
-                .as("зачислено меньше заявленного ровно на комиссию, вниз до шага")
-                .isEqualByComparingTo("0.000998");
-        assertThat(state.requestedQuantity()).isEqualByComparingTo("0.001000");
+        assertThat(fetch().executedQuantity())
+                .as("зачислено ровно на комиссию меньше — 140.826 − 0.281652")
+                .isEqualByComparingTo("140.544348");
+    }
+
+    /**
+     * Нетто НЕ округляется до шага количества. Шаг 0.001 — ограничение на заявку,
+     * а не на баланс: округлив, мы потеряли бы 0.000348 DOGE, и сверка встала бы
+     * на них так же намертво, как раньше вставала на целой комиссии.
+     */
+    @Test
+    void netQuantityKeepsFullPrecisionAndIsNotRoundedToTheOrderStep() {
+        exchangeReturns(filledBuy(), List.of(trade("140.826", "0.281652", "DOGE")));
+
+        assertThat(fetch().executedQuantity().stripTrailingZeros().toPlainString())
+                .isEqualTo("140.544348");
     }
 
     /** Комиссия пересчитывается в деньги котировки — книга обязана остаться однородной. */
     @Test
-    void baseCurrencyFeeIsConvertedToQuoteMoneyForTheLedger() throws Exception {
-        OrderState state = map(buyEvent("0.001000", "0.0000015", "BTC"));
+    void baseCurrencyFeeIsConvertedToQuoteMoneyForTheLedger() {
+        exchangeReturns(filledBuy(), List.of(trade("140.826", "0.281652", "DOGE")));
+        OrderState state = fetch();
 
         assertThat(state.fee()).isNotNull();
-        // 0.0000015 BTC × 60000 = 0.09 USDT
-        assertThat(state.fee().amount()).isEqualByComparingTo("0.09");
+        // 0.281652 DOGE × 0.070013 = 0.019719... USDT
+        assertThat(state.fee().amount())
+                .isEqualByComparingTo(new BigDecimal("0.281652").multiply(new BigDecimal("0.070013")));
         assertThat(state.fee().currency())
                 .as("исходная валюта комиссии сохраняется: видно, что число получено пересчётом")
-                .isEqualTo("BTC");
+                .isEqualTo("DOGE");
         assertThat(state.fee().actual()).isTrue();
+    }
+
+    /** Заявка, исполненная НЕСКОЛЬКИМИ сделками: удержания складываются все. */
+    @Test
+    void feesOfEveryTradeAreSummed() {
+        Order order = filledBuy();
+        exchangeReturns(order, List.of(
+                trade("40.826", "0.081652", "DOGE"),
+                trade("100.000", "0.200000", "DOGE")));
+
+        assertThat(fetch().executedQuantity())
+                .as("140.826 − (0.081652 + 0.200000)")
+                .isEqualByComparingTo("140.544348");
     }
 
     /** Комиссия деньгами котировки количество не трогает. */
     @Test
-    void quoteCurrencyFeeLeavesTheQuantityIntact() throws Exception {
-        OrderState state = map(buyEvent("0.001000", "0.05", "USDT"));
+    void quoteCurrencyFeeLeavesTheQuantityIntact() {
+        exchangeReturns(filledBuy(), List.of(trade("140.826", "0.019719", "USDT")));
+        OrderState state = fetch();
 
-        assertThat(state.executedQuantity()).isEqualByComparingTo("0.001000");
-        assertThat(state.fee().amount()).isEqualByComparingTo("0.05");
+        assertThat(state.executedQuantity()).isEqualByComparingTo("140.826");
+        assertThat(state.fee().amount()).isEqualByComparingTo("0.019719");
         assertThat(state.fee().currency()).isEqualTo("USDT");
     }
 
-    /** Чужая заявка без нашего идентификатора — не наше дело, а не ошибка. */
+    /**
+     * Сделки не пришли — комиссия неизвестна. Отдаём брутто, но НЕ выдаём его за
+     * подтверждённый расчёт: пока комиссия не факт, сверка вернётся к этой записи,
+     * а гейтвей не примет заниженное количество за окончательное.
+     */
     @Test
-    void eventWithoutOurClientOrderIdIsIgnored() throws Exception {
-        OrderEvent foreign = buyEvent("0.001000", "0.0000015", "BTC");
-        foreign.setClientOrderId(null);
+    void unavailableTradesLeaveTheFeeUnconfirmedRatherThanGuessed() {
+        exchangeReturns(filledBuy(), null);
+        OrderState state = fetch();
 
-        assertThat(map(foreign)).isNull();
+        assertThat(state.executedQuantity()).isEqualByComparingTo("140.826");
+        assertThat(state.fee()).as("догадка не выдаётся за факт").isNull();
     }
 
+    /**
+     * Список сделок отстаёт и покрывает не весь объём. Принять такое удержание —
+     * значит снова занизить комиссию и снова получить позицию больше фактической,
+     * только теперь на величину, которую труднее заметить.
+     */
     @Test
-    void statesAreMappedToOurVocabulary() throws Exception {
-        OrderEvent event = buyEvent("0.000500", null, null);
+    void partialTradeListIsRejectedInsteadOfUnderstatingTheFee() {
+        exchangeReturns(filledBuy(), List.of(trade("40.826", "0.081652", "DOGE")));
+        OrderState state = fetch();
 
-        event.setState("PARTIALLY_FILLED");
-        assertThat(map(event).status()).isEqualTo(OrderStatus.PARTIALLY_FILLED);
-
-        // Частично исполнена и снята — заявка мертва, ждать от неё нечего.
-        event.setState("PARTIALLY_CANCELED");
-        assertThat(map(event).status()).isEqualTo(OrderStatus.CANCELLED);
-
-        event.setState("SOMETHING_NEW");
-        assertThat(map(event).status())
-                .as("незнакомое состояние не выдаём за исполнение")
-                .isEqualTo(OrderStatus.UNKNOWN);
+        assertThat(state.executedQuantity()).isEqualByComparingTo("140.826");
+        assertThat(state.fee()).isNull();
     }
 
+    /** Пока ничего не исполнено, за сделками ходить незачем. */
     @Test
-    void sideAndInstrumentSurviveTheMapping() throws Exception {
-        OrderState state = map(buyEvent("0.001000", null, null));
+    void restingOrderCostsNoExtraRequest() {
+        Order resting = filledBuy();
+        resting.setState("NEW");
+        resting.setFilledQuantity(BigDecimal.ZERO);
+        resting.setFilledAmount(BigDecimal.ZERO);
+        resting.setAvgPrice(BigDecimal.ZERO);
+        exchangeReturns(resting, List.of());
 
-        assertThat(state.side()).isEqualTo(OrderSide.BUY);
-        assertThat(state.instrumentId().primary()).isEqualTo("POLONIEX:BTC_USDT");
-        assertThat(state.clientOrderId().value()).isEqualTo("our-1");
+        assertThat(fetch().executedQuantity()).isEqualByComparingTo("0");
+        org.mockito.Mockito.verify(api, org.mockito.Mockito.never()).tradesByOrder(any());
     }
 }

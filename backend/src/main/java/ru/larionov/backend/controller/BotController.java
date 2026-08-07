@@ -12,6 +12,7 @@ import ru.larionov.backend.dto.BotTradingStateDto;
 import ru.larionov.backend.dto.BotUpdateRequest;
 import ru.larionov.backend.dto.BotValuationDto;
 import ru.larionov.backend.dto.MoneyLedgerDto;
+import ru.larionov.backend.dto.GridGenerationDto;
 import ru.larionov.backend.dto.GridPreviewDto;
 import ru.larionov.backend.dto.GridPreviewRequest;
 import ru.larionov.backend.enums.StrategyType;
@@ -19,6 +20,7 @@ import ru.larionov.backend.model.RuntimeInfo;
 import ru.larionov.backend.service.BotService;
 import ru.larionov.backend.service.BotRuntimeService;
 import ru.larionov.backend.service.GridPreviewService;
+import ru.larionov.backend.strategy.StrategyCommand;
 
 import java.util.List;
 import java.util.UUID;
@@ -82,6 +84,19 @@ public class BotController {
         return ResponseEntity.noContent().build();
     }
 
+    /**
+     * Закрыть позицию по рынку, зафиксировать убыток и построить сетку заново.
+     *
+     * Ручное решение оператора: снимает потолок убытка и лимит перестановок,
+     * которые в этот момент и держат бота в тупике. Выполняется асинхронно на
+     * потоке бота — результат придёт событиями и в Telegram.
+     */
+    @PostMapping("/{id}/force-grid-replacement")
+    public ResponseEntity<Void> forceGridReplacement(@PathVariable UUID id) {
+        runtimeService.command(id, StrategyCommand.FORCE_GRID_REPLACEMENT);
+        return ResponseEntity.accepted().build();
+    }
+
     /** Что бот делает прямо сейчас: позиция, активные заявки, очередь событий. */
     @GetMapping("/{id}/state")
     public BotTradingStateDto state(@PathVariable UUID id) {
@@ -104,6 +119,13 @@ public class BotController {
     public List<MoneyLedgerDto> ledger(@PathVariable UUID id,
                                        @RequestParam(required = false) Boolean dryRun) {
         return service.ledger(id, dryRun);
+    }
+
+    /** Итоги по поколениям сетки: во сколько обошёлся вход в диапазон и что он принёс. */
+    @GetMapping("/{id}/generations")
+    public List<GridGenerationDto> generations(@PathVariable UUID id,
+                                               @RequestParam(required = false) Boolean dryRun) {
+        return service.generations(id, dryRun);
     }
 
     @GetMapping("/{id}/runtime")

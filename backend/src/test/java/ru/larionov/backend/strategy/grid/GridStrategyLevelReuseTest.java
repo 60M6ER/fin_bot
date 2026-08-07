@@ -231,7 +231,7 @@ class GridStrategyLevelReuseTest {
 
     private ReconcileResult reconciled() {
         return new ReconcileResult(List.copyOf(openOrders), BigDecimal.ZERO, BigDecimal.ZERO,
-                0, 0, BigDecimal.ZERO);
+                BigDecimal.ZERO, 0, 0, BigDecimal.ZERO);
     }
 
     private LastPrice price(String value) {

@@ -50,17 +50,22 @@
           label="Инструмент"
           hint="Начните вводить тикер или название"
         />
+        <field-hint :text="hints.instrumentUid" />
       </div>
       <div class="col-12 col-md-4 flex items-center">
-        <q-toggle v-model="model.autoRange" label="Границы по волатильности" :disable="disable" />
+        <q-toggle v-model="model.autoRange" label="Границы по волатильности" :disable="disable">
+          <field-hint :text="hints.autoRange" />
+        </q-toggle>
       </div>
 
       <template v-if="!model.autoRange">
         <div class="col-6 col-md-3">
           <q-input v-model.number="model.lowerPrice" label="Нижняя граница" type="number" outlined dense :disable="disable" />
+          <field-hint :text="hints.lowerPrice" />
         </div>
         <div class="col-6 col-md-3">
           <q-input v-model.number="model.upperPrice" label="Верхняя граница" type="number" outlined dense :disable="disable" />
+          <field-hint :text="hints.upperPrice" />
         </div>
       </template>
       <template v-else>
@@ -70,18 +75,23 @@
             option-value="value" option-label="label" emit-value map-options
             label="Интервал ATR" outlined dense :disable="disable"
           />
+          <field-hint :text="hints.atrInterval" />
         </div>
         <div class="col-6 col-md-3">
           <q-input v-model.number="model.atrPeriods" label="Свечей ATR" type="number" min="5" outlined dense :disable="disable" />
+          <field-hint :text="hints.atrPeriods" />
         </div>
         <div class="col-6 col-md-3">
           <q-input v-model.number="model.atrMultiplier" label="Множитель ATR" type="number" min="0.1" step="0.1" outlined dense :disable="disable" />
+          <field-hint :text="hints.atrMultiplier" />
         </div>
         <div class="col-6 col-md-3">
           <q-input v-model.number="minHalfWidthPercent" label="Мин. полуширина" type="number" min="0.1" step="0.1" suffix="%" outlined dense :disable="disable" />
+          <field-hint :text="hints.minHalfWidthPct" />
         </div>
         <div class="col-6 col-md-3">
           <q-input v-model.number="maxHalfWidthPercent" label="Макс. полуширина" type="number" min="0.1" step="0.1" suffix="%" outlined dense :disable="disable" />
+          <field-hint :text="hints.maxHalfWidthPct" />
         </div>
         <div class="col-6 col-md-3">
           <q-select
@@ -89,25 +99,31 @@
             option-value="value" option-label="label" emit-value map-options
             label="Пробой верхней границы" outlined dense :disable="disable"
           />
+          <field-hint :text="hints.onUpperBreakout" />
         </div>
         <template v-if="model.onUpperBreakout === 'REPLACE_UPPER' || model.onRangeExit === 'REPLACE_LOWER'">
           <div class="col-6 col-md-3">
             <q-input v-model.number="model.breakoutConfirmSeconds" label="Подтверждение" type="number" min="1" suffix="сек" outlined dense :disable="disable" />
+            <field-hint :text="hints.breakoutConfirmSeconds" />
           </div>
           <div class="col-6 col-md-3">
             <q-input v-model.number="breakoutMarginPercent" label="Запас пробоя" type="number" min="0" step="0.1" suffix="%" outlined dense :disable="disable" />
+            <field-hint :text="hints.breakoutMarginPct" />
           </div>
           <div class="col-6 col-md-3">
             <q-input v-model.number="model.replaceCooldownSeconds" label="Пауза между заменами" type="number" min="1" suffix="сек" outlined dense :disable="disable" />
+            <field-hint :text="hints.replaceCooldownSeconds" />
           </div>
         </template>
       </template>
 
       <div class="col-6 col-md-3">
         <q-input v-model.number="model.levels" label="Уровней" type="number" min="1" outlined dense :disable="disable" />
+        <field-hint :text="hints.levels" />
       </div>
       <div class="col-6 col-md-3">
         <q-input v-model.number="model.maxActiveOrders" label="Активных заявок" type="number" min="1" outlined dense :disable="disable" />
+        <field-hint :text="hints.maxActiveOrders" />
       </div>
       <div class="col-6 col-md-3">
         <q-select
@@ -116,6 +132,7 @@
           option-value="value" option-label="label" emit-value map-options
           label="Выход из диапазона" outlined dense :disable="disable"
         />
+        <field-hint :text="hints.onRangeExit" />
       </div>
       <template v-if="model.onRangeExit === 'REPLACE_LOWER'">
         <div class="col-6 col-md-3">
@@ -124,6 +141,7 @@
             label="Перестановок вниз, макс."
             type="number" min="1" outlined dense :disable="disable"
           />
+          <field-hint :text="hints.maxDownwardReplacements" />
         </div>
         <div class="col-6 col-md-3">
           <q-input
@@ -131,6 +149,7 @@
             label="Убыток перестановок, макс."
             type="number" min="0.01" step="0.01" outlined dense :disable="disable"
           />
+          <field-hint :text="hints.maxRealizedLoss" />
         </div>
       </template>
     </div>
@@ -152,6 +171,7 @@
           option-value="value" option-label="label" emit-value map-options
           label="Размер заявки" outlined dense :disable="disable"
         />
+        <field-hint :text="hints.sizingMode" />
       </div>
 
       <div v-if="model.sizingMode === 'FIXED_QUANTITY'" class="col-6 col-md-3">
@@ -165,6 +185,7 @@
           :hint="preview.quantityStep ? `шаг ${formatQuantity(preview.quantityStep)}` : ''"
           outlined dense :disable="disable"
         />
+        <field-hint :text="hints.quantityPerOrder" />
       </div>
 
       <template v-else>
@@ -175,6 +196,7 @@
             outlined dense :disable="disable"
             :suffix="preview.cashCurrency || ''"
           />
+          <field-hint :text="hints.budget" />
         </div>
         <div class="col-6 col-md-2">
           <q-input
@@ -183,6 +205,7 @@
             type="number" min="0" max="100" step="1" suffix="%"
             outlined dense :disable="disable || preview.availableCash === null"
           />
+          <field-hint :text="hints.budgetPercent" />
         </div>
         <div class="col-6 col-md-3 flex items-center">
           <q-btn
@@ -209,6 +232,7 @@
               ? 'Рабочий бюджет = бюджет + реализованный P/L'
               : 'Рабочий бюджет всегда равен бюджету, прибыль показывается отдельно'"
           />
+          <field-hint :text="hints.profitPolicy" />
         </div>
       </template>
     </div>
@@ -224,12 +248,15 @@
     <div class="row q-col-gutter-md">
       <div class="col-6 col-md-3">
         <q-input v-model.number="model.maxCapital" label="Капитал, макс." type="number" outlined dense :disable="disable" />
+        <field-hint :text="hints.maxCapital" />
       </div>
       <div class="col-6 col-md-3">
         <q-input v-model="model.maxPositionQuantity" label="Позиция, макс." inputmode="decimal" outlined dense :disable="disable" />
+        <field-hint :text="hints.maxPositionQuantity" />
       </div>
       <div class="col-6 col-md-3">
         <q-input v-model.number="model.maxOrdersPerDay" label="Заявок в сутки" type="number" outlined dense :disable="disable" />
+        <field-hint :text="hints.maxOrdersPerDay" />
       </div>
       <div class="col-6 col-md-3">
         <q-input
@@ -240,12 +267,17 @@
             ? `Для перестановок рекомендуется не меньше ${4 * Number(model.levels || 1)}`
             : 'Защита от разгона'"
         />
+        <field-hint :text="hints.maxOrdersPerMinute" />
       </div>
     </div>
 
     <div class="row items-center q-gutter-lg">
-      <q-toggle v-model="model.dryRun" label="Бумажный режим (без реальных заявок)" :disable="disable" />
-      <q-toggle v-model="model.enabled" label="Стратегия включена" :disable="disable" />
+      <q-toggle v-model="model.dryRun" label="Бумажный режим (без реальных заявок)" :disable="disable">
+        <field-hint :text="hints.dryRun" />
+      </q-toggle>
+      <q-toggle v-model="model.enabled" label="Стратегия включена" :disable="disable">
+        <field-hint :text="hints.enabled" />
+      </q-toggle>
     </div>
 
     <q-banner v-if="model.dryRun" dense rounded class="bg-purple-1 text-purple-10">
@@ -304,6 +336,171 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { apiClient, getErrorMessage } from 'src/services/apiClient'
 import InstrumentSelect from 'components/InstrumentSelect.vue'
+import FieldHint from 'components/FieldHint.vue'
+
+/**
+ * Расшифровки полей: что параметр означает и как он двигает сетку.
+ *
+ * Держатся здесь, а не в подписях под полями, по двум причинам: подписи такой
+ * длины превратили бы форму в стену текста, и они всё равно не поместились бы —
+ * а знать, что «множитель ATR» задаёт заодно и шаг сетки, нужно ровно в момент,
+ * когда его меняют.
+ */
+const hints = {
+  instrumentUid:
+    'Что торгует бот. От инструмента берутся шаг цены, шаг количества и минимальная '
+    + 'сумма заявки — по ним округляются все уровни сетки и размер заявки. У работающего '
+    + 'бота инструмент не меняют: к текущему привязаны его заявки и позиция.',
+
+  autoRange:
+    'Включено — границы считаются по волатильности (ATR) при первом запуске и '
+    + 'сохраняются: рестарт не пересчитывает их заново, иначе уже открытые покупки '
+    + 'потеряли бы цены своих встречных продаж. Выключено — границы задаются руками '
+    + 'и не меняются никогда. Перестановка диапазона вверх и вниз работает только '
+    + 'с автоматическими границами.',
+
+  lowerPrice:
+    'Цена самого нижнего уровня покупки. Ниже неё бот не покупает: при уходе цены '
+    + 'за границу срабатывает действие из поля «Выход из диапазона».',
+
+  upperPrice:
+    'Цена самого верхнего уровня. На нём только продают — покупать там нечего, '
+    + 'встречной продажи выше не существует. Вместе с нижней границей и числом уровней '
+    + 'задаёт шаг сетки: шаг = (верх − низ) / уровней.',
+
+  atrInterval:
+    'Таймфрейм свечей, по которым считается ATR. Крупнее интервал — шире и спокойнее '
+    + 'диапазон, реже перестановки. Мельче — сетка теснее и живее реагирует на рынок.',
+
+  atrPeriods:
+    'Сколько последних свечей входит в расчёт ATR. Больше — устойчивее оценка '
+    + 'волатильности и стабильнее ширина сетки. Меньше — быстрее подстраивается под '
+    + 'рынок, но дёргается на случайных всплесках.',
+
+  atrMultiplier:
+    'Во сколько ATR укладывается полуширина диапазона: границы = цена ± ATR × множитель. '
+    + 'Прямо задаёт ширину сетки, а с ней и шаг: множитель вдвое больше — шаг вдвое '
+    + 'крупнее, сделок реже, прибыль за цикл выше.',
+
+  minHalfWidthPct:
+    'Нижний предел полуширины в процентах от цены. Страховка от спокойного рынка: '
+    + 'ATR может дать настолько узкий диапазон, что шаг перестанет окупать комиссию — '
+    + 'такую сетку бот запускать откажется.',
+
+  maxHalfWidthPct:
+    'Верхний предел полуширины в процентах от цены. Страховка от паники: на всплеске '
+    + 'ATR сетка растянулась бы так, что бюджет размазался бы по далёким уровням '
+    + 'и сделок почти не стало.',
+
+  onUpperBreakout:
+    'Что делать, когда цена уверенно ушла ВЫШЕ верхней границы. «Ничего не делать» — '
+    + 'ждать возврата цены. «Переставить вверх» — снять покупки, дождаться, пока позиция '
+    + 'распродастся своими же встречными продажами (то есть с прибылью), и построить '
+    + 'новую сетку вокруг текущей цены.',
+
+  breakoutConfirmSeconds:
+    'Сколько секунд цена должна продержаться за порогом, чтобы пробой считался '
+    + 'настоящим. Защита от одиночного выброса: мало — бот будет перестраивать сетку '
+    + 'на каждом шипе, много — опоздает за ушедшим рынком.',
+
+  breakoutMarginPct:
+    'Насколько дальше границы должна уйти цена, чтобы это считалось пробоем. Процент '
+    + 'от границы; фактический запас — большее из этого процента и половины шага сетки. '
+    + 'Нулевой запас означал бы пробой при любом касании границы.',
+
+  replaceCooldownSeconds:
+    'Минимальная пауза между перестановками диапазона. Не даёт перестраивать сетку '
+    + 'раз за разом на пиле: пока пауза не истекла, подтверждённый пробой не приводит '
+    + 'к замене.',
+
+  levels:
+    'Число интервалов сетки — уровней цен будет на один больше. Шаг = (верх − низ) / '
+    + 'уровней, округлённый к шагу цены инструмента. Больше уровней — мельче шаг, чаще '
+    + 'сделки, но меньше прибыль за цикл; слишком мелкий шаг перестаёт окупать комиссию, '
+    + 'и бот откажется стартовать. Покупка на уровне i закрывается продажей на i+1.',
+
+  maxActiveOrders:
+    'Сколько заявок бот держит на бирже одновременно — покупки и продажи вместе. Если '
+    + 'меньше числа уровней, дальние от рынка уровни останутся без заявок: ближние к цене '
+    + 'выставляются первыми. Снижает нагрузку на биржу, но урезает работающую часть сетки.',
+
+  onRangeExit:
+    'Что делать, когда цена ушла НИЖЕ нижней границы — главный риск конструкции. '
+    + '«Перестать покупать» — позиция замирает, продажи висят до возврата цены. '
+    + '«Снять заявки и остановиться» — жёстче, но предсказуемее. «Закрыть позицию '
+    + 'и переставить вниз» — продать позицию по рынку, зафиксировать убыток и построить '
+    + 'сетку заново ниже; только с автоматическими границами и только в пределах '
+    + 'бюджета убытка.',
+
+  maxDownwardReplacements:
+    'Сколько раз бот вправе переставить сетку вниз. Счётчик накопительный и переживает '
+    + 'рестарт: когда лимит исчерпан, при следующем пробое вниз бот выключится, оставив '
+    + 'позицию на руках. Обнуляется ручной перестройкой сетки с фиксацией убытка.',
+
+  maxRealizedLoss:
+    'Потолок суммарного убытка от перестановок вниз, в валюте инструмента. Считается '
+    + 'накопительно по всем перестановкам, а прогноз проверяется ДО продажи: если '
+    + 'закрытие позиции в потолок не укладывается, бот не тронет позицию и выключится. '
+    + 'Это лимит риска, а не результат бота: на P/L он не влияет и обнуляется ручной '
+    + 'перестройкой сетки.',
+
+  sizingMode:
+    'Как считается размер заявки. «Фиксированное количество» — одно и то же число на '
+    + 'каждом уровне, бюджет не участвует. «Один размер на все уровни» — размер '
+    + 'подбирается так, чтобы выкуп всех уровней уложился в бюджет. «Поровну денег на '
+    + 'уровень» — на каждый уровень идёт равная сумма, поэтому внизу сетки количество '
+    + 'больше, чем вверху.',
+
+  quantityPerOrder:
+    'Количество в одной заявке — в единицах базового актива (штуки, монеты), не в лотах. '
+    + 'Округляется вниз к шагу количества биржи. Заявка мельче биржевого минимума будет '
+    + 'отклонена риск-контролем ещё до отправки.',
+
+  budget:
+    'Деньги, из которых считается размер заявки. Конкретная сумма, а не доля портфеля: '
+    + 'доля молча передвигала бы деньги бота при каждой перестройке сетки. Размер заявки '
+    + 'подбирается так, чтобы полный выкуп ВСЕХ уровней уложился в бюджет.',
+
+  budgetPercent:
+    'Вспомогательное поле формы: считает процент от свободных денег счёта, а кнопка '
+    + '«Подставить» превращает его в конкретную сумму. Сам процент никуда не '
+    + 'сохраняется и на бота не влияет.',
+
+  profitPolicy:
+    'Что делать с заработанным. «Выводится» — рабочий бюджет всегда равен заданному, '
+    + 'прибыль копится отдельно. «Реинвестируется» — рабочий бюджет = бюджет + '
+    + 'реализованный P/L, заявки постепенно растут. Пересчёт идёт только в моменты '
+    + 'перестройки сетки, поэтому объём не «плывёт» между покупкой и её встречной продажей.',
+
+  maxCapital:
+    'Потолок денег, одновременно занятых заявками и позицией. Проверяется перед каждой '
+    + 'заявкой и считается по журналу, поэтому переживает перезапуск. Пусто — без '
+    + 'ограничения.',
+
+  maxPositionQuantity:
+    'Потолок позиции в единицах базового актива. Заявка, после которой позиция вышла бы '
+    + 'за него, не будет выставлена. Пусто — без ограничения.',
+
+  maxOrdersPerDay:
+    'Сколько заявок бот вправе выставить за сутки. Считается по журналу. Защита от '
+    + 'сценария, где ошибка в логике за час выбирает суточный лимит биржи.',
+
+  maxOrdersPerMinute:
+    'Частотный ограничитель: на стриме нет естественного тормоза, каким был период '
+    + 'опроса. Слишком мало — сетка будет медленно восстанавливаться после открытия '
+    + 'торгов и растянет перестановку; слишком много — защита от разгона перестаёт '
+    + 'работать.',
+
+  dryRun:
+    'Бумажный режим: заявки идут в тот же журнал, но не на биржу, а исполнение '
+    + 'симулируется оптимистично — без очереди заявок и проскальзывания. Проверяет '
+    + 'логику стратегии, но не доходность.',
+
+  enabled:
+    'Выключенная стратегия запускается, но не торгует: бот поднимется, напишет об этом '
+    + 'в журнал и не выставит ни одной заявки. Удобно, чтобы временно погасить бота, '
+    + 'не теряя настроек.'
+}
 
 const props = defineProps({
   modelValue: { type: String, default: '{}' },

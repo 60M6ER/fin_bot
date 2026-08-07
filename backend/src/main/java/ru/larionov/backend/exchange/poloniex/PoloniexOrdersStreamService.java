@@ -13,14 +13,11 @@ import ru.larionov.backend.exchange.api.model.id.AccountId;
 import ru.larionov.backend.exchange.api.model.id.ClientOrderId;
 import ru.larionov.backend.exchange.api.model.id.InstrumentId;
 import ru.larionov.backend.exchange.api.model.id.OrderId;
-import ru.larionov.backend.exchange.api.model.order.CommissionSource;
-import ru.larionov.backend.exchange.api.model.order.OrderFee;
 import ru.larionov.backend.exchange.api.model.order.OrderState;
 import ru.larionov.backend.exchange.api.model.stream.StreamHealth;
 import ru.larionov.backend.exchange.common.StreamHealthTracker;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
@@ -33,15 +30,20 @@ import java.util.function.Consumer;
  * Быстрый путь узнать об исполнении: событие приходит с нашим {@code clientOrderId},
  * поэтому сопоставляется с журналом напрямую и опрашивать статусы не нужно.
  *
- * <h3>Чем этот поток ценнее REST-ответа</h3>
- * Событие несёт {@code tradeFee} и {@code feeCurrency} — ФАКТИЧЕСКУЮ комиссию,
- * которой в ответе на запрос ордера нет. Для Poloniex это принципиально: комиссия
- * покупки берётся в базовой монете, и без её точной величины журнал не знает,
- * сколько монет реально зачислено.
+ * <h3>Почему комиссию здесь не считают</h3>
+ * Событие несёт {@code tradeFee} ОДНОЙ сделки, а {@code filledQuantity} — сумму
+ * по всем сделкам заявки. Вычесть первое из второго значит учесть удержание лишь
+ * с последней сделки: на заявке, исполненной в несколько сделок, позиция журнала
+ * снова окажется больше фактической — с той же ошибкой, только меньшего размера
+ * и потому куда менее заметной.
  *
- * <h3>Чего он не отменяет</h3>
- * Сверку. За время разрыва события теряются безвозвратно, поэтому после
- * переподключения состояние восстанавливается только REST-запросом.
+ * Складывать удержания по событиям поток не может: при разрыве часть их теряется
+ * безвозвратно, и накопленная сумма молча окажется неполной. Поэтому здесь —
+ * только БРУТТО и никаких заявок на точность, а окончательный расчёт делает сверка
+ * по сделкам заявки, где биржа отдаёт весь их список разом.
+ *
+ * <h3>Что тогда даёт поток</h3>
+ * Скорость: об исполнении становится известно сразу, а не на следующей сверке.
  */
 @Slf4j
 public class PoloniexOrdersStreamService implements OrdersStreamService {
@@ -132,27 +134,6 @@ public class PoloniexOrdersStreamService implements OrdersStreamService {
         BigDecimal tradePrice = decimal(event.getTradePrice());
         BigDecimal avgPrice = tradePrice != null && tradePrice.signum() > 0 ? tradePrice : price;
 
-        BigDecimal feeAmount = decimal(event.getTradeFee());
-        String feeCurrency = event.getFeeCurrency();
-        BigDecimal netFilled = filled;
-        OrderFee fee = null;
-
-        if (feeAmount != null && feeAmount.signum() > 0 && feeCurrency != null) {
-            String base = baseOf(symbol);
-            if (base != null && base.equalsIgnoreCase(feeCurrency)) {
-                // Комиссия удержана монетой: зачислено на столько же меньше.
-                // Не вычесть её здесь — значит записать в журнал позицию, которой нет.
-                netFilled = filled == null ? null : filled.subtract(feeAmount);
-                netFilled = quantizeDown(netFilled, symbol);
-                fee = OrderFee.actual(
-                        avgPrice == null ? feeAmount : feeAmount.multiply(avgPrice),
-                        feeCurrency, CommissionSource.EXCHANGE_EXECUTED);
-            } else {
-                // Комиссия деньгами котировки — записываем как есть.
-                fee = OrderFee.actual(feeAmount, feeCurrency, CommissionSource.EXCHANGE_EXECUTED);
-            }
-        }
-
         return new OrderState(
                 new OrderId(event.getOrderId()),
                 new ClientOrderId(event.getClientOrderId()),
@@ -160,37 +141,13 @@ public class PoloniexOrdersStreamService implements OrdersStreamService {
                 new InstrumentId(PoloniexSymbols.uidOf(symbol), null),
                 side,
                 requested,
-                netFilled,
+                filled,
                 price,
                 avgPrice,
-                fee,
+                null,
                 status(event.getState()),
                 event.getCreateTime() == null ? null : Instant.ofEpochMilli(event.getCreateTime()),
                 event.getTs() == null ? null : Instant.ofEpochMilli(event.getTs()));
-    }
-
-    private String baseOf(String symbol) {
-        if (symbol == null) {
-            return null;
-        }
-        try {
-            return symbols.limits(symbol).base();
-        } catch (Exception e) {
-            log.debug("Неизвестный символ в событии заявки: {}", symbol);
-            return null;
-        }
-    }
-
-    private BigDecimal quantizeDown(BigDecimal quantity, String symbol) {
-        if (quantity == null || quantity.signum() <= 0 || symbol == null) {
-            return quantity;
-        }
-        try {
-            BigDecimal step = symbols.limits(symbol).quantityStep();
-            return quantity.divide(step, 0, RoundingMode.DOWN).multiply(step);
-        } catch (Exception e) {
-            return quantity;
-        }
     }
 
     private static OrderStatus status(String state) {

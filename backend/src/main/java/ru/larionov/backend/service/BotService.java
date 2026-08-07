@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import ru.larionov.backend.accounting.AccountingService;
 import ru.larionov.backend.accounting.BotValuationService;
+import ru.larionov.backend.accounting.GridGenerationService;
 import ru.larionov.backend.dto.*;
 import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.entity.BotOrderEntity;
@@ -46,6 +47,7 @@ public class BotService {
     private final ExchangeRuntimeService exchangeRuntimeService;
     private final BotEventService eventService;
     private final AccountingService accountingService;
+    private final GridGenerationService gridGenerationService;
     private final BotValuationService valuationService;
     private final ObjectMapper objectMapper;
 
@@ -123,6 +125,12 @@ public class BotService {
         return accountingService.ledger(id, resolveDryRun(id, dryRun));
     }
 
+    /** Успешность каждого диапазона по отдельности: от свежего поколения к старому. */
+    public List<GridGenerationDto> generations(UUID id, Boolean dryRun) {
+        requireBot(id);
+        return gridGenerationService.list(id, resolveDryRun(id, dryRun));
+    }
+
     /** Боты конкретного подключения — для экрана биржи: видно, что остановит её выключение. */
     public List<BotListItemDto> listByConnection(UUID connectionId) {
         String name = connectionRepo.findById(connectionId)
@@ -178,6 +186,7 @@ public class BotService {
         // Журнал событий — лог, удаляем вместе с ботом.
         // Журнал ордеров (bot_order) остаётся намеренно: это финансовая запись.
         eventService.deleteAllForBot(id);
+        gridGenerationService.deleteAllForBot(id);
         botRepo.deleteById(id);
         valuationService.forget(id);
     }

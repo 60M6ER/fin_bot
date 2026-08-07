@@ -2,6 +2,8 @@ package ru.larionov.backend.strategy;
 
 import lombok.RequiredArgsConstructor;
 import ru.larionov.backend.accounting.AccountingService;
+import ru.larionov.backend.accounting.GridGenerationService;
+import ru.larionov.backend.dto.GridGenerationDto;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.enums.LedgerEntryType;
@@ -13,6 +15,7 @@ import ru.larionov.backend.service.BotEventService;
 import ru.larionov.backend.service.StrategyStateService;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.math.BigDecimal;
 import java.util.Map;
 import java.util.Optional;
@@ -39,6 +42,7 @@ public class DefaultStrategyContext implements StrategyContext {
     private final Clock clock;
     private final StrategyStateService stateService;
     private final AccountingService accounting;
+    private final GridGenerationService gridGenerations;
     private final Consumer<String> stopRequester;
 
     @Override
@@ -94,6 +98,14 @@ public class DefaultStrategyContext implements StrategyContext {
     @Override
     public BigDecimal realizedPnl() {
         return accounting.summary(botId, execution.dryRun()).realizedPnl();
+    }
+
+    @Override
+    public Optional<GridGenerationDto> rollGridGeneration(long generation, BigDecimal lowerPrice,
+                                                          BigDecimal upperPrice, Integer levels,
+                                                          String origin, Instant startedAt) {
+        return gridGenerations.roll(execution, generation, lowerPrice, upperPrice,
+                levels, origin, startedAt);
     }
 
     @Override

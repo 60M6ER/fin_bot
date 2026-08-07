@@ -19,6 +19,9 @@ public interface MoneyLedgerRepository extends JpaRepository<MoneyLedgerEntity, 
     boolean existsByOrderIdAndEntryTypeAndExecutedQuantityCum(
             UUID orderId, LedgerEntryType entryType, BigDecimal executedQuantityCum);
 
+    List<MoneyLedgerEntity> findAllByOrderIdAndEntryTypeInOrderBySeqAsc(
+            UUID orderId, List<LedgerEntryType> entryTypes);
+
     @Query("""
             select coalesce(max(l.executedQuantityCum), 0)
             from MoneyLedgerEntity l
@@ -40,4 +43,16 @@ public interface MoneyLedgerRepository extends JpaRepository<MoneyLedgerEntity, 
             where l.botId = :botId and l.dryRun = :dryRun and l.affectsCash = true
             """)
     BigDecimal cashFlow(@Param("botId") UUID botId, @Param("dryRun") boolean dryRun);
+
+    /**
+     * Верхняя граница книги на сейчас — ею отрезаются поколения сетки друг от друга.
+     * Ноль на пустой книге означает «поколение видит её целиком», что для первого
+     * поколения и требуется.
+     */
+    @Query("""
+            select coalesce(max(l.seq), 0)
+            from MoneyLedgerEntity l
+            where l.botId = :botId and l.dryRun = :dryRun
+            """)
+    long maxSeq(@Param("botId") UUID botId, @Param("dryRun") boolean dryRun);
 }

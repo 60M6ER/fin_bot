@@ -373,9 +373,11 @@ public class LiveExecutionGateway implements ExecutionGateway {
                 ? BigDecimal.ZERO
                 : exchangePosition.subtract(journalPosition);
 
+        // Позиция бота — его журнал, а не остаток счёта: на счёте может лежать чужое.
         ReconcileResult result = new ReconcileResult(
                 openOrders(ctx.botId()),
-                exchangePosition == null ? journalPosition : exchangePosition,
+                journalPosition,
+                exchangePosition,
                 riskGuard.usedCapital(ctx),
                 resolvedPending,
                 adoptedOrphans,
@@ -387,6 +389,10 @@ public class LiveExecutionGateway implements ExecutionGateway {
                     "Сверка: дорешено %d, чужих на бирже %d, расхождение позиции %s"
                             .formatted(resolvedPending, adoptedOrphans, mismatch.toPlainString()),
                     Map.of());
+        } else if (mismatch.signum() > 0) {
+            // Излишек — не наше дело: чужой бот, ручная сделка или пыль прошлой жизни.
+            log.debug("Bot {}: на счёте на {} больше, чем числится за ботом — считаю чужим",
+                    ctx.botId(), mismatch.toPlainString());
         }
         return result;
     }
@@ -545,7 +551,15 @@ public class LiveExecutionGateway implements ExecutionGateway {
             // Биржа отвечает СВОИМИ заявочными единицами — переводим в базовые здесь,
             // на той же границе, где переводили в обратную сторону при постановке.
             BigDecimal executed = ctx.fromExchangeUnits(state.executedQuantity());
-            entity.setExecutedQuantity(nvl(entity.getExecutedQuantity()).max(executed));
+            // Количество растёт и только растёт: запоздалое или частичное чтение не должно
+            // занижать уже известное исполнение. Единственное исключение — биржа сама
+            // сообщила, что удержала комиссию монетой: тогда меньшее число не устаревшее
+            // чтение, а окончательный расчёт, и монотонность работает против нас. Раньше
+            // исключения не было, брутто побеждало по max() навсегда, и позиция журнала
+            // так и оставалась больше фактической ровно на комиссию.
+            entity.setExecutedQuantity(state.quantityNetOfFee()
+                    ? executed
+                    : nvl(entity.getExecutedQuantity()).max(executed));
         }
         if (state.averageExecutedPrice() != null) {
             entity.setAvgPrice(state.averageExecutedPrice());

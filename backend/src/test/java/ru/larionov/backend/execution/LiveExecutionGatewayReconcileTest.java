@@ -191,6 +191,111 @@ class LiveExecutionGatewayReconcileTest {
         assertThat(actual.getFeeCurrency()).isEqualTo("rub");
     }
 
+    /**
+     * Комиссия, удержанная ИЗ полученной монеты, делает окончательное количество
+     * МЕНЬШЕ исполненного объёма. Журнал обязан принять меньшее число.
+     *
+     * Раньше здесь стоял max(), и это стоило простоя на Poloniex 07.08.2026: стрим
+     * (а затем и сверка) приносил брутто, оно побеждало по max() навсегда, позиция
+     * журнала оставалась больше фактической ровно на комиссию, встречную продажу
+     * биржа отбивала как необеспеченную, а сверка вставала намертво — исправить
+     * её не могло уже никакое последующее уточнение.
+     */
+    @Test
+    void confirmedFeeLowersTheRecordedQuantityInsteadOfLosingToTheGrossFigure() {
+        gateway.placeLimit(ctx, buyOne());
+        String clientOrderId = journal().get(0).getClientOrderId();
+
+        // Стрим знает только брутто: сколько монет биржа списала со встречной стороны.
+        var grossFill = new ru.larionov.backend.exchange.api.model.order.OrderState(
+                new ru.larionov.backend.exchange.api.model.id.OrderId("exch-" + clientOrderId),
+                new ru.larionov.backend.exchange.api.model.id.ClientOrderId(clientOrderId),
+                ctx.accountId(), ctx.instrumentId(), OrderSide.BUY,
+                BigDecimal.ONE, BigDecimal.ONE, new BigDecimal("100"), new BigDecimal("100"),
+                null, OrderStatus.FILLED, null, null);
+        gateway.applyOrderEvent(ctx, grossFill);
+
+        assertThat(journal().get(0).getExecutedQuantity())
+                .as("до подтверждения комиссии брутто — единственное, что известно")
+                .isEqualByComparingTo("1");
+
+        // Сверка достаёт сделки заявки: комиссия удержана монетой, зачислено 0.998.
+        // Последний аргумент и есть то самое заявление биржи «количество уже нетто».
+        exchange.accepted.put(clientOrderId, new ru.larionov.backend.exchange.api.model.order.OrderState(
+                grossFill.orderId(), grossFill.clientOrderId(), grossFill.accountId(), grossFill.instrumentId(),
+                OrderSide.BUY, BigDecimal.ONE, new BigDecimal("0.998"),
+                new BigDecimal("100"), new BigDecimal("100"),
+                OrderFee.actual(new BigDecimal("0.20"), "rub", CommissionSource.EXCHANGE_EXECUTED),
+                OrderStatus.FILLED, null, null, true));
+
+        gateway.reconcile(ctx);
+
+        assertThat(journal().get(0).getExecutedQuantity())
+                .as("подтверждённый биржей расчёт — это и есть позиция, которой бот владеет")
+                .isEqualByComparingTo("0.998");
+    }
+
+    /**
+     * Обратная защита осталась на месте: НЕподтверждённое чтение занизить количество
+     * не может. Частичный или запоздавший ответ не должен стирать уже известный объём.
+     */
+    @Test
+    void unconfirmedReadStillCannotLowerTheKnownQuantity() {
+        gateway.placeLimit(ctx, buyOne());
+        String clientOrderId = journal().get(0).getClientOrderId();
+
+        var fill = new ru.larionov.backend.exchange.api.model.order.OrderState(
+                new ru.larionov.backend.exchange.api.model.id.OrderId("exch-" + clientOrderId),
+                new ru.larionov.backend.exchange.api.model.id.ClientOrderId(clientOrderId),
+                ctx.accountId(), ctx.instrumentId(), OrderSide.BUY,
+                BigDecimal.ONE, BigDecimal.ONE, new BigDecimal("100"), new BigDecimal("100"),
+                null, OrderStatus.FILLED, null, null);
+        gateway.applyOrderEvent(ctx, fill);
+
+        var stale = new ru.larionov.backend.exchange.api.model.order.OrderState(
+                fill.orderId(), fill.clientOrderId(), fill.accountId(), fill.instrumentId(),
+                OrderSide.BUY, BigDecimal.ONE, new BigDecimal("0.4"),
+                new BigDecimal("100"), new BigDecimal("100"),
+                null, OrderStatus.PARTIALLY_FILLED, null, null);
+        gateway.applyOrderEvent(ctx, stale);
+
+        assertThat(journal().get(0).getExecutedQuantity()).isEqualByComparingTo("1");
+    }
+
+    /**
+     * Форма T-Invest: комиссия ПОДТВЕРЖДЕНА, но удержана деньгами и количества не трогает.
+     *
+     * Такое состояние брокер отдаёт уже при частичном исполнении, поэтому «комиссия
+     * подтверждена» само по себе НЕ может быть основанием занизить количество. Признаком
+     * служит только прямое заявление биржи о том, что она удержала комиссию монетой, —
+     * иначе защита от запоздалого чтения молча исчезла бы для T-Invest заодно с Poloniex.
+     */
+    @Test
+    void confirmedButNotNettedFeeLeavesTheMonotonicGuardInPlace() {
+        gateway.placeLimit(ctx, buyOne());
+        String clientOrderId = journal().get(0).getClientOrderId();
+
+        var fill = new ru.larionov.backend.exchange.api.model.order.OrderState(
+                new ru.larionov.backend.exchange.api.model.id.OrderId("exch-" + clientOrderId),
+                new ru.larionov.backend.exchange.api.model.id.ClientOrderId(clientOrderId),
+                ctx.accountId(), ctx.instrumentId(), OrderSide.BUY,
+                BigDecimal.ONE, BigDecimal.ONE, new BigDecimal("100"), new BigDecimal("100"),
+                null, OrderStatus.FILLED, null, null);
+        gateway.applyOrderEvent(ctx, fill);
+
+        var staleWithRealFee = new ru.larionov.backend.exchange.api.model.order.OrderState(
+                fill.orderId(), fill.clientOrderId(), fill.accountId(), fill.instrumentId(),
+                OrderSide.BUY, BigDecimal.ONE, new BigDecimal("0.4"),
+                new BigDecimal("100"), new BigDecimal("100"),
+                OrderFee.actual(new BigDecimal("0.05"), "rub", CommissionSource.EXCHANGE_EXECUTED),
+                OrderStatus.PARTIALLY_FILLED, null, null);
+        gateway.applyOrderEvent(ctx, staleWithRealFee);
+
+        assertThat(journal().get(0).getExecutedQuantity())
+                .as("рублёвая комиссия лотов не отнимает — количество занижать нечему")
+                .isEqualByComparingTo("1");
+    }
+
     @Test
     void streamEventForAnotherBotIsIgnored() {
         UUID otherBotId = UUID.randomUUID();
@@ -493,16 +598,29 @@ class LiveExecutionGatewayReconcileTest {
                 .isEqualByComparingTo("20");
     }
 
-    @Test
-    void mismatchIsStillReportedWhenExchangeGenuinelyDisagrees() {
-        BotExecutionContext lot10 = new BotExecutionContext(
+    private BotExecutionContext lot10() {
+        return new BotExecutionContext(
                 botId, UUID.randomUUID(),
                 new AccountId("acc-1"),
                 new InstrumentId("uid-1", null),
                 false, BigDecimal.TEN, BigDecimal.TEN, null, null, null, null, null);
+    }
 
+    /**
+     * На счёте больше, чем числится за ботом, — это НЕ его беда.
+     *
+     * Счёт общий: там лежат монеты соседнего бота на том же инструменте, ручные
+     * покупки владельца и неторгуемая пыль от прошлых циклов. Пока «позицией бота»
+     * считался весь остаток счёта, из излишка следовало три неверных вывода подряд:
+     * новый бот с пустым журналом считал чужое своим и не стартовал, сверка вечно
+     * сообщала о расхождении, а принудительная ликвидация выставляла на продажу
+     * ВЕСЬ остаток — то есть чужие монеты.
+     */
+    @Test
+    void surplusOnTheSharedAccountIsNotClaimedByTheBot() {
+        BotExecutionContext lot10 = lot10();
         FakeExchangeClient client = new FakeExchangeClient(exchange);
-        // Биржа видит 30 штук, а куплено будет 10: расхождение настоящее.
+        // На счёте 30 штук, а бот купил 10. Остальные 20 — чужие.
         client.exchangePosition = new BigDecimal("30");
         LiveExecutionGateway gw = new LiveExecutionGateway(orderRepo, riskGuard, events, accounting, () -> client);
 
@@ -511,8 +629,41 @@ class LiveExecutionGatewayReconcileTest {
 
         ReconcileResult result = gw.reconcile(lot10);
 
-        assertThat(result.position()).isEqualByComparingTo("30");
-        assertThat(result.positionMismatch()).isEqualByComparingTo("20");
+        assertThat(result.position())
+                .as("бот вправе распоряжаться только тем, что купил сам")
+                .isEqualByComparingTo("10");
+        assertThat(result.exchangePosition())
+                .as("а весь остаток счёта остаётся доступен отдельной величиной")
+                .isEqualByComparingTo("30");
+        assertThat(result.positionMismatch())
+                .as("расхождение видно как излишек — но это чужие 20 штук")
+                .isEqualByComparingTo("20");
+        assertThat(result.positionShortfall())
+                .as("излишек на общем счёте не повод останавливать торговлю")
+                .isFalse();
+    }
+
+    /**
+     * Обратная сторона и единственная по-настоящему опасная: на счёте МЕНЬШЕ, чем
+     * числится за ботом. Тогда встречные продажи окажутся необеспеченными — ровно
+     * то, что случилось на Poloniex, когда комиссия была удержана монетой.
+     */
+    @Test
+    void shortfallAgainstTheJournalIsReported() {
+        BotExecutionContext lot10 = lot10();
+        FakeExchangeClient client = new FakeExchangeClient(exchange);
+        // Бот купит 10, а на счёте всего 4: шести штук не хватает.
+        client.exchangePosition = new BigDecimal("4");
+        LiveExecutionGateway gw = new LiveExecutionGateway(orderRepo, riskGuard, events, accounting, () -> client);
+
+        gw.placeLimit(lot10, buyQuantity("10"));
+        exchange.fill(journal().get(0).getClientOrderId());
+
+        ReconcileResult result = gw.reconcile(lot10);
+
+        assertThat(result.position()).isEqualByComparingTo("10");
+        assertThat(result.positionMismatch()).isEqualByComparingTo("-6");
+        assertThat(result.positionShortfall()).isTrue();
         assertThat(result.hasFindings()).isTrue();
     }
 

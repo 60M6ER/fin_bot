@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.accounting.AccountingService;
+import ru.larionov.backend.accounting.GridGenerationService;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
 import ru.larionov.backend.exchange.api.model.id.InstrumentId;
 import ru.larionov.backend.exchange.api.model.instrument.TradingConstraints;
@@ -38,6 +39,7 @@ public class StrategyBotHandlerFactory {
     private final RiskGuard riskGuard;
     private final BotEventService events;
     private final AccountingService accounting;
+    private final GridGenerationService gridGenerations;
     private final TradingScheduler scheduler;
     private final StrategyStateService strategyStateService;
     private final LastPriceCache lastPriceCache;
@@ -97,7 +99,7 @@ public class StrategyBotHandlerFactory {
         return new StrategyBotHandler(
                 bot, config, strategy, exchangeHandler, gateway, execContext,
                 constraints, events, scheduler, strategyStateService, accounting,
-                lastPriceCache, onStopRequested, onFatal);
+                gridGenerations, lastPriceCache, onStopRequested, onFatal);
     }
 
     private BotRuntimeConfig parseConfig(BotEntity bot) {

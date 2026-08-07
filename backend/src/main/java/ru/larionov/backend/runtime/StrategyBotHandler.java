@@ -2,6 +2,7 @@ package ru.larionov.backend.runtime;
 
 import lombok.extern.slf4j.Slf4j;
 import ru.larionov.backend.accounting.AccountingService;
+import ru.larionov.backend.accounting.GridGenerationService;
 import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
@@ -69,6 +70,7 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
                        TradingScheduler scheduler,
                        StrategyStateService stateService,
                        AccountingService accounting,
+                       GridGenerationService gridGenerations,
                        LastPriceCache lastPriceCache,
                        Consumer<String> onStopRequested,
                        Runnable onFatal) {
@@ -87,6 +89,7 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
         this.context = new DefaultStrategyContext(
                 botId, execContext, gateway, constraints,
                 exchangeHandler::client, events, Clock.systemUTC(), stateService, accounting,
+                gridGenerations,
                 reason -> scheduler.executeControl(() -> onStopRequested.accept(reason)));
 
         this.loop = new BotEventLoop(botId, this, QUEUE_CAPACITY, MAX_CONSECUTIVE_FAILURES, this::fatal);
@@ -310,6 +313,44 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
     @Override
     public void onTick() {
         strategy.onTick();
+    }
+
+    /**
+     * Отказ ручной команды не считается сбоем цикла.
+     *
+     * Счётчик подряд идущих ошибок существует, чтобы гасить бота, потерявшего связь
+     * с реальностью. Команда оператора к этому отношения не имеет: она может не
+     * выполниться по совершенно штатной причине, и списывать такие отказы в счёт
+     * аварийной остановки означало бы выключать бота за то, что человек нажал кнопку
+     * не вовремя. Причина при этом обязана дойти до него — отсюда событие.
+     */
+    @Override
+    public void onCommand(StrategyCommand command) {
+        try {
+            strategy.onCommand(command);
+        } catch (Exception e) {
+            log.warn("Bot {}: команда {} не выполнена: {}", botId, command, e.getMessage(), e);
+            events.emit(botId, BotEventLevel.ERROR, BotEventType.ERROR,
+                    "Команда не выполнена: " + e.getMessage(), Map.of());
+        }
+    }
+
+    /**
+     * Ставит команду оператора в очередь бота.
+     *
+     * Проверки — синхронные, до постановки: ответ «эта стратегия так не умеет»
+     * должен вернуться нажавшему кнопку, а не потеряться в журнале.
+     */
+    public void submitCommand(StrategyCommand command) {
+        if (!active.get()) {
+            throw new IllegalStateException("Бот не запущен: выполнять команду некому.");
+        }
+        if (!strategy.supports(command)) {
+            throw new IllegalStateException(
+                    "Стратегия этого бота не поддерживает перестройку сетки по команде. "
+                            + "Она доступна GRID-боту с автоматическим диапазоном.");
+        }
+        loop.submitCommand(command);
     }
 
     public UUID botId() {

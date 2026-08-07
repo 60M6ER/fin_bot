@@ -22,6 +22,17 @@ spring:
     change-log: classpath:db/changelog/db.changelog-master.yaml
     enabled: true
 
+  web:
+    resources:
+      cache:
+        use-last-modified: true
+        cachecontrol:
+          # По умолчанию заголовков кэширования не было вовсе, и браузер решал сам.
+          # Для index.html это означало старую копию со ссылками на куски сборки,
+          # которых после выкатки уже не существует. Файлы с хэшем в имени из этого
+          # правила выведены отдельно — см. StaticCacheConfig.
+          no-cache: true
+
 app:
   # Ключ шифрования секретов в БД (ключи брокера, токен Telegram).
   # Если не задан — значения хранятся открытым текстом, приложение предупредит об этом при старте.

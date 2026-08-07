@@ -385,7 +385,7 @@ class GridStrategyDownwardReplacementTest {
     }
 
     private ReconcileResult reconciled(BigDecimal value) {
-        return new ReconcileResult(List.of(), value, BigDecimal.ZERO,
+        return new ReconcileResult(List.of(), value, value, BigDecimal.ZERO,
                 0, 0, BigDecimal.ZERO);
     }
 
