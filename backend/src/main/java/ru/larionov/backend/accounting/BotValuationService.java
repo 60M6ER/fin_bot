@@ -11,13 +11,19 @@ import ru.larionov.backend.dto.ConnectionValuationDto;
 import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.repository.InstrumentRepository;
 import ru.larionov.backend.runtime.LastPriceCache;
+import ru.larionov.backend.money.CurrencyCode;
+import ru.larionov.backend.money.FxRate;
+import ru.larionov.backend.money.FxRateService;
 import ru.larionov.backend.service.AccountCashService;
+import ru.larionov.backend.service.AppSettingKeys;
+import ru.larionov.backend.service.AppSettingService;
 import ru.larionov.backend.strategy.BotRuntimeConfig;
 import ru.larionov.backend.strategy.grid.GridConfig;
 import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -51,6 +57,8 @@ public class BotValuationService {
     private final AccountCashService accountCash;
     private final InstrumentRepository instrumentRepo;
     private final ObjectMapper objectMapper;
+    private final FxRateService fx;
+    private final AppSettingService settings;
 
     private final Map<UUID, BotAccountingDto> summaryCache = new ConcurrentHashMap<>();
     private final Map<UUID, ParsedConfig> configCache = new ConcurrentHashMap<>();
@@ -77,41 +85,70 @@ public class BotValuationService {
     /**
      * Сводный кошелёк подключения: сумма по его ботам плюс деньги, никому не розданные.
      *
+     * Боты группируются ПО ВАЛЮТАМ. Раньше валюта бралась у первого бота и всё
+     * складывалось независимо от того, совпадают ли валюты остальных: подключение
+     * с ботами в рублях и в USDT давало молча неверную сумму. Теперь каждая валюта
+     * считается отдельно, а свести их в одно число — задача валюты показа.
+     *
      * @param bots все боты подключения — передаются снаружи, чтобы список подключений
      *             не устраивал запрос в БД на каждую строку
      */
     public ConnectionValuationDto connectionValuation(UUID connectionId, List<BotEntity> bots) {
+        String displayCurrency = displayCurrency();
+
         if (bots.isEmpty()) {
-            return new ConnectionValuationDto(0, 0, null, null, null,
-                    cashOnly(connectionId), cashOnly(connectionId), cashOnly(connectionId),
-                    false, accountCash.dominantCurrency(connectionId));
+            String dominant = accountCash.dominantCurrency(connectionId);
+            BigDecimal cash = accountCash.available(connectionId, dominant);
+            Map<String, BigDecimal> byCurrency = cash == null
+                    ? Map.of()
+                    : Map.of(CurrencyCode.normalize(dominant), cash);
+            return withDisplayTotal(new ConnectionValuationDto(0, 0, null, null, null,
+                    cash, cash, cash, false, dominant,
+                    byCurrency, null, displayCurrency, null, null));
         }
 
         List<BotValuationDto> valuations = bots.stream().map(this::valuation).toList();
 
-        // Валюту подсказывает денежная книга ботов. У бота без единой сделки её ещё нет,
-        // поэтому запасной вариант — валюта, которой на счёте больше всего.
-        String currency = valuations.stream()
-                .map(BotValuationDto::currency)
-                .filter(c -> c != null && !c.isBlank())
-                .findFirst()
-                .orElseGet(() -> accountCash.dominantCurrency(connectionId));
+        // Основная валюта подключения — та, в которой считает больше всего его ботов.
+        // Запасной вариант для бота без единой сделки: валюта, которой больше на счёте.
+        String currency = dominantBotCurrency(valuations)
+                .orElseGet(() -> CurrencyCode.normalize(accountCash.dominantCurrency(connectionId)));
 
         BigDecimal allocated = BigDecimal.ZERO;
         BigDecimal balance = BigDecimal.ZERO;
         BigDecimal pnl = BigDecimal.ZERO;
         BigDecimal botsFreeCash = BigDecimal.ZERO;
+        Map<String, BigDecimal> byCurrency = new HashMap<>();
         int valued = 0;
         boolean incomplete = false;
 
         for (BotValuationDto v : valuations) {
+            String botCurrency = CurrencyCode.normalize(v.currency());
+            boolean sameAsMain = CurrencyCode.sameMoney(botCurrency, currency);
+
             BigDecimal botPnl = v.totalPnl() != null ? v.totalPnl() : v.realizedPnl();
-            pnl = pnl.add(nvl(botPnl));
+            if (sameAsMain) {
+                pnl = pnl.add(nvl(botPnl));
+            }
 
             if (v.equity() == null || v.workingBudget() == null) {
                 // Бот без бюджета или с позицией, но без цены: честно отмечаем неполноту
                 // вместо того, чтобы подставить ноль и показать заниженную сумму.
                 incomplete = true;
+                continue;
+            }
+
+            if (botCurrency != null) {
+                byCurrency.merge(botCurrency, v.equity(), BigDecimal::add);
+            } else {
+                // Валюта бота неизвестна — в разбивку он не попадёт, и об этом надо сказать.
+                incomplete = true;
+            }
+
+            // Числовые поля подключения остаются в его основной валюте: смешивать
+            // их с чужими нельзя, а пересчитывать здесь — значит протащить курс
+            // в места, которые про него знать не должны.
+            if (!sameAsMain) {
                 continue;
             }
             allocated = allocated.add(v.workingBudget());
@@ -125,13 +162,87 @@ public class BotValuationService {
         BigDecimal unallocated = freeCash == null ? null : freeCash.subtract(botsFreeCash);
         BigDecimal total = unallocated == null ? null : balance.add(unallocated);
 
-        return new ConnectionValuationDto(
+        // Свободные деньги счёта в прочих валютах тоже часть кошелька подключения.
+        for (Map.Entry<String, BigDecimal> cash : accountCash.availableByCurrency(connectionId).entrySet()) {
+            if (CurrencyCode.sameMoney(cash.getKey(), currency)) {
+                continue;
+            }
+            byCurrency.merge(CurrencyCode.normalize(cash.getKey()), cash.getValue(), BigDecimal::add);
+        }
+        if (unallocated != null && currency != null) {
+            byCurrency.merge(CurrencyCode.normalize(currency), unallocated, BigDecimal::add);
+        }
+
+        return withDisplayTotal(new ConnectionValuationDto(
                 bots.size(), valued, allocated, balance, pnl,
-                freeCash, unallocated, total, incomplete, currency);
+                freeCash, unallocated, total, incomplete, currency,
+                byCurrency, null, displayCurrency, null, null));
     }
 
-    private BigDecimal cashOnly(UUID connectionId) {
-        return accountCash.available(connectionId, accountCash.dominantCurrency(connectionId));
+    /** Валюта, в которой считает наибольшее число ботов подключения. */
+    private Optional<String> dominantBotCurrency(List<BotValuationDto> valuations) {
+        Map<String, Long> counts = new HashMap<>();
+        for (BotValuationDto v : valuations) {
+            String code = CurrencyCode.normalize(v.currency());
+            if (code != null) {
+                counts.merge(code, 1L, Long::sum);
+            }
+        }
+        return counts.entrySet().stream()
+                // При ничьей выбираем детерминированно, иначе основная валюта
+                // подключения прыгала бы от опроса к опросу.
+                .max(Map.Entry.<String, Long>comparingByValue().thenComparing(Map.Entry.comparingByKey()))
+                .map(Map.Entry::getKey);
+    }
+
+    /**
+     * Досчитывает сводный итог в валюте показа.
+     *
+     * Единственное место, где курс вообще участвует в расчёте. Если он неизвестен —
+     * итог остаётся null и помечается неполнотой: показать разбивку без свода честнее,
+     * чем свести по выдуманному курсу.
+     */
+    private ConnectionValuationDto withDisplayTotal(ConnectionValuationDto dto) {
+        if (dto.byCurrency().isEmpty()) {
+            return dto;
+        }
+
+        BigDecimal sum = BigDecimal.ZERO;
+        String fxSource = null;
+        Instant fxAsOf = null;
+        boolean incomplete = dto.incomplete();
+
+        for (Map.Entry<String, BigDecimal> entry : dto.byCurrency().entrySet()) {
+            Optional<FxRate> rate = fx.rate(entry.getKey(), dto.displayCurrency());
+            if (rate.isEmpty()) {
+                incomplete = true;
+                return new ConnectionValuationDto(
+                        dto.botCount(), dto.valuedBotCount(), dto.allocatedBudget(),
+                        dto.botsBalance(), dto.botsPnl(), dto.freeCash(), dto.unallocatedCash(),
+                        dto.total(), incomplete, dto.currency(),
+                        dto.byCurrency(), null, dto.displayCurrency(), null, null);
+            }
+            sum = sum.add(entry.getValue().multiply(rate.get().rate()));
+            // Подписываем итог самым «слабым» звеном: если хоть одна конвертация
+            // реальная, показываем именно её источник и её дату, а не IDENTITY.
+            if (!"IDENTITY".equals(rate.get().source())) {
+                fxSource = rate.get().source();
+                fxAsOf = rate.get().asOf();
+            }
+        }
+
+        return new ConnectionValuationDto(
+                dto.botCount(), dto.valuedBotCount(), dto.allocatedBudget(),
+                dto.botsBalance(), dto.botsPnl(), dto.freeCash(), dto.unallocatedCash(),
+                dto.total(), incomplete, dto.currency(),
+                dto.byCurrency(), sum.setScale(2, java.math.RoundingMode.HALF_UP),
+                dto.displayCurrency(), fxSource, fxAsOf);
+    }
+
+    /** Валюта показа из настроек; по умолчанию рубли. */
+    public String displayCurrency() {
+        return CurrencyCode.normalize(
+                settings.get(AppSettingKeys.DISPLAY_CURRENCY, CurrencyCode.RUB));
     }
 
     /** Бот удалён — чистим обе карты, чтобы они не текли. */
@@ -177,17 +288,16 @@ public class BotValuationService {
         BigDecimal marketValue = null;
         BigDecimal unrealizedPnl = null;
         BigDecimal totalPnl = null;
-        if (s.openShares() == 0) {
+        if (nvl(s.openQuantity()).signum() == 0) {
             // Позиции нет — цена не нужна и не может ни на что повлиять. Требовать её
             // здесь означало бы прятать баланс бота, который просто ещё не купил.
             marketValue = BigDecimal.ZERO;
             unrealizedPnl = BigDecimal.ZERO.subtract(nvl(s.costBasisOpen()));
             totalPnl = nvl(s.realizedPnl()).add(unrealizedPnl);
         } else if (lastPrice != null) {
-            // openShares, а не openLots: так формула не зависит от лотности, которая
-            // достоверно известна только пока бот запущен. Заодно оценка сходится
-            // с averageEntryPrice — та тоже за штуку.
-            marketValue = lastPrice.multiply(BigDecimal.valueOf(s.openShares()));
+            // Количество уже в единицах базового актива, цена — за такую единицу,
+            // поэтому оценка не зависит от лотности и сходится с averageEntryPrice.
+            marketValue = lastPrice.multiply(s.openQuantity());
             unrealizedPnl = marketValue.subtract(nvl(s.costBasisOpen()));
             totalPnl = nvl(s.realizedPnl()).add(unrealizedPnl);
         }
@@ -209,7 +319,7 @@ public class BotValuationService {
 
         return new BotValuationDto(
                 s.dryRun(), s.cashFlow(), s.costBasisOpen(), s.realizedPnl(), s.paidCommission(),
-                s.openLots(), s.averageEntryPrice(), displayCurrency(s, cfg), s.openShares(),
+                s.openQuantity(), s.averageEntryPrice(), displayCurrency(s, cfg),
                 lastPrice, lastPriceAt, marketValue, unrealizedPnl, totalPnl,
                 cfg.budget(), workingBudget, cfg.withdrawnProfit(s.realizedPnl()), equity,
                 cfg.profitPolicy(), cfg.sizingMode());

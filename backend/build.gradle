@@ -22,6 +22,9 @@ configurations {
 
 repositories {
     mavenCentral()
+    // SDK Poloniex не опубликован в Maven Central (com/poloniex там просто нет),
+    // единственный способ получить его артефактом — сборка JitPack из GitHub.
+    maven { url 'https://jitpack.io' }
 }
 
 dependencies {
@@ -40,6 +43,22 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     implementation 'ru.tinkoff.piapi:java-sdk-core:1.49.3'
     implementation "org.telegram:telegrambots-spring-boot-starter:6.9.7.1"
+
+    // Пин по хэшу коммита, а не master-SNAPSHOT: SDK собирается JitPack'ом из ветки,
+    // и плавающая версия означала бы, что сборка меняется под нами без единой правки.
+    // SDK тянет okhttp 3.12 и okio 1.15 — обе 2018 года и до исправлений известных
+    // уязвимостей. Поднимаем принудительно: retrofit 2.5 обращается к okhttp через
+    // те же сигнатуры, что и в 4.x, поэтому подмена для него незаметна.
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'com.squareup.okio:okio:3.9.1'
+
+    implementation('com.github.poloniex:polo-sdk-java:4c7582ec02') {
+        // Своё логирование SDK тянуть не даём: в приложении уже есть logback от Spring Boot.
+        exclude group: 'org.slf4j', module: 'slf4j-api'
+        // SDK объявляет lombok обычной зависимостью, хотя тот нужен только при компиляции.
+        // Без exclude он уезжает в боевой jar мёртвым грузом.
+        exclude group: 'org.projectlombok', module: 'lombok'
+    }
 }
 
 tasks.named('test') {

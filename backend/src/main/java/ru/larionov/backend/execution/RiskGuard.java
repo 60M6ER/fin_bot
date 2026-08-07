@@ -84,28 +84,28 @@ public class RiskGuard {
             return;
         }
 
-        long position = orderRepo.sumPositionLots(ctx.botId(), ctx.dryRun());
-        long alreadyOffered = openLots(ctx, OrderSide.SELL);
-        long projected = alreadyOffered + intent.lots();
+        BigDecimal position = nvl(orderRepo.sumPositionQuantity(ctx.botId(), ctx.dryRun()));
+        BigDecimal alreadyOffered = openQuantity(ctx, OrderSide.SELL);
+        BigDecimal projected = alreadyOffered.add(intent.quantity());
 
-        if (projected > position) {
+        if (projected.compareTo(position) > 0) {
             throw new RiskRejectedException(
-                    ("Продажа вышла бы за пределы позиции: в заявках уже %d лот(ов), новая на %d, "
-                            + "а куплено всего %d. Шорт не предусмотрен.")
-                            .formatted(alreadyOffered, intent.lots(), position));
+                    ("Продажа вышла бы за пределы позиции: в заявках уже %s, новая на %s, "
+                            + "а куплено всего %s. Шорт не предусмотрен.")
+                            .formatted(plain(alreadyOffered), plain(intent.quantity()), plain(position)));
         }
     }
 
-    /** Сколько лотов ещё не исполнено в открытых заявках указанной стороны. */
-    private long openLots(BotExecutionContext ctx, OrderSide side) {
-        long lots = 0;
+    /** Сколько ещё не исполнено в открытых заявках указанной стороны. */
+    private BigDecimal openQuantity(BotExecutionContext ctx, OrderSide side) {
+        BigDecimal quantity = BigDecimal.ZERO;
         for (BotOrderEntity o : orderRepo.findAllByBotIdAndStatusIn(ctx.botId(), OPEN_STATUSES)) {
             if (o.isDryRun() != ctx.dryRun() || o.getSide() != side) {
                 continue;
             }
-            lots += o.remainingLots();
+            quantity = quantity.add(o.remainingQuantity());
         }
-        return lots;
+        return quantity;
     }
 
     /** Вызывается ПОСЛЕ успешной постановки: считаем только состоявшиеся заявки. */
@@ -152,20 +152,20 @@ public class RiskGuard {
     }
 
     private void checkPosition(BotExecutionContext ctx, PlaceIntent intent) {
-        Long limit = ctx.maxPositionLots();
-        if (limit == null || limit <= 0) {
+        BigDecimal limit = ctx.maxPositionQuantity();
+        if (limit == null || limit.signum() <= 0) {
             return;
         }
 
-        long current = orderRepo.sumPositionLots(ctx.botId(), ctx.dryRun());
+        BigDecimal current = nvl(orderRepo.sumPositionQuantity(ctx.botId(), ctx.dryRun()));
         // Проверяем худший случай: как если бы заявка исполнилась целиком.
-        long projected = intent.side() == OrderSide.BUY
-                ? current + intent.lots()
-                : current - intent.lots();
+        BigDecimal projected = intent.side() == OrderSide.BUY
+                ? current.add(intent.quantity())
+                : current.subtract(intent.quantity());
 
-        if (Math.abs(projected) > limit) {
+        if (projected.abs().compareTo(limit) > 0) {
             throw new RiskRejectedException(
-                    "Позиция вышла бы за лимит: " + projected + " лот(ов) при потолке " + limit + ".");
+                    "Позиция вышла бы за лимит: " + plain(projected) + " при потолке " + plain(limit) + ".");
         }
     }
 
@@ -180,14 +180,17 @@ public class RiskGuard {
         }
 
         CapitalUsage usage = capitalUsage(ctx);
-        if (usage.journalPositionLots() != usage.inventory().openLots()) {
+        // compareTo, а не !=: журнал и книга приходят с разной шкалой BigDecimal,
+        // и сравнение через equals объявляло бы расхождением 1 против 1.00.
+        if (usage.journalPosition().compareTo(nvl(usage.inventory().openQuantity())) != 0) {
             throw new RiskRejectedException(
-                    ("Новая покупка запрещена: позиция в журнале ордеров (%d лот.) "
-                            + "не совпадает с денежной книгой (%d лот.).")
-                            .formatted(usage.journalPositionLots(), usage.inventory().openLots()));
+                    ("Новая покупка запрещена: позиция в журнале ордеров (%s) "
+                            + "не совпадает с денежной книгой (%s).")
+                            .formatted(plain(usage.journalPosition()),
+                                    plain(usage.inventory().openQuantity())));
         }
         BigDecimal used = usage.amount();
-        BigDecimal projected = used.add(orderNotional(intent.limitPrice(), intent.lots(), ctx.lotSize()));
+        BigDecimal projected = used.add(intent.notional());
 
         if (projected.compareTo(limit) > 0) {
             throw new RiskRejectedException(
@@ -209,20 +212,23 @@ public class RiskGuard {
             if (o.isDryRun() != ctx.dryRun() || o.getSide() != OrderSide.BUY || o.getLimitPrice() == null) {
                 continue;
             }
-            reserved = reserved.add(orderNotional(o.getLimitPrice(), o.remainingLots(), o.getLotSize()));
+            reserved = reserved.add(o.getLimitPrice().multiply(o.remainingQuantity()));
         }
 
-        long journalPositionLots = orderRepo.sumPositionLots(ctx.botId(), ctx.dryRun());
+        BigDecimal journalPosition = nvl(orderRepo.sumPositionQuantity(ctx.botId(), ctx.dryRun()));
         Inventory inventory = accounting.inventory(ctx.botId(), ctx.dryRun());
-        return new CapitalUsage(reserved.add(inventory.costBasisOpen()), journalPositionLots, inventory);
+        return new CapitalUsage(reserved.add(inventory.costBasisOpen()), journalPosition, inventory);
     }
 
-    private static BigDecimal orderNotional(BigDecimal price, long lots, int lotSize) {
-        return price
-                .multiply(BigDecimal.valueOf(lots))
-                .multiply(BigDecimal.valueOf(lotSize <= 0 ? 1 : lotSize));
+    private static BigDecimal nvl(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value;
     }
 
-    private record CapitalUsage(BigDecimal amount, long journalPositionLots, Inventory inventory) {
+    /** Количество для человека: 0.000001 не должно превратиться в 1E-6. */
+    private static String plain(BigDecimal value) {
+        return value == null ? "—" : value.stripTrailingZeros().toPlainString();
+    }
+
+    private record CapitalUsage(BigDecimal amount, BigDecimal journalPosition, Inventory inventory) {
     }
 }

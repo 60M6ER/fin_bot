@@ -6,79 +6,90 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Сколько лотов ставить на каждом уровне сетки.
+ * Сколько покупать на каждом уровне сетки.
  *
  * Ровно обратная задача к расчёту «худшего случая» в {@link GridValidator}: там из
- * числа лотов выводится требуемый капитал, здесь из выделенного бюджета — число лотов.
+ * количества выводится требуемый капитал, здесь из выделенного бюджета — количество.
  * Поэтому бюджет обеспечен ПО ПОСТРОЕНИЮ ({@code worstCaseNotional <= workingBudget}),
- * а не проверкой в момент постановки заявки: деление с округлением вниз не оставляет
- * возможности выйти за бюджет даже при полном выкупе всех уровней.
+ * а не проверкой в момент постановки заявки: округление ВНИЗ до торгуемого шага
+ * не оставляет возможности выйти за бюджет даже при полном выкупе всех уровней.
+ *
+ * <p>Количество дробное и выражено в единицах базового актива. Округление до шага
+ * биржи ({@code quantityStep}) здесь же, а не в гейтвее: иначе «худший случай»
+ * считался бы по одному количеству, а на биржу уходило другое.
  *
  * <p>Уровни покупки — {@code 0..N-1}, где {@code N = ladder.levelCount()}. Верхний
  * уровень {@code N} продажный: встречной продажи для покупки на нём не существует
  * ({@code ladder.priceAt(N + 1) == null}).
  */
 public record GridSizing(
-        /** Индекс — уровень ПОКУПКИ. */
-        List<Long> lotsByLevel,
+        /** Индекс — уровень ПОКУПКИ, значение — количество базового актива. */
+        List<BigDecimal> quantityByLevel,
         /** Сколько денег потребуется при выкупе всех уровней покупки. */
         BigDecimal worstCaseNotional,
-        /** Неиспользованный остаток бюджета (null в FIXED_LOTS). */
+        /** Неиспользованный остаток бюджета (null в FIXED_QUANTITY). */
         BigDecimal budgetLeftover,
-        /** Бюджет, от которого считали (null в FIXED_LOTS). */
+        /** Бюджет, от которого считали (null в FIXED_QUANTITY). */
         BigDecimal workingBudget,
         GridConfig.SizingMode mode
 ) {
 
     public GridSizing {
-        lotsByLevel = lotsByLevel == null ? List.of() : List.copyOf(lotsByLevel);
+        quantityByLevel = quantityByLevel == null ? List.of() : List.copyOf(quantityByLevel);
     }
 
     /**
-     * Сколько лотов на уровне.
+     * Количество на уровне.
      *
-     * В {@link GridConfig.SizingMode#FIXED_LOTS} размер одинаков на ЛЮБОМ уровне,
+     * В {@link GridConfig.SizingMode#FIXED_QUANTITY} размер одинаков на ЛЮБОМ уровне,
      * включая верхний: {@code placeMissingBuys} умеет поставить покупку на уровень N,
      * когда цена ушла выше диапазона, и старое поведение обязано сохраниться.
-     * В бюджетных режимах уровень N получает 0 — покупка там не ставится.
+     * В бюджетных режимах уровень N получает ноль — покупка там не ставится.
      */
-    public long lotsAt(int level) {
+    public BigDecimal quantityAt(int level) {
         if (level < 0) {
-            return 0;
+            return BigDecimal.ZERO;
         }
-        if (mode == GridConfig.SizingMode.FIXED_LOTS) {
-            return lotsByLevel.isEmpty() ? 0 : lotsByLevel.get(0);
+        if (mode == GridConfig.SizingMode.FIXED_QUANTITY) {
+            return quantityByLevel.isEmpty() ? BigDecimal.ZERO : quantityByLevel.get(0);
         }
-        return level < lotsByLevel.size() ? lotsByLevel.get(level) : 0;
+        return level < quantityByLevel.size() ? quantityByLevel.get(level) : BigDecimal.ZERO;
     }
 
-    public long minLots() {
-        return lotsByLevel.stream().mapToLong(Long::longValue).min().orElse(0);
+    public BigDecimal minQuantity() {
+        return quantityByLevel.stream().min(BigDecimal::compareTo).orElse(BigDecimal.ZERO);
     }
 
-    public long maxLots() {
-        return lotsByLevel.stream().mapToLong(Long::longValue).max().orElse(0);
+    public BigDecimal maxQuantity() {
+        return quantityByLevel.stream().max(BigDecimal::compareTo).orElse(BigDecimal.ZERO);
     }
 
     /** Одинаков ли размер на всех уровнях покупки. */
     public boolean uniform() {
-        return minLots() == maxLots();
+        return minQuantity().compareTo(maxQuantity()) == 0;
     }
 
-    public static GridSizing fixed(long lotsPerOrder, GridLadder ladder, int lotSize) {
+    public static GridSizing fixed(BigDecimal quantityPerOrder, GridLadder ladder, BigDecimal quantityStep) {
+        BigDecimal quantity = quantizeDown(quantityPerOrder, quantityStep);
+        if (quantity.signum() <= 0) {
+            throw new IllegalStateException(
+                    ("Размер заявки %s меньше шага количества %s — такую заявку биржа не примет.")
+                            .formatted(plain(quantityPerOrder), plain(quantityStep)));
+        }
+
         int levels = Math.max(0, ladder.levelCount());
-        List<Long> lots = new ArrayList<>(levels);
+        List<BigDecimal> quantities = new ArrayList<>(levels);
         BigDecimal worstCase = BigDecimal.ZERO;
         for (int i = 0; i < levels; i++) {
-            lots.add(lotsPerOrder);
-            worstCase = worstCase.add(cost(ladder, i, lotSize).multiply(BigDecimal.valueOf(lotsPerOrder)));
+            quantities.add(quantity);
+            worstCase = worstCase.add(ladder.priceAt(i).multiply(quantity));
         }
-        return new GridSizing(lots, worstCase, null, null, GridConfig.SizingMode.FIXED_LOTS);
+        return new GridSizing(quantities, worstCase, null, null, GridConfig.SizingMode.FIXED_QUANTITY);
     }
 
     public static GridSizing fromBudget(GridConfig cfg,
                                         GridLadder ladder,
-                                        int lotSize,
+                                        BigDecimal quantityStep,
                                         BigDecimal workingBudget) {
 
         int levels = ladder.levelCount();
@@ -92,59 +103,77 @@ public record GridSizing(
                             .formatted(workingBudget == null ? "не задан" : workingBudget.toPlainString()));
         }
 
-        List<Long> lots = new ArrayList<>(levels);
+        List<BigDecimal> quantities = new ArrayList<>(levels);
 
         if (cfg.sizingMode() == GridConfig.SizingMode.UNIFORM) {
             BigDecimal denominator = BigDecimal.ZERO;
             for (int i = 0; i < levels; i++) {
-                denominator = denominator.add(cost(ladder, i, lotSize));
+                denominator = denominator.add(ladder.priceAt(i));
             }
-            long perOrder = workingBudget.divide(denominator, 0, RoundingMode.DOWN).longValueExact();
-            if (perOrder <= 0) {
+            BigDecimal perOrder = quantizeDown(
+                    workingBudget.divide(denominator, 18, RoundingMode.DOWN), quantityStep);
+            if (perOrder.signum() <= 0) {
                 throw new IllegalStateException(
-                        ("Бюджета %s не хватает даже на один лот на каждом уровне: при лотности %d "
-                                + "полный выкуп %d уровней стоит минимум %s. Увеличьте бюджет "
+                        ("Бюджета %s не хватает даже на минимальный шаг %s на каждом уровне: "
+                                + "полный выкуп %d уровней стоил бы минимум %s. Увеличьте бюджет "
                                 + "или уменьшите число уровней.")
-                                .formatted(workingBudget.toPlainString(), Math.max(1, lotSize), levels,
-                                        denominator.setScale(2, RoundingMode.HALF_UP).toPlainString()));
+                                .formatted(workingBudget.toPlainString(), plain(quantityStep), levels,
+                                        denominator.multiply(quantityStep)
+                                                .setScale(2, RoundingMode.HALF_UP).toPlainString()));
             }
             for (int i = 0; i < levels; i++) {
-                lots.add(perOrder);
+                quantities.add(perOrder);
             }
         } else {
-            BigDecimal perLevel = workingBudget.divide(BigDecimal.valueOf(levels), 9, RoundingMode.DOWN);
+            BigDecimal perLevel = workingBudget.divide(BigDecimal.valueOf(levels), 18, RoundingMode.DOWN);
             for (int i = 0; i < levels; i++) {
-                BigDecimal cost = cost(ladder, i, lotSize);
-                long atLevel = perLevel.divide(cost, 0, RoundingMode.DOWN).longValueExact();
-                if (atLevel <= 0) {
+                BigDecimal price = ladder.priceAt(i);
+                BigDecimal atLevel = quantizeDown(
+                        perLevel.divide(price, 18, RoundingMode.DOWN), quantityStep);
+                if (atLevel.signum() <= 0) {
                     // Молча пропустить уровень нельзя: сетка с дырой наверху перестаёт
                     // покупать на спуске до тех пор, пока цена не упадёт достаточно низко,
                     // то есть незаметно меняет форму стратегии.
-                    BigDecimal required = cost.multiply(BigDecimal.valueOf(levels));
+                    BigDecimal minCost = price.multiply(quantityStep);
+                    BigDecimal required = minCost.multiply(BigDecimal.valueOf(levels));
                     throw new IllegalStateException(
-                            ("Бюджета %s не хватает на уровень %d (цена %s, лотность %d): при делении "
-                                    + "поровну на %d уровней на него приходится %s, а нужно минимум %s. "
-                                    + "Увеличьте бюджет минимум до %s или уменьшите число уровней.")
+                            ("Бюджета %s не хватает на уровень %d (цена %s, шаг количества %s): "
+                                    + "при делении поровну на %d уровней на него приходится %s, "
+                                    + "а нужно минимум %s. Увеличьте бюджет минимум до %s "
+                                    + "или уменьшите число уровней.")
                                     .formatted(workingBudget.toPlainString(), i,
-                                            ladder.priceAt(i).toPlainString(), Math.max(1, lotSize), levels,
+                                            price.toPlainString(), plain(quantityStep), levels,
                                             perLevel.setScale(2, RoundingMode.HALF_UP).toPlainString(),
-                                            cost.setScale(2, RoundingMode.HALF_UP).toPlainString(),
+                                            minCost.setScale(2, RoundingMode.HALF_UP).toPlainString(),
                                             required.setScale(2, RoundingMode.HALF_UP).toPlainString()));
                 }
-                lots.add(atLevel);
+                quantities.add(atLevel);
             }
         }
 
         BigDecimal worstCase = BigDecimal.ZERO;
         for (int i = 0; i < levels; i++) {
-            worstCase = worstCase.add(cost(ladder, i, lotSize).multiply(BigDecimal.valueOf(lots.get(i))));
+            worstCase = worstCase.add(ladder.priceAt(i).multiply(quantities.get(i)));
         }
-        return new GridSizing(lots, worstCase, workingBudget.subtract(worstCase),
+        return new GridSizing(quantities, worstCase, workingBudget.subtract(worstCase),
                 workingBudget, cfg.sizingMode());
     }
 
-    /** Стоимость одного лота на уровне: цена × лотность. */
-    private static BigDecimal cost(GridLadder ladder, int level, int lotSize) {
-        return ladder.priceAt(level).multiply(BigDecimal.valueOf(lotSize <= 0 ? 1 : lotSize));
+    /**
+     * Округление ВНИЗ до торгуемого шага.
+     *
+     * Вниз — потому что вверх означало бы заявку чуть больше обеспеченной бюджетом,
+     * и гарантия «бюджет обеспечен по построению» перестала бы быть гарантией.
+     */
+    static BigDecimal quantizeDown(BigDecimal quantity, BigDecimal step) {
+        if (quantity == null || quantity.signum() <= 0) {
+            return BigDecimal.ZERO;
+        }
+        BigDecimal effectiveStep = step == null || step.signum() <= 0 ? BigDecimal.ONE : step;
+        return quantity.divide(effectiveStep, 0, RoundingMode.DOWN).multiply(effectiveStep);
+    }
+
+    private static String plain(BigDecimal value) {
+        return value == null ? "—" : value.stripTrailingZeros().toPlainString();
     }
 }

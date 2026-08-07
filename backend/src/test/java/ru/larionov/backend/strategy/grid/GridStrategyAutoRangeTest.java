@@ -65,10 +65,10 @@ class GridStrategyAutoRangeTest {
         when(clock.instant()).thenAnswer(__ -> currentTime.get());
         when(ctx.clock()).thenReturn(clock);
         when(ctx.gateway()).thenReturn(gateway);
-        when(ctx.constraints()).thenReturn(new TradingConstraints(1, new BigDecimal("0.01"), "rub"));
+        when(ctx.constraints()).thenReturn(TradingConstraints.wholeLots(1, new BigDecimal("0.01"), "rub"));
         when(ctx.execution()).thenReturn(new BotExecutionContext(
                 botId, UUID.randomUUID(), new AccountId("acc"), instrumentId,
-                false, 1, null, null, null, null));
+                false, BigDecimal.ONE, BigDecimal.ONE, null, null, null, null, null));
         when(ctx.exchange()).thenReturn(exchange);
         when(ctx.loadState(GridStrategyState.class)).thenAnswer(__ -> Optional.ofNullable(saved.get()));
         org.mockito.Mockito.doAnswer(invocation -> {
@@ -255,7 +255,8 @@ class GridStrategyAutoRangeTest {
     void rejectedCandidateKeepsOldRangeAndStopsBuying() {
         when(ctx.execution()).thenReturn(new BotExecutionContext(
                 botId, UUID.randomUUID(), new AccountId("acc"), instrumentId,
-                false, 1, new BigDecimal("400"), null, null, null));
+                false, BigDecimal.ONE, BigDecimal.ONE, null,
+                new BigDecimal("400"), null, null, null));
         GridStrategy strategy = new GridStrategy(replaceUpperConfig());
         strategy.onStart(ctx, reconciled("0"));
         strategy.onReconcile(reconciled("0"));
@@ -273,7 +274,7 @@ class GridStrategyAutoRangeTest {
 
     private GridConfig autoConfig() {
         return new GridConfig(
-                null, null, 4, 1L, 4,
+                null, null, 4, new BigDecimal("1"), 4,
                 GridConfig.RangeExitAction.STOP_BUYING, null, 3600, true,
                 true, CandleInterval.H1, 6, new BigDecimal("2"),
                 new BigDecimal("0.01"), new BigDecimal("0.15"),
@@ -284,7 +285,7 @@ class GridStrategyAutoRangeTest {
 
     private GridConfig replaceUpperConfig() {
         return new GridConfig(
-                null, null, 4, 1L, 4,
+                null, null, 4, new BigDecimal("1"), 4,
                 GridConfig.RangeExitAction.STOP_BUYING, null, 3600, true,
                 true, CandleInterval.H1, 6, new BigDecimal("2"),
                 new BigDecimal("0.01"), new BigDecimal("0.15"),

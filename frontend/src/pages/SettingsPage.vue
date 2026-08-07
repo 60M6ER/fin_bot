@@ -43,6 +43,83 @@
         </q-card-section>
       </q-card>
 
+      <!-- Деньги: валюта показа, курс и сводный баланс -->
+      <q-card flat bordered>
+        <q-card-section>
+          <div class="text-subtitle1">Деньги</div>
+          <div class="text-caption text-grey">
+            Валюта показа влияет ТОЛЬКО на сводные цифры. Бюджеты ботов и все лимиты
+            остаются в валюте своего инструмента: рубли на T-Invest, USDT на Poloniex.
+          </div>
+        </q-card-section>
+
+        <q-separator />
+
+        <q-card-section class="q-gutter-md">
+          <div class="row q-col-gutter-md">
+            <div class="col-12 col-sm-4">
+              <q-select
+                v-model="displayCurrency"
+                :options="currencyOptions"
+                label="Валюта показа"
+                outlined dense emit-value map-options
+                :disable="moneySaving"
+                @update:model-value="saveMoneySettings"
+              />
+            </div>
+            <div class="col-12 col-sm-4">
+              <q-select
+                v-model="fxSource"
+                :options="fxSourceOptions"
+                label="Источник курса"
+                outlined dense emit-value map-options
+                :disable="moneySaving"
+                @update:model-value="saveMoneySettings"
+              />
+            </div>
+            <div class="col-12 col-sm-4">
+              <div class="text-caption text-grey">Курс доллара</div>
+              <div class="text-body1 mono">
+                {{ data.usdRub ? `${formatMoney(data.usdRub)} ₽` : 'недоступен' }}
+              </div>
+              <div v-if="data.usdRubAsOf" class="text-caption text-grey">
+                на {{ formatDateTime(data.usdRubAsOf) }}
+              </div>
+            </div>
+          </div>
+
+          <q-separator />
+
+          <div>
+            <div class="text-caption text-grey q-mb-xs">Сводный баланс</div>
+            <div v-if="portfolio.totalInDisplayCurrency !== null && portfolio.totalInDisplayCurrency !== undefined"
+                 class="text-h6 mono">
+              {{ formatMoney(portfolio.totalInDisplayCurrency) }} {{ portfolio.displayCurrency }}
+            </div>
+            <div v-else class="text-body2 text-grey-7">
+              Свести валюты не удалось: курс недоступен
+            </div>
+
+            <div class="row q-gutter-sm q-mt-sm">
+              <q-chip
+                v-for="(amount, currency) in portfolio.byCurrency"
+                :key="currency"
+                dense outline
+                :label="`${formatMoney(amount)} ${currency}`"
+              />
+            </div>
+
+            <div v-if="portfolio.incomplete" class="text-caption text-orange-9 q-mt-sm">
+              Сумма неполна: часть ботов без бюджета, без цены либо с неизвестным курсом
+            </div>
+            <div v-if="portfolio.fxSource" class="text-caption text-grey q-mt-xs">
+              Курс {{ portfolio.fxSource === 'CBR' ? 'ЦБ РФ' : 'биржевой' }}
+              <span v-if="portfolio.fxAsOf">на {{ formatDateTime(portfolio.fxAsOf) }}</span>
+            </div>
+          </div>
+        </q-card-section>
+      </q-card>
+
       <!-- Telegram -->
       <q-card flat bordered>
         <q-card-section>
@@ -257,6 +334,51 @@ import { apiClient, getErrorMessage } from 'src/services/apiClient'
 const toast = inject('toast')
 
 const loading = ref(false)
+
+const displayCurrency = ref('RUB')
+const fxSource = ref('CBR')
+const moneySaving = ref(false)
+const portfolio = ref({ byCurrency: {}, totalInDisplayCurrency: null, displayCurrency: 'RUB', incomplete: false })
+
+const currencyOptions = [
+  { value: 'RUB', label: 'Рубли (₽)' },
+  { value: 'USD', label: 'Доллары ($)' }
+]
+
+const fxSourceOptions = [
+  { value: 'CBR', label: 'ЦБ РФ (официальный)' },
+  { value: 'T_INVEST', label: 'Биржевой курс T-Invest' }
+]
+
+async function saveMoneySettings () {
+  moneySaving.value = true
+  try {
+    await apiClient.patch('/api/v1/settings/display-currency', {
+      displayCurrency: displayCurrency.value,
+      fxSource: fxSource.value
+    })
+    await load()
+  } catch (e) {
+    toast?.err(getErrorMessage(e, 'Не удалось сохранить настройки денег'))
+    await load()
+  } finally {
+    moneySaving.value = false
+  }
+}
+
+function formatMoney (value) {
+  if (value === null || value === undefined) return '—'
+  const number = Number(value)
+  return Number.isNaN(number)
+    ? String(value)
+    : number.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+function formatDateTime (value) {
+  if (!value) return ''
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('ru-RU')
+}
 const savingTelegram = ref(false)
 const savingTrading = ref(false)
 const showToken = ref(false)
@@ -314,12 +436,22 @@ async function load () {
   try {
     data.value = await apiClient.get('/api/v1/settings')
     tradingEnabled.value = data.value.tradingEnabled
+    displayCurrency.value = data.value.displayCurrency || 'RUB'
+    fxSource.value = data.value.fxSource || 'CBR'
     form.username = data.value.telegramBotUsername || ''
     form.token = ''
   } catch (e) {
     toast?.err(getErrorMessage(e, 'Не удалось загрузить настройки'))
   } finally {
     loading.value = false
+  }
+
+  // Портфель отдельным запросом: он ходит к биржам и за курсом, поэтому его
+  // неудача не должна утаскивать за собой всю страницу настроек.
+  try {
+    portfolio.value = await apiClient.get('/api/v1/system/portfolio')
+  } catch {
+    portfolio.value = { byCurrency: {}, totalInDisplayCurrency: null, incomplete: true }
   }
 
   // Отдельно от настроек: сведения о процессе не должны падать вместе с ними.

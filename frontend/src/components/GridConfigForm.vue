@@ -19,7 +19,7 @@
         — запас ×{{ formatDecimal(preview.commissionCoverageRatio, 2) }}
       </template>.
       Прибыль за цикл ≈ {{ formatDecimal(preview.netPerCyclePercent) }}%.
-      Полный выкуп: {{ formatDecimal(preview.worstCaseCapital, 2) }} при размере лота {{ preview.lotSize }}.
+      Полный выкуп: {{ formatDecimal(preview.worstCaseCapital, 2) }} при шаге количества {{ formatQuantity(preview.quantityStep) }}.
     </q-banner>
     <q-banner v-if="model.autoRange" dense rounded class="bg-blue-1 text-blue-10">
       <template #avatar>
@@ -154,10 +154,15 @@
         />
       </div>
 
-      <div v-if="model.sizingMode === 'FIXED_LOTS'" class="col-6 col-md-3">
+      <div v-if="model.sizingMode === 'FIXED_QUANTITY'" class="col-6 col-md-3">
+        <!--
+          Строкой, а не v-model.number: у крипты количество бывает с восемью знаками,
+          и приведение к числу на каждое нажатие клавиши съедало бы хвост при вводе.
+        -->
         <q-input
-          v-model.number="model.lotsPerOrder"
-          label="Лотов в заявке" type="number" min="1"
+          v-model="model.quantityPerOrder"
+          label="Количество в заявке" inputmode="decimal"
+          :hint="preview.quantityStep ? `шаг ${formatQuantity(preview.quantityStep)}` : ''"
           outlined dense :disable="disable"
         />
       </div>
@@ -221,7 +226,7 @@
         <q-input v-model.number="model.maxCapital" label="Капитал, макс." type="number" outlined dense :disable="disable" />
       </div>
       <div class="col-6 col-md-3">
-        <q-input v-model.number="model.maxPositionLots" label="Позиция, лотов" type="number" outlined dense :disable="disable" />
+        <q-input v-model="model.maxPositionQuantity" label="Позиция, макс." inputmode="decimal" outlined dense :disable="disable" />
       </div>
       <div class="col-6 col-md-3">
         <q-input v-model.number="model.maxOrdersPerDay" label="Заявок в сутки" type="number" outlined dense :disable="disable" />
@@ -271,7 +276,7 @@
         <tr>
           <th class="text-left">#</th>
           <th class="text-right">Цена</th>
-          <th class="text-right">Лотов</th>
+          <th class="text-right">Количество</th>
         </tr>
       </thead>
       <tbody>
@@ -279,7 +284,7 @@
           <td>{{ row.level }}</td>
           <td class="text-right mono">{{ row.price }}</td>
           <td class="text-right mono">
-            <span v-if="row.lots !== null">{{ row.lots }}</span>
+            <span v-if="row.quantity !== null">{{ formatQuantity(row.quantity) }}</span>
             <span v-else class="text-grey">—</span>
           </td>
         </tr>
@@ -327,7 +332,7 @@ const upperBreakoutOptions = [
 ]
 
 const sizingModeOptions = [
-  { value: 'FIXED_LOTS', label: 'Фиксировано лотов' },
+  { value: 'FIXED_QUANTITY', label: 'Фиксированное количество' },
   { value: 'UNIFORM', label: 'Один размер на все уровни (от бюджета)' },
   { value: 'PER_LEVEL', label: 'Поровну денег на уровень (от бюджета)' }
 ]
@@ -343,10 +348,10 @@ const defaults = {
   lowerPrice: null,
   upperPrice: null,
   levels: 10,
-  lotsPerOrder: 1,
-  // FIXED_LOTS по умолчанию: создание бота «по-старому» не меняется,
+  quantityPerOrder: 1,
+  // FIXED_QUANTITY по умолчанию: создание бота «по-старому» не меняется,
   // на бюджет переходят осознанно.
-  sizingMode: 'FIXED_LOTS',
+  sizingMode: 'FIXED_QUANTITY',
   budget: null,
   profitPolicy: 'WITHDRAW',
   maxActiveOrders: 10,
@@ -364,7 +369,7 @@ const defaults = {
   maxRealizedLoss: null,
   minStepToCommissionRatio: 1.5,
   maxCapital: null,
-  maxPositionLots: null,
+  maxPositionQuantity: null,
   maxOrdersPerDay: null,
   maxOrdersPerMinute: 10,
   dryRun: false,
@@ -389,13 +394,15 @@ const budgetPercent = ref(null)
 /** Что именно получилось из бюджета — самое полезное подтверждение перед запуском. */
 const sizingSummary = computed(() => {
   const p = preview.value
-  if (!p.ready || !p.sizingMode || p.sizingMode === 'FIXED_LOTS') return ''
+  if (!p.ready || !p.sizingMode || p.sizingMode === 'FIXED_QUANTITY') return ''
 
-  const lots = p.lotsByLevel || []
-  if (!lots.length) return ''
-  const min = Math.min(...lots)
-  const max = Math.max(...lots)
-  const size = min === max ? `по ${min} лот(ов) на уровень` : `от ${min} до ${max} лот(ов) по уровням`
+  const quantities = (p.quantityByLevel || []).map(Number)
+  if (!quantities.length) return ''
+  const min = Math.min(...quantities)
+  const max = Math.max(...quantities)
+  const size = min === max
+    ? `по ${formatQuantity(min)} на уровень`
+    : `от ${formatQuantity(min)} до ${formatQuantity(max)} по уровням`
   const cur = p.cashCurrency ? ` ${p.cashCurrency}` : ''
 
   return `Размер заявки: ${size}. Задействовано ${formatDecimal(p.worstCaseCapital, 2)}${cur}`
@@ -427,6 +434,13 @@ watch(() => props.modelValue, (v) => {
   if (v !== serialize()) loadFrom(v)
 })
 
+/**
+ * Количество уходит на бэкенд СТРОКОЙ, как пользователь его ввёл.
+ *
+ * Намеренно: числа JavaScript — это double, и 0.12345678 через них уже не проходит
+ * без потерь. Строку Jackson читает в BigDecimal ровно теми цифрами, что набраны,
+ * а деньги и количество монет — не то место, где уместна потеря последнего знака.
+ */
 function serialize () {
   const out = {}
   for (const [k, v] of Object.entries(model)) {
@@ -441,10 +455,10 @@ watch(model, () => emit('update:modelValue', serialize()), { deep: true })
 // serialize() отбрасывает null, поэтому лишний ключ в JSON не остаётся —
 // достаточно проставить осмысленное значение для того режима, в который перешли.
 watch(() => model.sizingMode, (mode) => {
-  if (mode === 'FIXED_LOTS') {
-    if (model.lotsPerOrder == null) model.lotsPerOrder = 1
+  if (mode === 'FIXED_QUANTITY') {
+    if (model.quantityPerOrder == null) model.quantityPerOrder = 1
   } else {
-    model.lotsPerOrder = null
+    model.quantityPerOrder = null
     if (model.budget == null && preview.value.availableCash != null) {
       model.budget = Number(preview.value.availableCash)
     }
@@ -483,7 +497,7 @@ const breakoutMarginPercent = computed({
   set: value => { model.breakoutMarginPct = Number(value) / 100 }
 })
 
-const preview = ref({ ready: false, error: '', ladderPrices: [], lotsByLevel: [], availableCash: null, cashCurrency: null })
+const preview = ref({ ready: false, error: '', ladderPrices: [], quantityByLevel: [], quantityStep: null, availableCash: null, cashCurrency: null })
 const previewLoading = ref(false)
 let previewTimer = null
 let previewVersion = 0
@@ -495,7 +509,7 @@ function canPreview () {
 }
 
 function clearPreview () {
-  preview.value = { ready: false, error: '', ladderPrices: [], lotsByLevel: [], availableCash: null, cashCurrency: null }
+  preview.value = { ready: false, error: '', ladderPrices: [], quantityByLevel: [], quantityStep: null, availableCash: null, cashCurrency: null }
   previewLoading.value = false
 }
 
@@ -523,7 +537,7 @@ async function loadPreview (version) {
       ready: false,
       error: getErrorMessage(e, 'Не удалось проверить сетку'),
       ladderPrices: [],
-      lotsByLevel: [],
+      quantityByLevel: [],
       availableCash: null,
       cashCurrency: null
     }
@@ -545,11 +559,24 @@ const ladder = computed(() => {
     .map((price, level) => ({
       level,
       price: formatDecimal(price, 9),
-      lots: (preview.value.lotsByLevel || [])[level] ?? null,
+      quantity: (preview.value.quantityByLevel || [])[level] ?? null,
       current: false
     }))
     .reverse()
 })
+
+/**
+ * Количество: значащие знаки не теряем.
+ *
+ * Обычное форматирование с двумя знаками превратило бы 0.000001 BTC в «0», то есть
+ * соврало бы о размере заявки. Поэтому до восьми знаков и без группировки.
+ */
+function formatQuantity (value) {
+  if (value === null || value === undefined) return '—'
+  const number = Number(value)
+  if (Number.isNaN(number)) return String(value)
+  return number.toLocaleString('ru-RU', { maximumFractionDigits: 8, useGrouping: false })
+}
 
 function formatDecimal (value, maximumFractionDigits = 4) {
   if (value === null || value === undefined) return '—'

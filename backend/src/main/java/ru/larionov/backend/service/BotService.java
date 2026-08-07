@@ -85,17 +85,14 @@ public class BotService {
         BigDecimal reserved = BigDecimal.ZERO;
         for (BotOrderEntity o : open) {
             if (o.getSide() == OrderSide.BUY && o.getLimitPrice() != null) {
-                int lotSize = o.getLotSize() <= 0 ? 1 : o.getLotSize();
-                reserved = reserved.add(o.getLimitPrice()
-                        .multiply(BigDecimal.valueOf(o.remainingLots()))
-                        .multiply(BigDecimal.valueOf(lotSize)));
+                reserved = reserved.add(o.getLimitPrice().multiply(o.remainingQuantity()));
             }
         }
 
         return new BotTradingStateDto(
                 botRuntimeService.isRunning(id),
                 dryRun,
-                orderRepo.sumPositionLots(id, dryRun),
+                orderRepo.sumPositionQuantity(id, dryRun),
                 reserved,
                 open.size(),
                 botRuntimeService.queueSize(id),

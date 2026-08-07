@@ -35,6 +35,7 @@ class ConnectionValuationTest {
     private AccountingService accounting;
     private LastPriceCache prices;
     private AccountCashService accountCash;
+    private ru.larionov.backend.money.FxRateService fx;
     private BotValuationService service;
 
     @BeforeEach
@@ -42,8 +43,21 @@ class ConnectionValuationTest {
         accounting = mock(AccountingService.class);
         prices = new LastPriceCache();
         accountCash = mock(AccountCashService.class);
+        fx = mock(ru.larionov.backend.money.FxRateService.class);
+        // Курс по умолчанию известен: рубли к рублям — единица.
+        when(fx.rate(any(), any())).thenAnswer(i -> {
+            String from = i.getArgument(0);
+            String to = i.getArgument(1);
+            return ru.larionov.backend.money.CurrencyCode.sameMoney(from, to)
+                    ? java.util.Optional.of(ru.larionov.backend.money.FxRate.identity(to))
+                    : java.util.Optional.of(new ru.larionov.backend.money.FxRate(
+                            from, to, new java.math.BigDecimal("90"), "CBR", java.time.Instant.now()));
+        });
+        var appSettings = mock(ru.larionov.backend.service.AppSettingService.class);
+        when(appSettings.get(any(), any())).thenAnswer(i -> i.getArgument(1));
         service = new BotValuationService(accounting, prices, accountCash,
-                mock(ru.larionov.backend.repository.InstrumentRepository.class), new ObjectMapper());
+                mock(ru.larionov.backend.repository.InstrumentRepository.class), new ObjectMapper(),
+                fx, appSettings);
         when(accountCash.dominantCurrency(any())).thenReturn("RUB");
     }
 
@@ -68,20 +82,21 @@ class ConnectionValuationTest {
                 .exchangeConnectionId(connectionId)
                 .strategyConfig("""
                         {"instrumentUid":"uid","lowerPrice":100,"upperPrice":110,
-                         "levels":10,"lotsPerOrder":1}
+                         "levels":10,"quantityPerOrder":1}
                         """)
                 .build();
         b.setUpdatedAt(Instant.parse("2026-01-08T12:00:00Z"));
         return b;
     }
 
-    /** @param openShares 0 — позиции нет */
-    private BotAccountingDto stateOf(String costBasis, long openShares, String realizedPnl) {
+    /** @param openQuantity 0 — позиции нет */
+    private BotAccountingDto stateOf(String costBasis, long openQuantity, String realizedPnl) {
         return new BotAccountingDto(false, new BigDecimal(realizedPnl).subtract(new BigDecimal(costBasis)),
                 new BigDecimal(costBasis), new BigDecimal(realizedPnl), BigDecimal.ZERO,
-                openShares / 10, openShares == 0 ? null : new BigDecimal(costBasis)
-                .divide(BigDecimal.valueOf(openShares), 9, java.math.RoundingMode.HALF_UP),
-                "RUB", openShares);
+                BigDecimal.valueOf(openQuantity),
+                openQuantity == 0 ? null : new BigDecimal(costBasis)
+                        .divide(BigDecimal.valueOf(openQuantity), 9, java.math.RoundingMode.HALF_UP),
+                "RUB");
     }
 
     @Test

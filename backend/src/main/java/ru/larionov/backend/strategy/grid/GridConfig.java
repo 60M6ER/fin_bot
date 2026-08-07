@@ -24,7 +24,8 @@ public record GridConfig(
          * о том, какого параметра не хватает.
          */
         Integer levels,
-        Long lotsPerOrder,
+        /** Размер заявки в ЕДИНИЦАХ БАЗОВОГО АКТИВА. Дробный: у крипты это норма. */
+        BigDecimal quantityPerOrder,
         Integer maxActiveOrders,
         RangeExitAction onRangeExit,
         BigDecimal minStepToCommissionRatio,
@@ -54,11 +55,16 @@ public record GridConfig(
 ) {
 
     public enum SizingMode {
-        /** Прежнее поведение: фиксированное число лотов из lotsPerOrder, бюджет не участвует. */
-        FIXED_LOTS,
-        /** Один размер на все уровни: floor(бюджет / Σ цена_i × лотность). */
+        /**
+         * Фиксированный размер из quantityPerOrder, бюджет не участвует.
+         * Раньше назывался FIXED_LOTS; конфигурации существующих ботов переименованы
+         * миграцией 701 — старое значение здесь не разберётся, и это правильно:
+         * оно означало ЛОТЫ, то есть другое число.
+         */
+        FIXED_QUANTITY,
+        /** Один размер на все уровни: бюджет / Σ цена_i, вниз до шага количества. */
         UNIFORM,
-        /** Поровну денег на уровень: floor((бюджет/N) / (цена_i × лотность)). */
+        /** Поровну денег на уровень: (бюджет/N) / цена_i, вниз до шага количества. */
         PER_LEVEL
     }
 
@@ -86,12 +92,12 @@ public record GridConfig(
     public GridConfig(BigDecimal lowerPrice,
                       BigDecimal upperPrice,
                       Integer levels,
-                      Long lotsPerOrder,
+                      BigDecimal quantityPerOrder,
                       Integer maxActiveOrders,
                       RangeExitAction onRangeExit,
                       BigDecimal minStepToCommissionRatio,
                       Boolean enabled) {
-        this(lowerPrice, upperPrice, levels, lotsPerOrder, maxActiveOrders,
+        this(lowerPrice, upperPrice, levels, quantityPerOrder, maxActiveOrders,
                 onRangeExit, minStepToCommissionRatio, null, enabled,
                 null, null, null, null, null, null, null, null, null, null, null, null,
                 null, null, null);
@@ -116,21 +122,21 @@ public record GridConfig(
             throw new IllegalArgumentException("levels обязателен и должен быть больше нуля");
         }
         // Режим по умолчанию выводим из наличия бюджета: у старых ботов в JSON есть
-        // lotsPerOrder и нет budget — они обязаны сохранить прежнее поведение до байта.
+        // quantityPerOrder и нет budget — они обязаны сохранить прежнее поведение до байта.
         if (sizingMode == null) {
-            sizingMode = (budget == null) ? SizingMode.FIXED_LOTS : SizingMode.UNIFORM;
+            sizingMode = (budget == null) ? SizingMode.FIXED_QUANTITY : SizingMode.UNIFORM;
         }
-        if (sizingMode == SizingMode.FIXED_LOTS) {
-            if (lotsPerOrder == null || lotsPerOrder <= 0) {
-                throw new IllegalArgumentException("lotsPerOrder обязателен и должен быть больше нуля");
+        if (sizingMode == SizingMode.FIXED_QUANTITY) {
+            if (quantityPerOrder == null || quantityPerOrder.signum() <= 0) {
+                throw new IllegalArgumentException("quantityPerOrder обязателен и должен быть больше нуля");
             }
         } else if (budget == null || budget.signum() <= 0) {
             throw new IllegalArgumentException(
                     "budget обязателен и должен быть больше нуля, когда размер заявки считается от бюджета");
         }
-        // lotsPerOrder в бюджетных режимах намеренно НЕ подставляем: любое забытое
-        // чтение cfg.lotsPerOrder() должно упасть на старте, до единой заявки.
-        // Подстановка «1» означала бы тихую торговлю одним лотом на реальные деньги.
+        // quantityPerOrder в бюджетных режимах намеренно НЕ подставляем: любое забытое
+        // чтение cfg.quantityPerOrder() должно упасть на старте, до единой заявки.
+        // Подстановка «1» означала бы тихую торговлю одной штукой на реальные деньги.
         if (profitPolicy == null) {
             profitPolicy = ProfitPolicy.WITHDRAW;
         }
@@ -207,7 +213,7 @@ public record GridConfig(
 
     /** Считает ли бот размер заявки от бюджета. */
     public boolean budgetSized() {
-        return sizingMode != SizingMode.FIXED_LOTS;
+        return sizingMode != SizingMode.FIXED_QUANTITY;
     }
 
     /**

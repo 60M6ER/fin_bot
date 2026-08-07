@@ -16,14 +16,15 @@ public interface MoneyLedgerRepository extends JpaRepository<MoneyLedgerEntity, 
 
     List<MoneyLedgerEntity> findTop200ByBotIdAndDryRunOrderBySeqDesc(UUID botId, boolean dryRun);
 
-    boolean existsByOrderIdAndEntryTypeAndExecutedLotsCum(UUID orderId, LedgerEntryType entryType, Long executedLotsCum);
+    boolean existsByOrderIdAndEntryTypeAndExecutedQuantityCum(
+            UUID orderId, LedgerEntryType entryType, BigDecimal executedQuantityCum);
 
     @Query("""
-            select coalesce(max(l.executedLotsCum), 0)
+            select coalesce(max(l.executedQuantityCum), 0)
             from MoneyLedgerEntity l
             where l.orderId = :orderId and l.entryType in :types
             """)
-    Long maxExecutedLotsCum(@Param("orderId") UUID orderId, @Param("types") List<LedgerEntryType> types);
+    BigDecimal maxExecutedQuantityCum(@Param("orderId") UUID orderId, @Param("types") List<LedgerEntryType> types);
 
     @Query("""
             select coalesce(sum(l.commission), 0)

@@ -30,9 +30,9 @@ class GridLevelAccountingTest {
         return new BotOrderView(
                 UUID.randomUUID(), UUID.randomUUID().toString(), "exch-1",
                 side, status, gridLevel,
-                1, executed,
+                BigDecimal.ONE, BigDecimal.valueOf(executed),
                 new BigDecimal("22.1"), new BigDecimal("22.1"),
-                null, false, null, null, null, 1,
+                null, false, null, null, null, BigDecimal.ONE,
                 false, null, Instant.now(), Instant.now());
     }
 
@@ -40,33 +40,34 @@ class GridLevelAccountingTest {
      * Повторяет журнал реального прогона: покупка на уровне 6 исполнена,
      * продажа за неё ещё не выставлена.
      */
-    private static Map<Integer, Long> heldFrom(List<BotOrderView> journal) {
-        Map<Integer, Long> held = new HashMap<>();
+    private static Map<Integer, BigDecimal> heldFrom(List<BotOrderView> journal) {
+        Map<Integer, BigDecimal> held = new HashMap<>();
         for (BotOrderView o : journal) {
-            if (o.gridLevel() == null || o.executedLots() <= 0) {
+            BigDecimal executed = o.executedQuantity();
+            if (o.gridLevel() == null || executed == null || executed.signum() <= 0) {
                 continue;
             }
-            long delta = o.side() == OrderSide.BUY ? o.executedLots() : -o.executedLots();
-            held.merge(o.gridLevel(), delta, Long::sum);
+            BigDecimal delta = o.side() == OrderSide.BUY ? executed : executed.negate();
+            held.merge(o.gridLevel(), delta, BigDecimal::add);
         }
-        held.values().removeIf(v -> v <= 0);
+        held.values().removeIf(v -> v.signum() <= 0);
         return held;
     }
 
     @Test
     void filledBuyKeepsItsLevelOccupiedEvenWithoutASellOrderYet() {
-        Map<Integer, Long> held = heldFrom(List.of(
+        Map<Integer, BigDecimal> held = heldFrom(List.of(
                 order(OrderSide.BUY, 6, OrderStatus.FILLED, 1)));
 
         assertThat(held)
                 .as("Исполненная покупка держит уровень занятым — иначе он будет выкуплен повторно")
-                .containsEntry(6, 1L);
+                .hasEntrySatisfying(6, q -> assertThat(q).isEqualByComparingTo("1"));
     }
 
     @Test
     void closedCycleReleasesTheLevel() {
         // Продажа привязана к ЗАКРЫВАЕМОМУ уровню покупки, а не к своему ценовому.
-        Map<Integer, Long> held = heldFrom(List.of(
+        Map<Integer, BigDecimal> held = heldFrom(List.of(
                 order(OrderSide.BUY, 6, OrderStatus.FILLED, 1),
                 order(OrderSide.SELL, 6, OrderStatus.FILLED, 1)));
 
@@ -79,7 +80,7 @@ class GridLevelAccountingTest {
     void sellPlacedByReconcilePathClosesTheSameLevelAsCounterSell() {
         // Ровно этого не было: сверка ставила продажу на уровень 8 при покупке на 6,
         // и уровень 6 оставался «свободным».
-        Map<Integer, Long> held = heldFrom(List.of(
+        Map<Integer, BigDecimal> held = heldFrom(List.of(
                 order(OrderSide.BUY, 6, OrderStatus.FILLED, 1),
                 order(OrderSide.BUY, 7, OrderStatus.FILLED, 1),
                 order(OrderSide.SELL, 6, OrderStatus.FILLED, 1)));
@@ -87,12 +88,12 @@ class GridLevelAccountingTest {
         assertThat(held).doesNotContainKey(6);
         assertThat(held)
                 .as("Уровень 7 куплен и не закрыт — остаётся занятым")
-                .containsEntry(7, 1L);
+                .hasEntrySatisfying(7, q -> assertThat(q).isEqualByComparingTo("1"));
     }
 
     @Test
     void unfilledOrdersDoNotCountAsHeldInventory() {
-        Map<Integer, Long> held = heldFrom(List.of(
+        Map<Integer, BigDecimal> held = heldFrom(List.of(
                 order(OrderSide.BUY, 3, OrderStatus.NEW, 0),
                 order(OrderSide.SELL, 8, OrderStatus.NEW, 0)));
 
@@ -104,13 +105,13 @@ class GridLevelAccountingTest {
     @Test
     void repeatedBuysOnTheSameLevelAccumulate() {
         // Так выглядел журнал после бага: четыре покупки одного уровня.
-        Map<Integer, Long> held = heldFrom(List.of(
+        Map<Integer, BigDecimal> held = heldFrom(List.of(
                 order(OrderSide.BUY, 6, OrderStatus.FILLED, 1),
                 order(OrderSide.BUY, 6, OrderStatus.FILLED, 1),
                 order(OrderSide.BUY, 6, OrderStatus.FILLED, 1)));
 
         assertThat(held)
                 .as("Учёт обязан видеть весь накопленный объём, чтобы продать его целиком")
-                .containsEntry(6, 3L);
+                .hasEntrySatisfying(6, q -> assertThat(q).isEqualByComparingTo("3"));
     }
 }

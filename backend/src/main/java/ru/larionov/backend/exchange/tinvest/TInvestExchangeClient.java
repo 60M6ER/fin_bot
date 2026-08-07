@@ -13,6 +13,7 @@ import ru.ttech.piapi.core.connector.resilience.ResilienceSyncStubWrapper;
 import ru.ttech.piapi.core.connector.streaming.StreamServiceStubFactory;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -65,7 +66,12 @@ public final class TInvestExchangeClient implements ExchangeClient {
                 true,  // supportsMarketDataStream
                 true,  // supportsOrderEventsStream
                 true,  // supportsFutures — справочник выгружает срочный рынок
-                true   // supportsSandbox
+                true,  // supportsSandbox
+                // Брокерский счёт ведётся в валютах, а не в монетах: рубль основной,
+                // остальные встречаются на счетах с валютными инструментами.
+                List.of("RUB", "USD", "EUR", "CNY", "HKD"),
+                // Тариф API дёшево не отдаёт — ставку задаёт пользователь в настройках.
+                false
         );
     }
 

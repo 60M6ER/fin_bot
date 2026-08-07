@@ -31,11 +31,14 @@ class GridSizingTest {
         return GridLadder.build(budgetCfg("1", GridConfig.SizingMode.UNIFORM), INCREMENT);
     }
 
-    /** Сумма цен всех уровней ПОКУПКИ (0..N-1), умноженная на лотность. */
-    private static BigDecimal denominator(GridLadder ladder, int lotSize) {
+    private static final BigDecimal STEP_1 = BigDecimal.ONE;
+    private static final BigDecimal STEP_10 = BigDecimal.TEN;
+
+    /** Сумма цен всех уровней ПОКУПКИ (0..N-1), умноженная на шаг количества. */
+    private static BigDecimal denominator(GridLadder ladder, BigDecimal step) {
         BigDecimal sum = BigDecimal.ZERO;
         for (int i = 0; i < ladder.levelCount(); i++) {
-            sum = sum.add(ladder.priceAt(i).multiply(BigDecimal.valueOf(lotSize)));
+            sum = sum.add(ladder.priceAt(i).multiply(step));
         }
         return sum;
     }
@@ -50,10 +53,10 @@ class GridSizingTest {
         BigDecimal budget = new BigDecimal("10000");
 
         GridSizing sizing = GridSizing.fromBudget(
-                budgetCfg("10000", GridConfig.SizingMode.UNIFORM), ladder, 1, budget);
+                budgetCfg("10000", GridConfig.SizingMode.UNIFORM), ladder, STEP_1, budget);
 
         assertThat(sizing.uniform()).isTrue();
-        assertThat(sizing.lotsByLevel()).hasSize(ladder.levelCount());
+        assertThat(sizing.quantityByLevel()).hasSize(ladder.levelCount());
         assertThat(sizing.worstCaseNotional()).isLessThanOrEqualTo(budget);
         assertThat(sizing.budgetLeftover()).isEqualByComparingTo(
                 budget.subtract(sizing.worstCaseNotional()));
@@ -67,43 +70,58 @@ class GridSizingTest {
     @Test
     void uniformIsTheExactInverseOfTheWorstCaseCalculation() {
         GridLadder ladder = ladder();
-        long lotsPerOrder = 7L;
+        BigDecimal quantityPerOrder = new BigDecimal("7");
 
-        GridSizing fixed = GridSizing.fixed(lotsPerOrder, ladder, 1);
+        GridSizing fixed = GridSizing.fixed(quantityPerOrder, ladder, STEP_1);
         GridSizing derived = GridSizing.fromBudget(
-                budgetCfg("1", GridConfig.SizingMode.UNIFORM), ladder, 1, fixed.worstCaseNotional());
+                budgetCfg("1", GridConfig.SizingMode.UNIFORM), ladder, STEP_1, fixed.worstCaseNotional());
 
-        assertThat(derived.lotsAt(0)).isEqualTo(lotsPerOrder);
+        assertThat(derived.quantityAt(0)).isEqualByComparingTo(quantityPerOrder);
         assertThat(derived.worstCaseNotional()).isEqualByComparingTo(fixed.worstCaseNotional());
         assertThat(derived.budgetLeftover()).isEqualByComparingTo(BigDecimal.ZERO);
     }
 
+    /**
+     * Шаг количества огрубляет размер заявки вниз до кратного себе — и никогда вверх,
+     * иначе полный выкуп вышел бы за бюджет.
+     */
     @Test
-    void uniformAccountsForLotSize() {
+    void uniformRoundsSizeDownToTheQuantityStep() {
         GridLadder ladder = ladder();
-        // Бюджета должно хватать на обе лотности: при лоте 10 вся сетка стоит вдесятеро
-        // дороже, и на 10 000 она бы просто не профинансировалась.
         BigDecimal budget = new BigDecimal("200000");
         GridConfig cfg = budgetCfg("200000", GridConfig.SizingMode.UNIFORM);
 
-        GridSizing one = GridSizing.fromBudget(cfg, ladder, 1, budget);
-        GridSizing ten = GridSizing.fromBudget(cfg, ladder, 10, budget);
+        GridSizing one = GridSizing.fromBudget(cfg, ladder, STEP_1, budget);
+        GridSizing ten = GridSizing.fromBudget(cfg, ladder, STEP_10, budget);
 
-        // Лот вдесятеро дороже — лотов помещается вдесятеро меньше.
-        // Вложенное округление вниз здесь тождество: floor(floor(B/D)/10) == floor(B/10D).
-        assertThat(ten.lotsAt(0)).isEqualTo(one.lotsAt(0) / 10);
+        assertThat(ten.quantityAt(0).remainder(STEP_10)).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(ten.quantityAt(0)).isLessThanOrEqualTo(one.quantityAt(0));
         assertThat(ten.worstCaseNotional()).isLessThanOrEqualTo(budget);
         assertThat(one.worstCaseNotional()).isLessThanOrEqualTo(budget);
     }
 
+    /** Дробный шаг: тот же расчёт, только вниз округляем до 0.000001. */
     @Test
-    void refusesWhenLotSizeMakesTheGridUnaffordable() {
+    void uniformSupportsFractionalQuantityStep() {
         GridLadder ladder = ladder();
-        // 10 000 хватает при лоте 1, но не при лоте 10 — и об этом надо сказать.
+        BigDecimal step = new BigDecimal("0.000001");
+        BigDecimal budget = new BigDecimal("1000");
+
+        GridSizing sizing = GridSizing.fromBudget(
+                budgetCfg("1000", GridConfig.SizingMode.UNIFORM), ladder, step, budget);
+
+        assertThat(sizing.quantityAt(0).remainder(step)).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(sizing.worstCaseNotional()).isLessThanOrEqualTo(budget);
+    }
+
+    @Test
+    void refusesWhenTheQuantityStepMakesTheGridUnaffordable() {
+        GridLadder ladder = ladder();
+        // 10 000 хватает при шаге 1, но не при шаге 10 — и об этом надо сказать.
         assertThatThrownBy(() -> GridSizing.fromBudget(
-                budgetCfg("10000", GridConfig.SizingMode.UNIFORM), ladder, 10, new BigDecimal("10000")))
+                budgetCfg("10000", GridConfig.SizingMode.UNIFORM), ladder, STEP_10, new BigDecimal("10000")))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("не хватает даже на один лот");
+                .hasMessageContaining("не хватает даже на минимальный шаг");
     }
 
     // ==============================
@@ -117,24 +135,26 @@ class GridSizingTest {
         int levels = ladder.levelCount();
 
         GridSizing sizing = GridSizing.fromBudget(
-                budgetCfg("10000", GridConfig.SizingMode.PER_LEVEL), ladder, 1, budget);
+                budgetCfg("10000", GridConfig.SizingMode.PER_LEVEL), ladder, STEP_1, budget);
 
         assertThat(sizing.worstCaseNotional()).isLessThanOrEqualTo(budget);
 
         BigDecimal perLevel = budget.divide(BigDecimal.valueOf(levels), 9, java.math.RoundingMode.DOWN);
-        long previous = Long.MAX_VALUE;
+        BigDecimal previous = null;
         for (int i = 0; i < levels; i++) {
-            long lots = sizing.lotsAt(i);
-            assertThat(lots).isPositive();
-            // Цены растут — число лотов не может расти.
-            assertThat(lots).isLessThanOrEqualTo(previous);
-            previous = lots;
+            BigDecimal quantity = sizing.quantityAt(i);
+            assertThat(quantity).isPositive();
+            // Цены растут — количество не может расти.
+            if (previous != null) {
+                assertThat(quantity).isLessThanOrEqualTo(previous);
+            }
+            previous = quantity;
 
-            // Трата на уровне не больше своей доли и не меньше неё на целый лот.
+            // Трата на уровне не больше своей доли и не меньше неё на один шаг.
             BigDecimal cost = ladder.priceAt(i);
-            BigDecimal spent = cost.multiply(BigDecimal.valueOf(lots));
+            BigDecimal spent = cost.multiply(quantity);
             assertThat(spent).isLessThanOrEqualTo(perLevel);
-            assertThat(spent.add(cost)).isGreaterThan(perLevel);
+            assertThat(spent.add(cost.multiply(STEP_1))).isGreaterThan(perLevel);
         }
     }
 
@@ -144,9 +164,9 @@ class GridSizingTest {
         BigDecimal budget = new BigDecimal("10000");
 
         GridSizing uniform = GridSizing.fromBudget(
-                budgetCfg("10000", GridConfig.SizingMode.UNIFORM), ladder, 1, budget);
+                budgetCfg("10000", GridConfig.SizingMode.UNIFORM), ladder, STEP_1, budget);
         GridSizing perLevel = GridSizing.fromBudget(
-                budgetCfg("10000", GridConfig.SizingMode.PER_LEVEL), ladder, 1, budget);
+                budgetCfg("10000", GridConfig.SizingMode.PER_LEVEL), ladder, STEP_1, budget);
 
         assertThat(perLevel.worstCaseNotional())
                 .isGreaterThanOrEqualTo(uniform.worstCaseNotional());
@@ -161,14 +181,15 @@ class GridSizingTest {
         GridLadder ladder = ladder();
         int top = ladder.levelCount();
 
-        // FIXED_LOTS обязан вести себя как раньше: placeMissingBuys умеет поставить
+        // FIXED_QUANTITY обязан вести себя как раньше: placeMissingBuys умеет поставить
         // покупку на верхний уровень, когда цена ушла выше диапазона.
-        assertThat(GridSizing.fixed(3L, ladder, 1).lotsAt(top)).isEqualTo(3L);
+        assertThat(GridSizing.fixed(new BigDecimal("3"), ladder, STEP_1).quantityAt(top))
+                .isEqualByComparingTo("3");
 
         // В бюджетных режимах верхний уровень продажный: встречной продажи для него нет.
         GridSizing budgeted = GridSizing.fromBudget(
-                budgetCfg("10000", GridConfig.SizingMode.UNIFORM), ladder, 1, new BigDecimal("10000"));
-        assertThat(budgeted.lotsAt(top)).isZero();
+                budgetCfg("10000", GridConfig.SizingMode.UNIFORM), ladder, STEP_1, new BigDecimal("10000"));
+        assertThat(budgeted.quantityAt(top)).isEqualByComparingTo(BigDecimal.ZERO);
     }
 
     // ==============================
@@ -176,15 +197,15 @@ class GridSizingTest {
     // ==============================
 
     @Test
-    void uniformRefusesWhenBudgetCannotFundOneLotPerLevel() {
+    void uniformRefusesWhenBudgetCannotFundOneStepPerLevel() {
         GridLadder ladder = ladder();
-        BigDecimal minimum = denominator(ladder, 1);
+        BigDecimal minimum = denominator(ladder, STEP_1);
 
         assertThatThrownBy(() -> GridSizing.fromBudget(
-                budgetCfg("1", GridConfig.SizingMode.UNIFORM), ladder, 1,
+                budgetCfg("1", GridConfig.SizingMode.UNIFORM), ladder, STEP_1,
                 minimum.subtract(BigDecimal.ONE)))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("не хватает даже на один лот")
+                .hasMessageContaining("не хватает даже на минимальный шаг")
                 // Сообщение обязано называть требуемый минимум: иначе пользователь
                 // не знает, до какой суммы поднимать бюджет.
                 .hasMessageContaining(minimum.setScale(2, java.math.RoundingMode.HALF_UP).toPlainString());
@@ -195,9 +216,9 @@ class GridSizingTest {
         GridLadder ladder = ladder();
 
         GridSizing sizing = GridSizing.fromBudget(
-                budgetCfg("1", GridConfig.SizingMode.UNIFORM), ladder, 1, denominator(ladder, 1));
+                budgetCfg("1", GridConfig.SizingMode.UNIFORM), ladder, STEP_1, denominator(ladder, STEP_1));
 
-        assertThat(sizing.lotsAt(0)).isEqualTo(1L);
+        assertThat(sizing.quantityAt(0)).isEqualByComparingTo(BigDecimal.ONE);
     }
 
     @Test
@@ -211,7 +232,7 @@ class GridSizingTest {
                 .subtract(BigDecimal.ONE);
 
         assertThatThrownBy(() -> GridSizing.fromBudget(
-                budgetCfg("1", GridConfig.SizingMode.PER_LEVEL), ladder, 1, budget))
+                budgetCfg("1", GridConfig.SizingMode.PER_LEVEL), ladder, STEP_1, budget))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("уровень " + top);
     }
@@ -222,13 +243,13 @@ class GridSizingTest {
         GridConfig cfg = budgetCfg("1", GridConfig.SizingMode.UNIFORM);
 
         // Достижимо только при реинвестировании прибыли: убыток съел бюджет.
-        assertThatThrownBy(() -> GridSizing.fromBudget(cfg, ladder, 1, BigDecimal.ZERO))
+        assertThatThrownBy(() -> GridSizing.fromBudget(cfg, ladder, STEP_1, BigDecimal.ZERO))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Рабочий бюджет исчерпан");
-        assertThatThrownBy(() -> GridSizing.fromBudget(cfg, ladder, 1, new BigDecimal("-500")))
+        assertThatThrownBy(() -> GridSizing.fromBudget(cfg, ladder, STEP_1, new BigDecimal("-500")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Рабочий бюджет исчерпан");
-        assertThatThrownBy(() -> GridSizing.fromBudget(cfg, ladder, 1, null))
+        assertThatThrownBy(() -> GridSizing.fromBudget(cfg, ladder, STEP_1, null))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Рабочий бюджет исчерпан");
     }

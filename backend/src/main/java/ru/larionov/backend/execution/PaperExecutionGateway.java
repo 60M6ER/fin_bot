@@ -49,7 +49,17 @@ public class PaperExecutionGateway implements ExecutionGateway {
 
     @Override
     public BotOrderView placeLimit(BotExecutionContext ctx, PlaceIntent intent) {
-        riskGuard.check(ctx, intent);
+        // Квантование к шагу биржи делаем и здесь: бумажный прогон обязан упираться
+        // ровно в те же ограничения, иначе он перестаёт что-либо проверять.
+        BigDecimal quantity = ctx.quantizeDown(intent.quantity());
+        if (quantity.signum() <= 0) {
+            throw new RiskRejectedException(
+                    "[paper] Количество %s меньше шага биржи %s — заявка не имеет смысла."
+                            .formatted(plain(intent.quantity()), plain(ctx.quantityStep())));
+        }
+        PlaceIntent tradable = new PlaceIntent(
+                intent.side(), quantity, intent.limitPrice(), intent.gridLevel());
+        riskGuard.check(ctx, tradable);
 
         BotOrderEntity entity = orderRepo.save(BotOrderEntity.builder()
                 .botId(ctx.botId())
@@ -57,20 +67,20 @@ public class PaperExecutionGateway implements ExecutionGateway {
                 .accountId(ctx.accountId().value())
                 .instrumentUid(ctx.instrumentId().primary())
                 .clientOrderId(UUID.randomUUID().toString())
-                .side(intent.side())
+                .side(tradable.side())
                 .status(OrderStatus.NEW)
-                .gridLevel(intent.gridLevel())
-                .requestedLots(intent.lots())
-                .executedLots(0)
-                .limitPrice(intent.limitPrice())
-                .lotSize(ctx.lotSize())
+                .gridLevel(tradable.gridLevel())
+                .requestedQuantity(tradable.quantity())
+                .executedQuantity(BigDecimal.ZERO)
+                .limitPrice(tradable.limitPrice())
+                .exchangeLotSize(ctx.exchangeLotSize())
                 .dryRun(true)
                 .build());
 
         riskGuard.recordPlacement(ctx.botId());
         events.emit(ctx.botId(), BotEventLevel.INFO, BotEventType.ORDER_PLACED,
-                "[paper] %s %d лот(ов) по %s".formatted(
-                        intent.side(), intent.lots(), intent.limitPrice().toPlainString()),
+                "[paper] %s %s по %s".formatted(
+                        tradable.side(), plain(tradable.quantity()), tradable.limitPrice().toPlainString()),
                 Map.of("clientOrderId", entity.getClientOrderId()));
 
         return BotOrderView.of(entity);
@@ -147,15 +157,15 @@ public class PaperExecutionGateway implements ExecutionGateway {
                 continue;
             }
 
-            o.setExecutedLots(o.getRequestedLots());
+            o.setExecutedQuantity(o.getRequestedQuantity());
             o.setAvgPrice(o.getLimitPrice());
             o.setStatus(OrderStatus.FILLED);
             BotOrderEntity saved = orderRepo.save(o);
             accounting.recordOrderState(ctx, saved);
 
             events.emit(ctx.botId(), BotEventLevel.INFO, BotEventType.ORDER_FILLED,
-                    "[paper] %s исполнено %d по %s".formatted(
-                            o.getSide(), o.getRequestedLots(), o.getLimitPrice().toPlainString()),
+                    "[paper] %s исполнено %s по %s".formatted(
+                            o.getSide(), plain(o.getRequestedQuantity()), o.getLimitPrice().toPlainString()),
                     Map.of("clientOrderId", o.getClientOrderId(),
                             "gridLevel", String.valueOf(o.getGridLevel())));
 
@@ -170,14 +180,19 @@ public class PaperExecutionGateway implements ExecutionGateway {
      */
     @Override
     public ReconcileResult reconcile(BotExecutionContext ctx) {
-        BigDecimal position = BigDecimal.valueOf(orderRepo.sumPositionLots(ctx.botId(), true));
+        BigDecimal position = orderRepo.sumPositionQuantity(ctx.botId(), true);
         return new ReconcileResult(
                 openOrders(ctx.botId()),
-                position,
+                position == null ? BigDecimal.ZERO : position,
                 riskGuard.usedCapital(ctx),
                 0,
                 0,
                 BigDecimal.ZERO
         );
+    }
+
+    /** Количество для человека: 0.000001 не должно превратиться в 1E-6. */
+    private static String plain(BigDecimal value) {
+        return value == null ? "—" : value.stripTrailingZeros().toPlainString();
     }
 }

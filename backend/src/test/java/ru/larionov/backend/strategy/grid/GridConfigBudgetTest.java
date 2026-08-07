@@ -28,14 +28,14 @@ class GridConfigBudgetTest {
     // ==============================
 
     @Test
-    void legacyConfigWithoutBudgetKeepsFixedLotsBehaviour() {
+    void legacyConfigWithoutBudgetKeepsFixedQuantityBehaviour() {
         GridConfig cfg = parse("""
-                {"lowerPrice":100,"upperPrice":110,"levels":10,"lotsPerOrder":3}
+                {"lowerPrice":100,"upperPrice":110,"levels":10,"quantityPerOrder":3}
                 """);
 
-        assertThat(cfg.sizingMode()).isEqualTo(GridConfig.SizingMode.FIXED_LOTS);
+        assertThat(cfg.sizingMode()).isEqualTo(GridConfig.SizingMode.FIXED_QUANTITY);
         assertThat(cfg.budgetSized()).isFalse();
-        assertThat(cfg.lotsPerOrder()).isEqualTo(3L);
+        assertThat(cfg.quantityPerOrder()).isEqualByComparingTo("3");
         assertThat(cfg.budget()).isNull();
         // Бюджета нет — рабочего бюджета тоже нет, и это не ошибка.
         assertThat(cfg.workingBudget(() -> new BigDecimal("500"))).isNull();
@@ -49,8 +49,8 @@ class GridConfigBudgetTest {
 
         assertThat(cfg.sizingMode()).isEqualTo(GridConfig.SizingMode.UNIFORM);
         assertThat(cfg.budgetSized()).isTrue();
-        // Намеренно null: любое забытое чтение обязано упасть, а не торговать одним лотом.
-        assertThat(cfg.lotsPerOrder()).isNull();
+        // Намеренно null: любое забытое чтение обязано упасть, а не торговать одной штукой.
+        assertThat(cfg.quantityPerOrder()).isNull();
     }
 
     @Test
@@ -66,11 +66,11 @@ class GridConfigBudgetTest {
     // ==============================
 
     @Test
-    void fixedLotsStillRequiresLotsPerOrder() {
+    void fixedQuantityStillRequiresQuantityPerOrder() {
         assertThatThrownBy(() -> parse("""
                 {"lowerPrice":100,"upperPrice":110,"levels":10}
                 """))
-                .hasMessageContaining("lotsPerOrder обязателен");
+                .hasMessageContaining("quantityPerOrder обязателен");
     }
 
     @Test
@@ -135,7 +135,7 @@ class GridConfigBudgetTest {
     void unknownFieldsAreStillIgnored() {
         // Один и тот же JSON читают и движок, и стратегия.
         assertThatCode(() -> parse("""
-                {"lowerPrice":100,"upperPrice":110,"levels":10,"lotsPerOrder":1,
+                {"lowerPrice":100,"upperPrice":110,"levels":10,"quantityPerOrder":1,
                  "instrumentUid":"uid","maxCapital":5000,"dryRun":true}
                 """)).doesNotThrowAnyException();
     }

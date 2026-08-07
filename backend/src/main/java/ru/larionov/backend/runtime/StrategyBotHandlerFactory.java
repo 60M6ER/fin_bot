@@ -59,7 +59,8 @@ public class StrategyBotHandlerFactory {
         AccountId accountId = exchangeHandler.tradingAccountId();
         InstrumentId instrumentId = new InstrumentId(config.instrumentUid(), null);
 
-        // Лотность и шаг цены нужны стратегии для округления — тянем один раз при старте.
+        // Шаг количества, шаг цены и минимумы биржи нужны и стратегии для округления,
+        // и гейтвею для проверки заявки — тянем один раз при старте.
         TradingConstraints constraints;
         try {
             constraints = exchangeHandler.client().instruments().getConstraints(instrumentId);
@@ -75,9 +76,11 @@ public class StrategyBotHandlerFactory {
                 accountId,
                 instrumentId,
                 config.dryRun(),
-                constraints.lot(),
+                constraints.exchangeLotSize(),
+                constraints.quantityStep(),
+                constraints.minNotional(),
                 config.maxCapital(),
-                config.maxPositionLots(),
+                config.maxPositionQuantity(),
                 config.maxOrdersPerDay(),
                 config.maxOrdersPerMinute()
         );

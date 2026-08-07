@@ -1,0 +1,74 @@
+databaseChangeLog:
+  - changeSet:
+      id: 082-strategy-config-quantity
+      author: boris
+      comment: >
+        Конфигурации ботов тоже считаны в лотах, и переименованием полей тут не обойтись.
+
+        lotsPerOrder: 5 при лотности 10 означало 50 бумаг. Если просто переназвать поле
+        в quantityPerOrder, бот на следующем запуске начал бы торговать 5 бумагами вместо
+        50 — молча и на реальные деньги. Поэтому значения ПЕРЕСЧИТЫВАЮТСЯ, а не переносятся.
+
+        Множитель ищем в порядке убывания достоверности:
+          1) exchange_lot_size последнего ордера бота — лотность, по которой он реально
+             торговал (колонка уже приведена миграцией 700);
+          2) lot из справочника инструментов по паре (биржа, uid);
+          3) единица — для бота, который не сделал ни одной сделки и чей инструмент
+             в справочнике не найден. Тогда пересчитывать нечего и не из чего.
+
+        sizingMode FIXED_LOTS переименован в FIXED_QUANTITY: старое значение
+        не разобралось бы в enum и бот не стартовал бы вовсе.
+
+        Наличие ключа проверяется jsonb_exists(...), а не оператором ?: драйвер PostgreSQL
+        принимает знак вопроса за плейсхолдер параметра и заменяет его на $1 ещё до отправки
+        запроса. Оператор здесь означал бы «syntax error at or near $1» и неподнявшийся бэкенд.
+
+        Отката нет намеренно: восстановить исходные лоты можно только делением на тот же
+        множитель, а он к тому моменту уже не обязан быть прежним. Откатывать эту правку
+        следует восстановлением из бэкапа, снятого перед миграцией 700.
+      changes:
+        - sql:
+            splitStatements: false
+            comment: Пересчёт lotsPerOrder и maxPositionLots в единицы базового актива
+            sql: >
+              UPDATE bot b
+              SET strategy_config =
+                    (b.strategy_config - 'lotsPerOrder' - 'maxPositionLots' - 'sizingMode')
+                    || jsonb_strip_nulls(jsonb_build_object(
+                         'quantityPerOrder',
+                           CASE WHEN jsonb_exists(b.strategy_config, 'lotsPerOrder')
+                                THEN to_jsonb((b.strategy_config ->> 'lotsPerOrder')::numeric * m.multiplier)
+                           END,
+                         'maxPositionQuantity',
+                           CASE WHEN jsonb_exists(b.strategy_config, 'maxPositionLots')
+                                THEN to_jsonb((b.strategy_config ->> 'maxPositionLots')::numeric * m.multiplier)
+                           END,
+                         'sizingMode',
+                           CASE WHEN b.strategy_config ->> 'sizingMode' = 'FIXED_LOTS'
+                                THEN to_jsonb('FIXED_QUANTITY'::text)
+                                WHEN jsonb_exists(b.strategy_config, 'sizingMode')
+                                THEN b.strategy_config -> 'sizingMode'
+                           END
+                       ))
+              FROM (
+                    SELECT bb.id AS bot_id,
+                           COALESCE(
+                             (SELECT o.exchange_lot_size
+                                FROM bot_order o
+                               WHERE o.bot_id = bb.id
+                               ORDER BY o.created_at DESC
+                               LIMIT 1),
+                             (SELECT i.lot::numeric
+                                FROM instrument i
+                                JOIN exchange_connection c ON c.id = bb.exchange_connection_id
+                               WHERE i.exchange = c.exchange
+                                 AND i.instrument_uid = bb.strategy_config ->> 'instrumentUid'
+                               LIMIT 1),
+                             1
+                           ) AS multiplier
+                      FROM bot bb
+                   ) m
+              WHERE m.bot_id = b.id
+                AND (jsonb_exists(b.strategy_config, 'lotsPerOrder')
+                     OR jsonb_exists(b.strategy_config, 'maxPositionLots')
+                     OR jsonb_exists(b.strategy_config, 'sizingMode'))

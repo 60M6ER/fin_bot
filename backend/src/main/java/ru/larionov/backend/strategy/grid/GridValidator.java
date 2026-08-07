@@ -48,10 +48,10 @@ public final class GridValidator {
                                 GridLadder ladder,
                                 BigDecimal priceIncrement,
                                 BigDecimal commissionRate,
-                                int lotSize,
+                                BigDecimal quantityStep,
                                 BigDecimal maxCapital) {
         validate(cfg, GridRange.manual(cfg, null), ladder, priceIncrement,
-                new FeeInfo(commissionRate, commissionRate), lotSize, maxCapital,
+                new FeeInfo(commissionRate, commissionRate), quantityStep, maxCapital,
                 cfg.workingBudget(() -> BigDecimal.ZERO));
     }
 
@@ -66,29 +66,29 @@ public final class GridValidator {
                                 GridLadder ladder,
                                 BigDecimal priceIncrement,
                                 FeeInfo fees,
-                                int lotSize,
+                                BigDecimal quantityStep,
                                 BigDecimal maxCapital) {
-        validate(cfg, GridRange.manual(cfg, null), ladder, priceIncrement, fees, lotSize, maxCapital,
+        validate(cfg, GridRange.manual(cfg, null), ladder, priceIncrement, fees, quantityStep, maxCapital,
                 cfg.workingBudget(() -> BigDecimal.ZERO));
     }
 
     /**
      * Канонический вход: сам считает размер заявки.
      *
-     * @param workingBudget рабочий бюджет бота; игнорируется в режиме FIXED_LOTS
+     * @param workingBudget рабочий бюджет бота; игнорируется в режиме FIXED_QUANTITY
      */
     public static Economics validate(GridConfig cfg,
                                      GridRange range,
                                      GridLadder ladder,
                                      BigDecimal priceIncrement,
                                      FeeInfo fees,
-                                     int lotSize,
+                                     BigDecimal quantityStep,
                                      BigDecimal maxCapital,
                                      BigDecimal workingBudget) {
 
         GridSizing sizing = cfg.budgetSized()
-                ? GridSizing.fromBudget(cfg, ladder, lotSize, workingBudget)
-                : GridSizing.fixed(cfg.lotsPerOrder(), ladder, lotSize);
+                ? GridSizing.fromBudget(cfg, ladder, quantityStep, workingBudget)
+                : GridSizing.fixed(cfg.quantityPerOrder(), ladder, quantityStep);
 
         return check(cfg, range, ladder, priceIncrement, fees, maxCapital, sizing);
     }

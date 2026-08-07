@@ -12,5 +12,12 @@ public record AppSettingsDto(
         String telegramBotUsername,
         boolean telegramActive,
         boolean tradingEnabled,
-        boolean secretsEncrypted
+        boolean secretsEncrypted,
+        /** Валюта сводного баланса: RUB или USD. Только показ. */
+        String displayCurrency,
+        /** Источник курса доллара: CBR или T_INVEST. */
+        String fxSource,
+        /** Текущий курс доллара к рублю; null — недоступен. */
+        java.math.BigDecimal usdRub,
+        java.time.Instant usdRubAsOf
 ) {}

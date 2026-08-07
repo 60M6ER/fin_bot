@@ -61,10 +61,10 @@ class GridStrategyStopRaceTest {
         when(clock.instant()).thenReturn(now);
         when(ctx.clock()).thenReturn(clock);
         when(ctx.gateway()).thenReturn(gateway);
-        when(ctx.constraints()).thenReturn(new TradingConstraints(1, new BigDecimal("0.01"), "rub"));
+        when(ctx.constraints()).thenReturn(TradingConstraints.wholeLots(1, new BigDecimal("0.01"), "rub"));
         when(ctx.execution()).thenReturn(new BotExecutionContext(
                 botId, UUID.randomUUID(), new AccountId("acc"), instrumentId,
-                false, 1, null, null, null, null));
+                false, BigDecimal.ONE, BigDecimal.ONE, null, null, null, null, null));
         when(ctx.exchange()).thenReturn(exchange);
         when(ctx.realizedPnl()).thenReturn(BigDecimal.ZERO);
         when(ctx.loadState(GridStrategyState.class)).thenReturn(Optional.empty());
@@ -145,7 +145,7 @@ class GridStrategyStopRaceTest {
 
     private GridConfig autoConfig() {
         return new GridConfig(
-                null, null, 4, 1L, 4, null, null, null, true,
+                null, null, 4, new BigDecimal("1"), 4, null, null, null, true,
                 true, null, 6, new BigDecimal("2"),
                 new BigDecimal("0.01"), new BigDecimal("0.15"),
                 null, 300, new BigDecimal("0.002"), 1200, 0, null,

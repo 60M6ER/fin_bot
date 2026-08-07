@@ -75,10 +75,10 @@ class GridStrategyLevelReuseTest {
         when(ctx.clock()).thenReturn(clock);
         when(ctx.botId()).thenReturn(botId);
         when(ctx.gateway()).thenReturn(gateway);
-        when(ctx.constraints()).thenReturn(new TradingConstraints(1, new BigDecimal("0.01"), "rub"));
+        when(ctx.constraints()).thenReturn(TradingConstraints.wholeLots(1, new BigDecimal("0.01"), "rub"));
         when(ctx.execution()).thenReturn(new BotExecutionContext(
                 botId, UUID.randomUUID(), new AccountId("acc"), instrumentId,
-                false, 1, null, null, null, null));
+                false, BigDecimal.ONE, BigDecimal.ONE, null, null, null, null, null));
         when(ctx.exchange()).thenReturn(exchange);
         when(ctx.realizedPnl()).thenReturn(BigDecimal.ZERO);
         when(ctx.loadState(GridStrategyState.class)).thenAnswer(__ -> Optional.ofNullable(saved.get()));
@@ -99,7 +99,7 @@ class GridStrategyLevelReuseTest {
         when(gateway.placeLimit(any(), any())).thenAnswer(invocation -> {
             PlaceIntent intent = invocation.getArgument(1);
             BotOrderView order = view(intent.side(), intent.gridLevel(), intent.limitPrice(),
-                    intent.lots(), 0, OrderStatus.NEW);
+                    intent.quantity(), BigDecimal.ZERO, OrderStatus.NEW);
             openOrders.add(order);
             journal.add(order);
             return order;
@@ -169,7 +169,7 @@ class GridStrategyLevelReuseTest {
     private GridStrategy start() {
         GridStrategy strategy = new GridStrategy(new GridConfig(
                 new BigDecimal("50.00"), new BigDecimal("50.50"),
-                5, 2L, 10,
+                5, new BigDecimal("2"), 10,
                 GridConfig.RangeExitAction.STOP_BUYING, null, true));
         strategy.onStart(ctx, reconciled());
         strategy.onReconcile(reconciled());
@@ -184,7 +184,7 @@ class GridStrategyLevelReuseTest {
 
     private BotOrderView filled(BotOrderView order) {
         return view(order.side(), order.gridLevel(), order.limitPrice(),
-                order.requestedLots(), order.requestedLots(), OrderStatus.FILLED, order.id());
+                order.requestedQuantity(), order.requestedQuantity(), OrderStatus.FILLED, order.id());
     }
 
     private BotOrderView openBuyAt(int level) {
@@ -211,15 +211,21 @@ class GridStrategyLevelReuseTest {
 
     private BotOrderView view(OrderSide side, Integer level, BigDecimal price,
                               long requested, long executed, OrderStatus status) {
+        return view(side, level, price, BigDecimal.valueOf(requested), BigDecimal.valueOf(executed),
+                status, UUID.randomUUID());
+    }
+
+    private BotOrderView view(OrderSide side, Integer level, BigDecimal price,
+                              BigDecimal requested, BigDecimal executed, OrderStatus status) {
         return view(side, level, price, requested, executed, status, UUID.randomUUID());
     }
 
     private BotOrderView view(OrderSide side, Integer level, BigDecimal price,
-                              long requested, long executed, OrderStatus status, UUID id) {
+                              BigDecimal requested, BigDecimal executed, OrderStatus status, UUID id) {
         return new BotOrderView(
                 id, id.toString(), "exch-" + id,
                 side, status, level, requested, executed,
-                price, price, null, false, null, null, "rub", 1,
+                price, price, null, false, null, null, "rub", BigDecimal.ONE,
                 false, null, currentTime.get(), currentTime.get());
     }
 

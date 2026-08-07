@@ -10,7 +10,7 @@ class GridLadderTest {
 
     private static GridConfig cfg(String low, String high, int levels) {
         return new GridConfig(new BigDecimal(low), new BigDecimal(high), levels,
-                1L, 10, null, null, true);
+                BigDecimal.ONE, 10, null, null, true);
     }
 
     @Test

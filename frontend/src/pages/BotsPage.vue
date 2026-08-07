@@ -377,8 +377,8 @@
                     </div>
                   </div>
                   <div class="metric-tile">
-                    <div class="metric-label">Открыто лотов</div>
-                    <div class="metric-value mono">{{ accounting.openLots || 0 }}</div>
+                    <div class="metric-label">Открыто</div>
+                    <div class="metric-value mono">{{ formatQuantity(accounting.openQuantity) }}</div>
                   </div>
                   <div class="metric-tile">
                     <div class="metric-label">Средняя входа</div>
@@ -419,7 +419,7 @@
                       <span v-else>—</span>
                     </td>
                     <td class="text-right mono">{{ formatMoney(row.price) }}</td>
-                    <td class="text-right mono">{{ formatLots(row) }}</td>
+                    <td class="text-right mono">{{ formatQuantity(row.quantity) }}</td>
                     <td class="text-right mono">{{ formatMoneyWithCurrency(row.grossAmount, row.currency) }}</td>
                     <td class="text-right mono">
                       {{ formatFeeWithCurrency(row.commission, row.currency) }}
@@ -449,7 +449,7 @@
                   <q-badge v-if="state.dryRun" color="purple" label="бумажный режим" outline class="q-ml-sm" />
                 </div>
                 <div class="row items-center q-gutter-md text-caption">
-                  <div>Позиция: <b class="mono">{{ state.positionLots }}</b> лот(ов)</div>
+                  <div>Позиция: <b class="mono">{{ formatQuantity(state.position) }}</b></div>
                   <div>Занято: <b class="mono">{{ formatMoney(state.reservedByBuyOrders) }}</b></div>
                   <div>
                     Активных: <b class="mono">{{ state.openOrdersCount }}</b>
@@ -700,7 +700,7 @@ const isDirty = computed(() =>
 
 // Что бот делает прямо сейчас: позиция, заявки, очередь событий.
 const state = ref({
-  running: false, dryRun: false, positionLots: 0,
+  running: false, dryRun: false, position: 0,
   reservedByBuyOrders: null, openOrdersCount: 0, queueSize: 0,
   strategySnapshot: null, orders: []
 })
@@ -735,10 +735,9 @@ function emptyAccounting () {
     costBasisOpen: 0,
     realizedPnl: 0,
     paidCommission: 0,
-    openLots: 0,
+    openQuantity: 0,
     averageEntryPrice: null,
     currency: null,
-    openShares: 0,
     lastPrice: null,
     lastPriceAt: null,
     marketValue: null,
@@ -753,10 +752,17 @@ function emptyAccounting () {
   }
 }
 
-function formatLots (row) {
-  if (row?.lots === null || row?.lots === undefined) return '—'
-  const lotSize = row.lotSize && row.lotSize !== 1 ? ` × ${row.lotSize}` : ''
-  return `${row.lots}${lotSize}`
+/**
+ * Количество: до восьми значащих знаков, без группировки.
+ *
+ * Округлять нельзя — 0.000001 BTC превратилось бы в ноль, и экран сообщал бы,
+ * что позиции нет, хотя она есть.
+ */
+function formatQuantity (value) {
+  if (value === null || value === undefined) return '—'
+  const number = Number(value)
+  if (Number.isNaN(number)) return String(value)
+  return number.toLocaleString('ru-RU', { maximumFractionDigits: 8, useGrouping: false })
 }
 
 function eventLevelColor (level) {

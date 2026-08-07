@@ -78,7 +78,7 @@ public class GridStrategy implements Strategy {
     private BigDecimal realizedDownwardLoss = BigDecimal.ZERO;
     private BigDecimal downwardLossBaseline;
     private Instant lastReplacementAt;
-    private BigDecimal reconciledPositionLots;
+    private BigDecimal reconciledPosition;
     private volatile StrategySnapshot snapshot;
 
     /**
@@ -205,7 +205,7 @@ public class GridStrategy implements Strategy {
         // Отказ стартовать — осознанное решение: сетка, не окупающая комиссию,
         // будет исправно терять деньги на каждом обороте.
         this.sizing = GridValidator.validate(cfg, activeRange, ladder, constraints.minPriceIncrement(),
-                fees, constraints.lot(), ctx.execution().maxCapital(), activeBudget).sizing();
+                fees, constraints.quantityStep(), ctx.execution().maxCapital(), activeBudget).sizing();
 
         if (resolution.persist() || restoredStateCleared) {
             persistState();
@@ -314,7 +314,7 @@ public class GridStrategy implements Strategy {
             return new RangeResolution(state.activeRange(), Math.max(1, state.generation()), null, false, state);
         }
 
-        BigDecimal position = initialState == null ? null : initialState.positionLots();
+        BigDecimal position = initialState == null ? null : initialState.position();
         if (position == null) {
             throw new IllegalStateException(
                     "Автодиапазон нельзя создать без стартовой сверки позиции с биржей");
@@ -425,17 +425,18 @@ public class GridStrategy implements Strategy {
             return;
         }
 
-        // Сколько лотов этого уровня уже выставлено на продажу. Считаем именно лоты:
+        // Сколько этого уровня уже выставлено на продажу. Считаем именно количество:
         // проверка «есть ли хоть одна заявка» не давала повторно продать уровень,
-        // на котором лежит несколько лотов, а её отсутствие — наоборот, плодило дубли.
-        long covered = ctx.gateway().openOrders(ctx.botId()).stream()
+        // на котором лежит несколько заявок, а её отсутствие — наоборот, плодило дубли.
+        BigDecimal covered = ctx.gateway().openOrders(ctx.botId()).stream()
                 .filter(o -> o.side() == OrderSide.SELL
                         && o.gridLevel() != null && o.gridLevel() == buyLevel)
-                .mapToLong(BotOrderView::remainingLots)
-                .sum();
+                .map(BotOrderView::remainingQuantity)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        long held = computeHeldLotsByLevel().getOrDefault(buyLevel, 0L);
-        if (held - covered < sizing.lotsAt(buyLevel)) {
+        BigDecimal held = computeHeldQuantityByLevel()
+                .getOrDefault(buyLevel, BigDecimal.ZERO);
+        if (held.subtract(covered).compareTo(sizing.quantityAt(buyLevel)) < 0) {
             return;
         }
 
@@ -562,13 +563,13 @@ public class GridStrategy implements Strategy {
         }
 
         positionMismatched = mismatched;
-        reconciledPositionLots = reconciled.positionLots();
+        reconciledPosition = reconciled.position();
 
         if (!positionMismatched && awaitingUpperReplacement) {
             tryCompleteUpperReplacement();
         }
         if (!positionMismatched && awaitingDownwardReplacement
-                && reconciledPositionLots != null && reconciledPositionLots.signum() == 0) {
+                && reconciledPosition != null && reconciledPosition.signum() == 0) {
             tryCompleteDownwardReplacement();
         }
     }
@@ -605,7 +606,7 @@ public class GridStrategy implements Strategy {
         // висеть несколько, и Map<уровень, заявка> вторую молча затирала: покрытие
         // всегда выглядело как один лот, разница «куплено минус покрыто» не убывала,
         // и каждый проход добавлял ещё одну продажу — до упора в лимит частоты.
-        Map<Integer, Long> openSellLotsByLevel = new HashMap<>();
+        Map<Integer, BigDecimal> openSellQuantityByLevel = new HashMap<>();
         int openOrderCount = 0;
 
         for (BotOrderView o : open) {
@@ -616,15 +617,15 @@ public class GridStrategy implements Strategy {
             if (o.side() == OrderSide.BUY) {
                 openBuys.put(o.gridLevel(), o);
             } else {
-                openSellLotsByLevel.merge(o.gridLevel(), o.remainingLots(), Long::sum);
+                openSellQuantityByLevel.merge(o.gridLevel(), o.remainingQuantity(), BigDecimal::add);
             }
         }
 
-        Map<Integer, Long> heldByLevel = computeHeldLotsByLevel();
+        Map<Integer, BigDecimal> heldByLevel = computeHeldQuantityByLevel();
 
-        openOrderCount += placeMissingSells(openSellLotsByLevel, heldByLevel, openOrderCount);
+        openOrderCount += placeMissingSells(openSellQuantityByLevel, heldByLevel, openOrderCount);
         if (!buyingStopped) {
-            placeMissingBuys(openBuys, openSellLotsByLevel, heldByLevel, openOrderCount);
+            placeMissingBuys(openBuys, openSellQuantityByLevel, heldByLevel, openOrderCount);
         }
     }
 
@@ -643,24 +644,25 @@ public class GridStrategy implements Strategy {
      * она считала занятыми несуществующей позицией: продажу на них запрещал
      * риск-контроль, а покупку — сама эта запись.
      */
-    private Map<Integer, Long> computeHeldLotsByLevel() {
+    private Map<Integer, BigDecimal> computeHeldQuantityByLevel() {
         Instant generationStart = activeRange == null ? null : activeRange.since();
 
-        Map<Integer, Long> held = new HashMap<>();
+        Map<Integer, BigDecimal> held = new HashMap<>();
 
         for (BotOrderView o : ctx.gateway().recentOrders(ctx.botId())) {
-            if (o.gridLevel() == null || o.executedLots() <= 0) {
+            BigDecimal executed = o.executedQuantity();
+            if (o.gridLevel() == null || executed == null || executed.signum() <= 0) {
                 continue;
             }
             if (generationStart != null && o.createdAt() != null
                     && o.createdAt().isBefore(generationStart)) {
                 continue;
             }
-            long delta = o.side() == OrderSide.BUY ? o.executedLots() : -o.executedLots();
-            held.merge(o.gridLevel(), delta, Long::sum);
+            BigDecimal delta = o.side() == OrderSide.BUY ? executed : executed.negate();
+            held.merge(o.gridLevel(), delta, BigDecimal::add);
         }
 
-        held.values().removeIf(v -> v <= 0);
+        held.values().removeIf(v -> v.signum() <= 0);
         return held;
     }
 
@@ -678,16 +680,16 @@ public class GridStrategy implements Strategy {
      * Третий признак существеннее, чем кажется. Купленное на уровне и выставленное
      * на продажу перестаёт быть «свободным» ровно до момента, когда продажа исполнится:
      * до тех пор уровень занят, сколько бы раз цена ни возвращалась к цене покупки.
-     * Иначе откат к цене покупки докупает тот же уровень, лоты подмешиваются
+     * Иначе откат к цене покупки докупает тот же уровень, купленное подмешивается
      * к незакрытому циклу, и вместо одной встречной продажи на уровне копится стопка.
      */
     private boolean levelIsOccupied(int level,
                                     Map<Integer, BotOrderView> openBuys,
-                                    Map<Integer, Long> openSellLotsByLevel,
-                                    Map<Integer, Long> heldByLevel) {
+                                    Map<Integer, BigDecimal> openSellQuantityByLevel,
+                                    Map<Integer, BigDecimal> heldByLevel) {
         return openBuys.containsKey(level)
                 || heldByLevel.containsKey(level)
-                || openSellLotsByLevel.containsKey(level);
+                || openSellQuantityByLevel.containsKey(level);
     }
 
     /**
@@ -699,17 +701,17 @@ public class GridStrategy implements Strategy {
      * с правилом встречной продажи, — из-за чего уровень покупки не считался занятым
      * и выкупался снова и снова.
      */
-    private int placeMissingSells(Map<Integer, Long> openSellLotsByLevel,
-                                  Map<Integer, Long> heldByLevel,
+    private int placeMissingSells(Map<Integer, BigDecimal> openSellQuantityByLevel,
+                                  Map<Integer, BigDecimal> heldByLevel,
                                   int openOrderCount) {
         int placed = 0;
 
-        for (Map.Entry<Integer, Long> entry : heldByLevel.entrySet()) {
+        for (Map.Entry<Integer, BigDecimal> entry : heldByLevel.entrySet()) {
             int buyLevel = entry.getKey();
-            long heldLots = entry.getValue();
+            BigDecimal held = entry.getValue();
 
-            long covered = openSellLotsByLevel.getOrDefault(buyLevel, 0L);
-            if (heldLots - covered < sizing.lotsAt(buyLevel)) {
+            BigDecimal covered = openSellQuantityByLevel.getOrDefault(buyLevel, BigDecimal.ZERO);
+            if (held.subtract(covered).compareTo(sizing.quantityAt(buyLevel)) < 0) {
                 continue;
             }
             // Лимит активных заявок распространяется и на продажи. Раньше он проверялся
@@ -726,7 +728,7 @@ public class GridStrategy implements Strategy {
             if (!place(OrderSide.SELL, price, buyLevel)) {
                 return placed;
             }
-            openSellLotsByLevel.merge(buyLevel, sizing.lotsAt(buyLevel), Long::sum);
+            openSellQuantityByLevel.merge(buyLevel, sizing.quantityAt(buyLevel), BigDecimal::add);
             placed++;
         }
         return placed;
@@ -734,8 +736,8 @@ public class GridStrategy implements Strategy {
 
     /** Покупки на свободных уровнях ниже цены, ближайшие к рынку — первыми. */
     private void placeMissingBuys(Map<Integer, BotOrderView> openBuys,
-                                  Map<Integer, Long> openSellLotsByLevel,
-                                  Map<Integer, Long> heldByLevel,
+                                  Map<Integer, BigDecimal> openSellQuantityByLevel,
+                                  Map<Integer, BigDecimal> heldByLevel,
                                   int activeCount) {
         int startLevel = ladder.highestLevelBelow(lastPrice);
 
@@ -743,7 +745,7 @@ public class GridStrategy implements Strategy {
             if (activeCount >= cfg.maxActiveOrders()) {
                 return;
             }
-            if (levelIsOccupied(level, openBuys, openSellLotsByLevel, heldByLevel)) {
+            if (levelIsOccupied(level, openBuys, openSellQuantityByLevel, heldByLevel)) {
                 continue;
             }
             BigDecimal price = ladder.priceAt(level);
@@ -762,14 +764,14 @@ public class GridStrategy implements Strategy {
      * @return false, если ставить дальше нет смысла (упёрлись в лимит)
      */
     private boolean place(OrderSide side, BigDecimal price, int level) {
-        long lots = sizing.lotsAt(level);
-        if (lots <= 0) {
+        BigDecimal quantity = sizing.quantityAt(level);
+        if (quantity.signum() <= 0) {
             // Уровень не профинансирован бюджетом (в бюджетных режимах так выглядит
             // верхний, продажный уровень). Ноль до PlaceIntent доходить не должен.
             return true;
         }
         try {
-            ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(side, lots, price, level));
+            ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(side, quantity, price, level));
             return true;
         } catch (RiskRejectedException e) {
             // Штатный отказ: лимит сработал так, как задумано.
@@ -923,14 +925,14 @@ public class GridStrategy implements Strategy {
         }
 
         ReconcileResult fresh = reconcileAndCheck();
-        if (positionMismatched || fresh.positionLots() == null) {
+        if (positionMismatched || fresh.position() == null) {
             failLowerReplacement(
                     "Не удалось получить достоверную позицию перед перестановкой вниз");
             return;
         }
 
         try {
-            if (reconciledPositionLots.signum() > 0) {
+            if (reconciledPosition.signum() > 0) {
                 enforceDownwardBudget(bestBid());
                 if (halted) {
                     return;
@@ -954,7 +956,7 @@ public class GridStrategy implements Strategy {
             // когда убыток ликвидации уже зафиксирован. Проверка нужна, чтобы отвергнуть
             // нефинансируемый кандидат ДО распродажи позиции, а не после неё.
             GridValidator.validate(cfg, candidate, candidateLadder, ctx.constraints().minPriceIncrement(),
-                    activeFees, ctx.constraints().lot(), ctx.execution().maxCapital(),
+                    activeFees, ctx.constraints().quantityStep(), ctx.execution().maxCapital(),
                     cfg.workingBudget(ctx::realizedPnl));
         } catch (Exception e) {
             failLowerReplacement("Новый нижний диапазон не прошёл проверку: " + e.getMessage());
@@ -1000,10 +1002,10 @@ public class GridStrategy implements Strategy {
     /** Поддерживает одну агрессивную SELL на фактический остаток позиции. */
     private void manageDownwardLiquidation() {
         if (!awaitingDownwardReplacement || halted || positionMismatched
-                || reconciledPositionLots == null) {
+                || reconciledPosition == null) {
             return;
         }
-        if (reconciledPositionLots.signum() == 0) {
+        if (reconciledPosition.signum() == 0) {
             for (BotOrderView order : ctx.gateway().openOrders(ctx.botId())) {
                 try {
                     ctx.gateway().cancel(ctx.execution(), order.id());
@@ -1016,9 +1018,9 @@ public class GridStrategy implements Strategy {
             }
             return;
         }
-        if (reconciledPositionLots.signum() < 0) {
+        if (reconciledPosition.signum() < 0) {
             stopPermanently("Сверка показала короткую позицию во время ликвидации: "
-                    + reconciledPositionLots.toPlainString());
+                    + reconciledPosition.toPlainString());
             return;
         }
         if (!limitOrdersAvailable) {
@@ -1049,7 +1051,7 @@ public class GridStrategy implements Strategy {
         boolean onlyLiquidation = liquidation != null && open.size() == 1;
         if (onlyLiquidation && liquidation.limitPrice() != null
                 && liquidation.limitPrice().compareTo(bid) <= 0
-                && liquidation.remainingLots() == reconciledPositionLots.longValueExact()) {
+                && liquidation.remainingQuantity().compareTo(reconciledPosition) == 0) {
             return;
         }
 
@@ -1061,8 +1063,8 @@ public class GridStrategy implements Strategy {
             }
         }
         ReconcileResult afterCancel = reconcileAndCheck();
-        if (positionMismatched || afterCancel.positionLots() == null
-                || afterCancel.positionLots().signum() <= 0) {
+        if (positionMismatched || afterCancel.position() == null
+                || afterCancel.position().signum() <= 0) {
             manageDownwardLiquidation();
             return;
         }
@@ -1098,12 +1100,12 @@ public class GridStrategy implements Strategy {
             return;
         }
         try {
-            long lots = afterCancel.positionLots().longValueExact();
+            BigDecimal quantity = afterCancel.position();
             ctx.gateway().placeLimit(ctx.execution(),
-                    new PlaceIntent(OrderSide.SELL, lots, freshBid, null));
+                    new PlaceIntent(OrderSide.SELL, quantity, freshBid, null));
             ctx.event(BotEventType.HOUSEKEEPING,
-                    "Ликвидационная SELL: %d лот(ов) по лучшему биду %s"
-                            .formatted(lots, freshBid.toPlainString()));
+                    "Ликвидационная SELL: %s по лучшему биду %s"
+                            .formatted(plainQuantity(quantity), freshBid.toPlainString()));
         } catch (RiskRejectedException e) {
             ctx.event(BotEventType.RISK_BLOCKED,
                     "Ликвидационная заявка пока запрещена лимитом: " + e.getMessage());
@@ -1123,19 +1125,20 @@ public class GridStrategy implements Strategy {
 
     private BigDecimal projectedDownwardLoss(BigDecimal bid) {
         Inventory inventory = ctx.inventory();
-        long position = reconciledPositionLots == null ? 0 : reconciledPositionLots.longValueExact();
-        if (inventory.openLots() != position) {
-            stopPermanently(("Позиция книги %d лот(ов) не совпадает со сверенной позицией %d. "
+        BigDecimal position = reconciledPosition == null ? BigDecimal.ZERO : reconciledPosition;
+        // compareTo, а не !=: книга и сверка приходят с разной шкалой BigDecimal.
+        if (inventory.openQuantity().compareTo(position) != 0) {
+            stopPermanently(("Позиция книги %s не совпадает со сверенной позицией %s. "
                     + "Автоматически фиксировать убыток нельзя.")
-                    .formatted(inventory.openLots(), position));
+                    .formatted(plainQuantity(inventory.openQuantity()), plainQuantity(position)));
             return cfg.maxRealizedLoss().add(BigDecimal.ONE);
         }
 
         BigDecimal currentLoss = downwardLossBaseline == null
                 ? BigDecimal.ZERO
                 : downwardLossBaseline.subtract(ctx.realizedPnl()).max(BigDecimal.ZERO);
-        BigDecimal gross = bid.multiply(BigDecimal.valueOf(position))
-                .multiply(BigDecimal.valueOf(Math.max(1, ctx.constraints().lot())));
+        // Множителя нет: позиция уже в единицах базового актива, цена — за единицу.
+        BigDecimal gross = bid.multiply(position);
         BigDecimal sellFee = gross.multiply(activeFees.makerSellRate());
         BigDecimal remainingLoss = inventory.costBasisOpen()
                 .subtract(gross).add(sellFee).max(BigDecimal.ZERO);
@@ -1156,7 +1159,7 @@ public class GridStrategy implements Strategy {
 
     private void tryCompleteDownwardReplacement() {
         if (!awaitingDownwardReplacement || positionMismatched || pendingDownwardRange == null
-                || reconciledPositionLots == null || reconciledPositionLots.signum() != 0
+                || reconciledPosition == null || reconciledPosition.signum() != 0
                 || !ctx.gateway().openOrders(ctx.botId()).isEmpty()) {
             return;
         }
@@ -1193,7 +1196,7 @@ public class GridStrategy implements Strategy {
             // меньше. Переиспользование старого размера означало бы перерасход бюджета.
             candidateBudget = cfg.workingBudget(ctx::realizedPnl);
             candidateSizing = GridValidator.validate(cfg, candidate, candidateLadder,
-                    ctx.constraints().minPriceIncrement(), activeFees, ctx.constraints().lot(),
+                    ctx.constraints().minPriceIncrement(), activeFees, ctx.constraints().quantityStep(),
                     ctx.execution().maxCapital(), candidateBudget).sizing();
         } catch (Exception e) {
             failLowerReplacement("Новый нижний диапазон не прошёл проверку: " + e.getMessage());
@@ -1315,7 +1318,7 @@ public class GridStrategy implements Strategy {
 
     private boolean tryCompleteUpperReplacement() {
         if (!awaitingUpperReplacement || halted || positionMismatched || lastPrice == null
-                || reconciledPositionLots == null || reconciledPositionLots.signum() != 0) {
+                || reconciledPosition == null || reconciledPosition.signum() != 0) {
             return false;
         }
 
@@ -1346,7 +1349,7 @@ public class GridStrategy implements Strategy {
 
             // До этой точки старая сетка и её checkpoint не меняются.
             candidateSizing = GridValidator.validate(cfg, candidate, candidateLadder,
-                    ctx.constraints().minPriceIncrement(), activeFees, ctx.constraints().lot(),
+                    ctx.constraints().minPriceIncrement(), activeFees, ctx.constraints().quantityStep(),
                     ctx.execution().maxCapital(), candidateBudget).sizing();
 
         } catch (Exception e) {
@@ -1528,7 +1531,7 @@ public class GridStrategy implements Strategy {
                 buyingStopped, awaitingUpperReplacement || awaitingDownwardReplacement,
                 awaitingDownwardReplacement ? "DOWN" : awaitingUpperReplacement ? "UP" : null,
                 downwardReplacements, realizedDownwardLoss, halted,
-                sizing == null ? null : sizing.lotsByLevel(),
+                sizing == null ? null : sizing.quantityByLevel(),
                 sizing == null ? null : sizing.mode().name(),
                 sizing == null ? null : sizing.workingBudget(),
                 sizing == null ? null : sizing.worstCaseNotional());
@@ -1540,19 +1543,28 @@ public class GridStrategy implements Strategy {
             return "размер заявки не рассчитан";
         }
         return switch (sizing.mode()) {
-            case FIXED_LOTS -> "по %d лот(ов)".formatted(sizing.lotsAt(0));
-            case UNIFORM -> "по %d лот(ов) (бюджет %s, задействовано %s)"
-                    .formatted(sizing.lotsAt(0),
+            case FIXED_QUANTITY -> "по %s".formatted(plainQuantity(sizing.quantityAt(0)));
+            case UNIFORM -> "по %s (бюджет %s, задействовано %s)"
+                    .formatted(plainQuantity(sizing.quantityAt(0)),
                             plain(sizing.workingBudget()), plain(sizing.worstCaseNotional()));
-            case PER_LEVEL -> "по %d..%d лот(ов) по уровням (бюджет %s, задействовано %s, остаток %s)"
-                    .formatted(sizing.minLots(), sizing.maxLots(),
+            case PER_LEVEL -> "по %s..%s по уровням (бюджет %s, задействовано %s, остаток %s)"
+                    .formatted(plainQuantity(sizing.minQuantity()), plainQuantity(sizing.maxQuantity()),
                             plain(sizing.workingBudget()), plain(sizing.worstCaseNotional()),
                             plain(sizing.budgetLeftover()));
         };
     }
 
+    /** Деньги: две значащие после запятой. */
     private static String plain(BigDecimal value) {
         return value == null ? "—" : value.setScale(2, java.math.RoundingMode.HALF_UP).toPlainString();
+    }
+
+    /**
+     * Количество: без округления и без экспоненты. Округлять здесь нельзя —
+     * 0.000001 BTC превратилось бы в ноль, то есть сообщение соврало бы о заявке.
+     */
+    private static String plainQuantity(BigDecimal value) {
+        return value == null ? "—" : value.stripTrailingZeros().toPlainString();
     }
 
     private record RangeResolution(

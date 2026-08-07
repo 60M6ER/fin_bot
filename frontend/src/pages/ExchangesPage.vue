@@ -220,7 +220,12 @@
                     />
                   </div>
 
-                  <div class="col-12 col-md-6">
+                  <!--
+                    Песочница показывается только у бирж, где она есть. У Poloniex её нет,
+                    и переключатель означал бы, что торговля учебная, — тогда как деньги
+                    были бы настоящими.
+                  -->
+                  <div v-if="supportsSandbox" class="col-12 col-md-6">
                     <div class="text-caption text-grey">Песочница</div>
                     <div class="row items-center q-gutter-sm">
                       <q-toggle
@@ -233,6 +238,12 @@
                         :color="sandboxEnabled ? 'primary' : 'grey-6'"
                         outline
                       />
+                    </div>
+                  </div>
+                  <div v-else class="col-12 col-md-6">
+                    <div class="text-caption text-grey">Песочница</div>
+                    <div class="text-caption text-grey-7">
+                      У этой биржи её нет — проверяйте бота в бумажном режиме
                     </div>
                   </div>
 
@@ -306,11 +317,19 @@
               <q-separator />
 
               <q-card-section class="q-gutter-md">
-                <q-banner v-if="!isRuntimeActive(runtime?.state)" dense class="bg-grey-2" rounded>
+                <q-banner
+                  v-if="!isRuntimeActive(runtime?.state) && !accounts.length"
+                  dense
+                  class="bg-grey-2"
+                  rounded
+                >
                   <template #avatar>
                     <q-icon name="info" color="grey-7" />
                   </template>
-                  Список счетов приходит от биржи — запустите подключение, чтобы выбрать счёт.
+                  Список счетов отдаёт только запущенное подключение, а менять параметры
+                  можно только на остановленном. Запустите его, нажмите «Обновить счета»,
+                  затем остановите — список сохранится, и счёт станет доступен для выбора.
+                  Если счёт на бирже единственный, оставьте поле пустым: он подставится сам.
                 </q-banner>
 
                 <q-select
@@ -328,22 +347,30 @@
                   hint="Пусто — подойдёт, только если счёт единственный"
                 />
 
-                <q-input
-                  v-model.number="settingsForm.commissionPercent"
-                  label="Комиссия за сделку, %"
-                  outlined
-                  dense
-                  type="number"
-                  step="0.001"
-                  min="0"
-                  :disable="settingsSaving || detail.active"
-                  hint="Ваш тариф за одну сторону. «Инвестор» ≈ 0.3, «Трейдер» ≈ 0.05"
-                />
+                <template v-if="usesManualFee">
+                  <q-input
+                    v-model.number="settingsForm.commissionPercent"
+                    label="Комиссия за сделку, %"
+                    outlined
+                    dense
+                    type="number"
+                    step="0.001"
+                    min="0"
+                    :disable="settingsSaving || detail.active"
+                    hint="Ваш тариф за одну сторону. «Инвестор» ≈ 0.3, «Трейдер» ≈ 0.05"
+                  />
 
-                <div class="text-caption text-grey">
-                  От этой ставки зависит проверка безубытка шага сетки: бот откажется
-                  стартовать, если шаг не окупает комиссию за оборот
-                  (сейчас {{ roundTripPercent }}%).
+                  <div class="text-caption text-grey">
+                    От этой ставки зависит проверка безубытка шага сетки: бот откажется
+                    стартовать, если шаг не окупает комиссию за оборот
+                    (сейчас {{ roundTripPercent }}%).
+                  </div>
+                </template>
+
+                <div v-else class="text-caption text-grey">
+                  Комиссию эта биржа отдаёт сама: ставка приходит по API и зависит от
+                  вашего оборота за 30 дней. Вводить её вручную незачем — и опасно,
+                  потому что расчёт безубытка всё равно возьмёт биржевую.
                 </div>
 
                 <div v-if="detail.active" class="text-caption text-grey">
@@ -631,16 +658,26 @@ async function loadStreams (id) {
 
 // Счёт и параметры тарифа
 const accounts = ref([])
+/** Подключение, которому принадлежит загруженный список счетов. */
+const accountsOwnerId = ref(null)
 const accountsLoading = ref(false)
 const settingsSaving = ref(false)
 const settingsForm = reactive({ accountId: null, commissionPercent: 0.3 })
 
-const accountOptions = computed(() =>
-  accounts.value.map(a => ({
+const accountOptions = computed(() => {
+  const options = accounts.value.map(a => ({
     value: a.id,
     label: `${a.name || 'Без названия'} · ${a.id}${a.sandbox ? ' (песочница)' : ''}`
   }))
-)
+
+  // Уже сохранённый счёт показываем всегда, даже если список с биржи ещё не
+  // загружен: иначе поле выглядит пустым, и кажется, что счёт слетел.
+  const saved = settingsForm.accountId
+  if (saved && !options.some(o => o.value === saved)) {
+    options.unshift({ value: saved, label: `${saved} · сохранённый` })
+  }
+  return options
+})
 
 const roundTripPercent = computed(() => {
   const rate = Number(settingsForm.commissionPercent) || 0
@@ -650,14 +687,27 @@ const roundTripPercent = computed(() => {
 async function loadAccounts (id) {
   if (!id) {
     accounts.value = []
+    accountsOwnerId.value = null
     return
   }
+
+  // Список принадлежит конкретному подключению. Показать счета одной биржи в форме
+  // другой — худшее, что тут может случиться: выбранный счёт ушёл бы в чужие настройки.
+  if (accountsOwnerId.value !== id) {
+    accounts.value = []
+    accountsOwnerId.value = id
+  }
+
   accountsLoading.value = true
   try {
     accounts.value = await apiClient.get(`/api/v1/exchange-connections/${id}/accounts`)
   } catch (e) {
     // Подключение может быть не активно — это ожидаемо, не шумим.
-    accounts.value = []
+    //
+    // Ранее загруженный список ТОГО ЖЕ подключения сохраняем. Счета отдаёт только
+    // поднятое подключение, а менять его параметры можно только на остановленном:
+    // очистка на ошибке означала бы, что в момент, когда счёт разрешено выбрать,
+    // выбирать уже не из чего.
     console.debug(e)
   } finally {
     accountsLoading.value = false
@@ -868,6 +918,27 @@ const originalName = ref('')
 const nameSaving = ref(false)
 
 // Sandbox toggle
+/**
+ * Есть ли у биржи песочница.
+ *
+ * Список короткий и живёт на фронте намеренно: это свойство биржи, а не подключения,
+ * и запрашивать его отдельным вызовом ради одного переключателя не стоит.
+ */
+const EXCHANGES_WITH_SANDBOX = ['T_INVEST']
+const supportsSandbox = computed(() =>
+  EXCHANGES_WITH_SANDBOX.includes(detail.value?.exchange))
+
+/**
+ * Биржи, где тариф задаёт пользователь, а не отдаёт API.
+ *
+ * У T-Invest ставка не приходит дёшево, поэтому её вводят руками. Криптобиржи
+ * отдают её сами и зависят от оборота, а введённое руками число там просто
+ * игнорируется — показывать поле значило бы обещать влияние, которого нет.
+ */
+const EXCHANGES_WITH_MANUAL_FEE = ['T_INVEST']
+const usesManualFee = computed(() =>
+  EXCHANGES_WITH_MANUAL_FEE.includes(detail.value?.exchange))
+
 const sandboxEnabled = ref(false)
 const sandboxSaving = ref(false)
 

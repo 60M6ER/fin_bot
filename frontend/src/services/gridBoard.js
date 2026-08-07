@@ -33,14 +33,14 @@ export function rowForOrder (order, prices) {
 /**
  * Строки сетки сверху вниз: от верхней цены к нижней.
  *
- * @param snapshot снимок стратегии (ladderPrices, lotsByLevel)
+ * @param snapshot снимок стратегии (ladderPrices, quantityByLevel)
  * @param orders   активные заявки
  */
 export function buildGridRows (snapshot, orders) {
   const prices = (snapshot && snapshot.ladderPrices) || []
   if (!prices.length) return []
 
-  const lots = (snapshot && snapshot.lotsByLevel) || []
+  const quantities = (snapshot && snapshot.quantityByLevel) || []
   const byRow = new Map()
 
   for (const o of orders) {
@@ -55,7 +55,7 @@ export function buildGridRows (snapshot, orders) {
       level,
       price,
       // Верхний уровень продажный: плановых покупок на нём нет, и это не пропуск данных.
-      plannedLots: level < lots.length ? lots[level] : null,
+      plannedQuantity: level < quantities.length ? quantities[level] : null,
       orders: byRow.get(level) || []
     }))
     .reverse()
@@ -68,6 +68,20 @@ export function offGridOrders (snapshot, orders) {
 }
 
 /** Сколько лотов ещё не исполнено. */
-export function remainingLots (order) {
-  return Math.max(0, Number(order.requestedLots || 0) - Number(order.executedLots || 0))
+export function remainingQuantity (order) {
+  return formatQuantity(
+    Math.max(0, Number(order.requestedQuantity || 0) - Number(order.executedQuantity || 0)))
+}
+
+/**
+ * Количество для показа: до восьми значащих знаков и без группировки.
+ *
+ * Округление до двух знаков превратило бы 0.000001 BTC в ноль — то есть экран
+ * сообщал бы, что заявки нет, хотя она есть.
+ */
+export function formatQuantity (value) {
+  if (value === null || value === undefined) return '—'
+  const number = Number(value)
+  if (Number.isNaN(number)) return String(value)
+  return number.toLocaleString('ru-RU', { maximumFractionDigits: 8, useGrouping: false })
 }

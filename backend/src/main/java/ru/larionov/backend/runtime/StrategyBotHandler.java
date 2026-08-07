@@ -109,7 +109,7 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
         // с биржей, и действовать по несверенному состоянию — прямой путь к дублям.
         ReconcileResult reconciled = gateway.reconcile(execContext);
         log.info("Bot {} reconciled on start: openOrders={}, position={}",
-                botId, reconciled.openOrders().size(), reconciled.positionLots());
+                botId, reconciled.openOrders().size(), reconciled.position());
 
         strategy.onStart(context, reconciled);
 
@@ -125,7 +125,7 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
                 "Бот запущен%s. Активных ордеров: %d, позиция: %s".formatted(
                         gateway.isDryRun() ? " в бумажном режиме" : "",
                         reconciled.openOrders().size(),
-                        reconciled.positionLots().toPlainString()),
+                        reconciled.position().stripTrailingZeros().toPlainString()),
                 Map.of());
     }
 

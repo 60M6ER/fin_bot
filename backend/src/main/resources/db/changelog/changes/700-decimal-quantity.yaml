@@ -1,0 +1,120 @@
+databaseChangeLog:
+  - changeSet:
+      id: 080-bot-order-decimal-quantity
+      author: boris
+      comment: >
+        Количество переходит с целых лотов на дробные единицы базового актива.
+        Poloniex торгует долями монеты (BTC_USDT: quantityScale=6), и целочисленный
+        bigint делал ботов на криптобирже невозможными в принципе.
+
+        Пересчёт: quantity = lots × lot_size. Деньги при этом не меняются ни на копейку —
+        amount и gross_amount считались как price × lots × lot_size, что и есть
+        price × quantity, поэтому эти колонки не трогаем. Именно это делает миграцию
+        проверяемой: sum(amount) до и после обязан совпасть.
+      changes:
+        - sql:
+            comment: Пересчёт лотов в единицы базового актива
+            sql: >
+              ALTER TABLE bot_order
+                ALTER COLUMN requested_lots TYPE numeric(28,10) USING requested_lots * lot_size,
+                ALTER COLUMN executed_lots  TYPE numeric(28,10) USING executed_lots  * lot_size,
+                ALTER COLUMN lot_size       TYPE numeric(28,10) USING lot_size::numeric
+
+        - renameColumn:
+            tableName: bot_order
+            oldColumnName: requested_lots
+            newColumnName: requested_quantity
+            columnDataType: "numeric(28,10)"
+        - renameColumn:
+            tableName: bot_order
+            oldColumnName: executed_lots
+            newColumnName: executed_quantity
+            columnDataType: "numeric(28,10)"
+        - renameColumn:
+            tableName: bot_order
+            oldColumnName: lot_size
+            newColumnName: exchange_lot_size
+            columnDataType: "numeric(28,10)"
+
+      rollback:
+        - sql:
+            sql: >
+              ALTER TABLE bot_order
+                ALTER COLUMN requested_quantity TYPE bigint USING round(requested_quantity / exchange_lot_size),
+                ALTER COLUMN executed_quantity  TYPE bigint USING round(executed_quantity  / exchange_lot_size),
+                ALTER COLUMN exchange_lot_size  TYPE int     USING round(exchange_lot_size)
+        - renameColumn:
+            tableName: bot_order
+            oldColumnName: requested_quantity
+            newColumnName: requested_lots
+            columnDataType: bigint
+        - renameColumn:
+            tableName: bot_order
+            oldColumnName: executed_quantity
+            newColumnName: executed_lots
+            columnDataType: bigint
+        - renameColumn:
+            tableName: bot_order
+            oldColumnName: exchange_lot_size
+            newColumnName: lot_size
+            columnDataType: int
+
+  - changeSet:
+      id: 081-money-ledger-decimal-quantity
+      author: boris
+      comment: >
+        То же для денежной книги. executed_lots_cum входит в уникальный ключ
+        uq_money_ledger_order_type_cum, который защищает от дубля, когда один и тот же
+        cumulative fill принесли одновременно стрим и REST-сверка. Переход на numeric
+        защиту сохраняет: PostgreSQL сравнивает и хэширует numeric без учёта хвостовых
+        нулей, поэтому 1 и 1.0000000000 остаются одним значением ключа.
+
+        exchange_lot_size остаётся в схеме, хотя в расчётах больше не участвует:
+        по нему видно, из какой лотности выросла историческая строка.
+      changes:
+        - sql:
+            comment: Пересчёт лотов книги в единицы базового актива
+            sql: >
+              ALTER TABLE money_ledger
+                ALTER COLUMN lots              TYPE numeric(28,10) USING lots * lot_size,
+                ALTER COLUMN executed_lots_cum TYPE numeric(28,10) USING executed_lots_cum * lot_size,
+                ALTER COLUMN lot_size          TYPE numeric(28,10) USING lot_size::numeric
+
+        - renameColumn:
+            tableName: money_ledger
+            oldColumnName: lots
+            newColumnName: quantity
+            columnDataType: "numeric(28,10)"
+        - renameColumn:
+            tableName: money_ledger
+            oldColumnName: executed_lots_cum
+            newColumnName: executed_quantity_cum
+            columnDataType: "numeric(28,10)"
+        - renameColumn:
+            tableName: money_ledger
+            oldColumnName: lot_size
+            newColumnName: exchange_lot_size
+            columnDataType: "numeric(28,10)"
+
+      rollback:
+        - sql:
+            sql: >
+              ALTER TABLE money_ledger
+                ALTER COLUMN quantity              TYPE bigint USING round(quantity / exchange_lot_size),
+                ALTER COLUMN executed_quantity_cum TYPE bigint USING round(executed_quantity_cum / exchange_lot_size),
+                ALTER COLUMN exchange_lot_size     TYPE int     USING round(exchange_lot_size)
+        - renameColumn:
+            tableName: money_ledger
+            oldColumnName: quantity
+            newColumnName: lots
+            columnDataType: bigint
+        - renameColumn:
+            tableName: money_ledger
+            oldColumnName: executed_quantity_cum
+            newColumnName: executed_lots_cum
+            columnDataType: bigint
+        - renameColumn:
+            tableName: money_ledger
+            oldColumnName: exchange_lot_size
+            newColumnName: lot_size
+            columnDataType: int

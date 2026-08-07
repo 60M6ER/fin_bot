@@ -1,5 +1,6 @@
 package ru.larionov.backend.service;
 
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -12,7 +13,6 @@ import ru.larionov.backend.model.ExchangeConnectionActivatedEvent;
 import ru.larionov.backend.enums.ExchangeType;
 import ru.larionov.backend.enums.RuntimeState;
 import ru.larionov.backend.exception.NotFoundException;
-import ru.larionov.backend.exchange.tinvest.TInvestExchangeHandler;
 import ru.larionov.backend.model.RuntimeInfo;
 import ru.larionov.backend.repository.ExchangeConnectionRepository;
 import ru.larionov.backend.telegram.service.TelegramNotifyService;
@@ -21,12 +21,15 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -38,6 +41,7 @@ public class ExchangeRuntimeService {
     private final BotRuntimeService botRuntimeService;
     private final ExchangeConnectionContextResolver contextResolver;
     private final ApplicationEventPublisher events;
+    private final List<ExchangeHandlerFactory> handlerFactories;
 
     private final ConcurrentHashMap<UUID, ExchangeHandler> handlers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, RuntimeInfo> runtime = new ConcurrentHashMap<>();
@@ -59,14 +63,33 @@ public class ExchangeRuntimeService {
         return locks.computeIfAbsent(id, __ -> new Object());
     }
 
+    /**
+     * Реестр фабрик по типу биржи. Собирается Spring'ом из бинов
+     * {@link ExchangeHandlerFactory}, поэтому новая биржа добавляется своей фабрикой,
+     * без правки этого класса.
+     */
+    private Map<ExchangeType, ExchangeHandlerFactory> factoryByExchange;
+
+    @PostConstruct
+    void indexFactories() {
+        factoryByExchange = handlerFactories.stream()
+                .collect(Collectors.toMap(ExchangeHandlerFactory::exchange, f -> f));
+        log.info("Поддерживаемые биржи: {}", factoryByExchange.keySet());
+    }
+
     private ExchangeHandler createHandler(ExchangeConnectionEntity conn) {
-        // Пока поддерживаем только T-Invest. Остальные биржи добавим позже.
-        if (conn.getExchange() != ExchangeType.T_INVEST) {
-            throw new IllegalArgumentException("Unsupported exchange: " + conn.getExchange());
+        ExchangeHandlerFactory factory = factoryByExchange.get(conn.getExchange());
+        if (factory == null) {
+            throw new IllegalArgumentException("Биржа пока не поддерживается: " + conn.getExchange());
         }
         // Секреты расшифровываются здесь, на границе: дальше адаптер работает
         // с готовым контекстом и про шифрование ничего не знает.
-        return new TInvestExchangeHandler(contextResolver.resolve(conn));
+        return factory.create(contextResolver.resolve(conn));
+    }
+
+    /** Биржи, для которых есть адаптер. Список подключений предлагает только их. */
+    public Set<ExchangeType> supportedExchanges() {
+        return factoryByExchange.keySet();
     }
 
     // ==============================
@@ -265,7 +288,7 @@ public class ExchangeRuntimeService {
     }
 
     private static boolean isSandbox(ExchangeHandler handler) {
-        return handler instanceof TInvestExchangeHandler t && t.context().sandboxEnabled();
+        return handler.sandbox();
     }
 
     public boolean isRunning(UUID id) {

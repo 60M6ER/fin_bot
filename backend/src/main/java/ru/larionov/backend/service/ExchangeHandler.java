@@ -17,6 +17,15 @@ public interface ExchangeHandler extends AutoCloseable {
 
     ExchangeClient client();
 
+    /**
+     * Работает ли подключение в песочнице.
+     *
+     * В интерфейсе, а не через instanceof на конкретный адаптер: синхронизация
+     * справочника предпочитает боевое подключение песочному, и это решение не должно
+     * знать, какие адаптеры вообще существуют. Биржи без песочницы отвечают false.
+     */
+    default boolean sandbox() { return false; }
+
     /** Счёт, однозначно подтверждённый health-check подключения. */
     AccountId tradingAccountId();
 

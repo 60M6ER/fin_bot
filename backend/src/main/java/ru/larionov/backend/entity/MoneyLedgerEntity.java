@@ -6,6 +6,7 @@ import ru.larionov.backend.enums.LedgerEntryType;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -19,7 +20,7 @@ import java.util.UUID;
         name = "money_ledger",
         uniqueConstraints = @UniqueConstraint(
                 name = "uq_money_ledger_order_type_cum",
-                columnNames = {"order_id", "entry_type", "executed_lots_cum"}
+                columnNames = {"order_id", "entry_type", "executed_quantity_cum"}
         )
 )
 public class MoneyLedgerEntity {
@@ -55,11 +56,19 @@ public class MoneyLedgerEntity {
     @Column(name = "grid_level")
     private Integer gridLevel;
 
-    @Column(name = "lots")
-    private Long lots;
+    /** Количество в ЕДИНИЦАХ БАЗОВОГО АКТИВА. Деньги строки = price × quantity. */
+    @Column(name = "quantity", precision = 28, scale = 10)
+    private BigDecimal quantity;
 
-    @Column(name = "lot_size", nullable = false)
-    private int lotSize;
+    /**
+     * Заявочная единица биржи, действовавшая на момент записи.
+     *
+     * В расчётах БОЛЬШЕ НЕ УЧАСТВУЕТ: с количеством в единицах базового актива
+     * сумма считается как price × quantity, без множителей. Оставлена как след для
+     * разбора инцидентов — по ней видно, из какой лотности выросла строка.
+     */
+    @Column(name = "exchange_lot_size", nullable = false, precision = 28, scale = 10)
+    private BigDecimal exchangeLotSize;
 
     @Column(name = "price", precision = 24, scale = 9)
     private BigDecimal price;
@@ -76,8 +85,15 @@ public class MoneyLedgerEntity {
     @Column(name = "amount", precision = 24, scale = 9)
     private BigDecimal amount;
 
-    @Column(name = "executed_lots_cum")
-    private Long executedLotsCum;
+    /**
+     * Накопленное исполнение ордера на момент строки — часть уникального ключа.
+     *
+     * PostgreSQL сравнивает numeric без учёта хвостовых нулей, поэтому 1 и 1.0000000000
+     * для уникального ключа одно и то же значение, и защита от дубля между стримом
+     * и сверкой переживает переход на дробное количество.
+     */
+    @Column(name = "executed_quantity_cum", precision = 28, scale = 10)
+    private BigDecimal executedQuantityCum;
 
     @Column(name = "currency", length = 16)
     private String currency;
@@ -93,8 +109,8 @@ public class MoneyLedgerEntity {
         if (ts == null) {
             ts = Instant.now();
         }
-        if (lotSize <= 0) {
-            lotSize = 1;
+        if (exchangeLotSize == null || exchangeLotSize.signum() <= 0) {
+            exchangeLotSize = BigDecimal.ONE;
         }
         if (commission == null) {
             commission = BigDecimal.ZERO;
@@ -102,5 +118,16 @@ public class MoneyLedgerEntity {
         if (amount == null) {
             amount = BigDecimal.ZERO;
         }
+        // Единая шкала количеств: уникальный ключ и сравнения не должны зависеть
+        // от того, с каким масштабом BigDecimal пришёл от вызывающего кода.
+        quantity = scale(quantity);
+        executedQuantityCum = scale(executedQuantityCum);
+        exchangeLotSize = scale(exchangeLotSize);
+    }
+
+    private static BigDecimal scale(BigDecimal value) {
+        return value == null
+                ? null
+                : value.setScale(BotOrderEntity.QUANTITY_SCALE, RoundingMode.HALF_UP);
     }
 }
