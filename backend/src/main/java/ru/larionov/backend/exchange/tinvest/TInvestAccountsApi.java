@@ -94,6 +94,16 @@ public class TInvestAccountsApi implements AccountsApi {
         return Optional.empty();
     }
 
+    /**
+     * Денежная ли это «позиция» портфеля.
+     *
+     * Валюта и драгметаллы у брокера лежат в портфеле наравне с бумагами, но деньгами
+     * от этого быть не перестают: их уже посчитал денежный баланс счёта.
+     */
+    private static boolean isMoney(String instrumentType) {
+        return "currency".equalsIgnoreCase(instrumentType);
+    }
+
     private static boolean sameInstrument(InstrumentId a, InstrumentId b) {
         if (a == null || b == null) return false;
         if (a.uid() != null && b.uid() != null && !a.uid().isBlank() && !b.uid().isBlank()) {
@@ -145,6 +155,15 @@ public class TInvestAccountsApi implements AccountsApi {
 
         // Реальные позиции
         for (PortfolioPosition p : response.getPositionsList()) {
+            if (isMoney(p.getInstrumentType())) {
+                // Деньги приходят ДВАЖДЫ: денежным балансом из GetPositions и заодно
+                // позицией портфеля из GetPortfolio. Пока баланс подключения считался
+                // по одним свободным деньгам, второй экземпляр никого не смущал —
+                // его просто не складывали. Теперь складывают, и 09.08.2026 счёт на
+                // 14 475 ₽ показался как 28 094 ₽: ровно на «Валюту и металлы» больше.
+                // Деньги остаются за балансами, портфель отвечает за товар.
+                continue;
+            }
             InstrumentId instrumentId = new InstrumentId(
                     nullIfBlank(p.getInstrumentUid()),
                     p.getFigi()

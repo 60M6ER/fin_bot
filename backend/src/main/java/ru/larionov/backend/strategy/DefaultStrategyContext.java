@@ -120,6 +120,11 @@ public class DefaultStrategyContext implements StrategyContext {
     }
 
     @Override
+    public BigDecimal sweepUntradableRemainders() {
+        return accounting.sweepUntradableRemainders(execution);
+    }
+
+    @Override
     public BigDecimal realizedPnl() {
         return accounting.summary(botId, execution.dryRun()).realizedPnl();
     }

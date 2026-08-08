@@ -167,6 +167,36 @@ class ExchangeBalanceServiceTest {
         assertThat(wallet.total()).isEqualByComparingTo("534.60");
     }
 
+    /**
+     * Деньги не должны попасть в баланс дважды.
+     *
+     * У брокера валюта лежит в портфеле наравне с бумагами, и 09.08.2026 счёт на
+     * 14 475 ₽ показался как 28 094 ₽ — ровно на «Валюту и металлы» больше. Адаптер
+     * теперь такие позиции отбрасывает: деньги остаются за балансами, портфель
+     * отвечает за товар. Проверяем итог целиком, числами того самого счёта.
+     */
+    @Test
+    void moneyIsNotCountedTwiceWhenItAlsoAppearsAsAPortfolioPosition() {
+        when(accountCash.totalByCurrency(connectionId)).thenReturn(Map.of(
+                "RUB", new BigDecimal("13561.66"),
+                "USD", new BigDecimal("0.7")));
+        // Из портфеля приходят ТОЛЬКО бумаги: валютные позиции отсеял адаптер.
+        when(accountCash.positions(connectionId)).thenReturn(List.of(
+                new Position(new InstrumentId("uid-mvid", null), new BigDecimal("7"),
+                        new BigDecimal("48.20"), new BigDecimal("48.25"), null),
+                new Position(new InstrumentId("uid-rnft", null), new BigDecimal("6"),
+                        new BigDecimal("86.00"), new BigDecimal("86.40"), null)));
+        when(instruments.list(any())).thenReturn(List.of());
+        when(fx.rate("USD", "RUB")).thenReturn(Optional.of(
+                new FxRate("USD", "RUB", new BigDecimal("82.20"), "CBR", Instant.now())));
+
+        var wallet = service.balance(connectionId, "RUB");
+
+        // 13561.66 + 57.54 долларами + 337.75 MVID + 518.40 RNFT
+        assertThat(wallet.total()).isEqualByComparingTo("14475.35");
+        assertThat(wallet.incomplete()).isFalse();
+    }
+
     /** Другая РАСЧЁТНАЯ валюта переводится курсом: биржевой пары для неё нет. */
     @Test
     void anotherCashCurrencyGoesThroughTheFxRate() {

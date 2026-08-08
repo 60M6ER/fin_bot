@@ -265,6 +265,7 @@ public class GridStrategy implements Strategy {
                                 sizingSummary(),
                                 fees.makerRoundTripRate().multiply(BigDecimal.valueOf(100)).toPlainString()));
 
+        sweepHistoricalDust();
         seedTradingStatus();
         seedLastPriceOnStart();
     }
@@ -581,6 +582,28 @@ public class GridStrategy implements Strategy {
             return BigDecimal.ZERO;
         }
         return quantity;
+    }
+
+    /**
+     * Разовый ремонт на старте: пыль копилась с первого дня, а учёт её появился позже.
+     *
+     * Осевшие хвосты никуда не делись — они лежат недоеденными остатками партий в
+     * книге, вместе со своей себестоимостью. Проход переводит их в корзину задним
+     * числом; он идемпотентен, поэтому повторный запуск бота ничего не удваивает.
+     *
+     * Сбой здесь не повод не стартовать: пыль подождёт следующего запуска, а до тех
+     * пор её соберёт обычный проход по мере закрытия циклов.
+     */
+    private void sweepHistoricalDust() {
+        try {
+            BigDecimal swept = ctx.sweepUntradableRemainders();
+            if (swept != null && swept.signum() > 0) {
+                ctx.event(BotEventType.HOUSEKEEPING,
+                        "Собрана ранее осевшая пыль: %s".formatted(plainQuantity(swept)));
+            }
+        } catch (Exception e) {
+            ctx.error("Не удалось собрать ранее осевшую пыль", e);
+        }
     }
 
     /**

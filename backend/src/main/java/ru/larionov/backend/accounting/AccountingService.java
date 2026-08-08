@@ -208,6 +208,51 @@ public class AccountingService {
         return result;
     }
 
+    /**
+     * Разовый ремонт: собирает пыль, осевшую ДО появления её учёта.
+     *
+     * Хвосты копились с первого дня работы бота, но записей о них в книге нет —
+     * они так и лежат недоеденными остатками партий. Проход находит их и переводит
+     * в корзину задним числом, со своей себестоимостью: она всё это время хранилась
+     * в самих партиях, восстанавливать её не из чего не приходится.
+     *
+     * Критерий намеренно строже боевого: только остаток МЕЛЬЧЕ ШАГА КОЛИЧЕСТВА,
+     * без учёта минимальной суммы заявки. Такой остаток невозможно продать ни при
+     * каких условиях, а вот остаток дешевле минимальной суммы вполне может быть
+     * живой частью незакрытого цикла — и на старте отличить одно от другого нечем.
+     *
+     * Идемпотентен: собранное изымается из партий, и второй проход не находит ничего.
+     *
+     * @return сколько всего переведено в пыль
+     */
+    @Transactional
+    public BigDecimal sweepUntradableRemainders(BotExecutionContext ctx) {
+        BigDecimal step = ctx.quantityStep();
+        if (step == null || step.signum() <= 0) {
+            return BigDecimal.ZERO;
+        }
+        List<MoneyLedgerEntity> rows =
+                ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(ctx.botId(), ctx.dryRun());
+
+        // По уровню целиком, а не по каждой партии: несколько крошек одного уровня
+        // вместе вполне могут составить продаваемое количество, и тогда это не пыль.
+        Map<Integer, BigDecimal> remainderByLevel = new HashMap<>();
+        for (OpenParcel parcel : rebuildOpenParcels(rows)) {
+            remainderByLevel.merge(parcel.gridLevel(), nvl(parcel.quantity()), BigDecimal::add);
+        }
+
+        BigDecimal swept = BigDecimal.ZERO;
+        for (Map.Entry<Integer, BigDecimal> entry : remainderByLevel.entrySet()) {
+            BigDecimal remainder = entry.getValue();
+            if (entry.getKey() == null || remainder.signum() <= 0 || remainder.compareTo(step) >= 0) {
+                continue;
+            }
+            recordDust(ctx, entry.getKey(), remainder);
+            swept = swept.add(remainder);
+        }
+        return swept;
+    }
+
     /** Сколько пыли накоплено и во сколько она обошлась. */
     @Transactional
     public DustBucket dust(UUID botId, boolean dryRun) {

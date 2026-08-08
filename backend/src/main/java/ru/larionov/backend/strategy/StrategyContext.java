@@ -85,6 +85,14 @@ public interface StrategyContext {
      */
     void recordDust(Integer gridLevel, BigDecimal quantity);
 
+    /**
+     * Разовый ремонт на старте: собирает пыль, осевшую до появления её учёта.
+     * Идемпотентен, поэтому вызывается при каждом запуске без опаски.
+     *
+     * @return сколько всего переведено в пыль
+     */
+    BigDecimal sweepUntradableRemainders();
+
     BigDecimal realizedPnl();
 
     /**

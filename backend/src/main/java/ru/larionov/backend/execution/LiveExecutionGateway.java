@@ -157,9 +157,13 @@ public class LiveExecutionGateway implements ExecutionGateway {
                             .formatted(plain(intent.quantity()), plain(ctx.quantityStep())));
         }
 
+        // Назначение переносим явно: без него округлённая до шага заявка на пыль
+        // или ликвидацию молча превращалась бы в сеточную и попадала под все проверки,
+        // из которых её только что вывели.
         PlaceIntent tradable = quantity.compareTo(intent.quantity()) == 0
                 ? intent
-                : new PlaceIntent(intent.side(), quantity, intent.limitPrice(), intent.gridLevel());
+                : new PlaceIntent(intent.side(), quantity, intent.limitPrice(),
+                        intent.gridLevel(), intent.purpose());
 
         BigDecimal minNotional = ctx.minNotional();
         if (minNotional != null && tradable.notional().compareTo(minNotional) < 0) {

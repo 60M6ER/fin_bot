@@ -15,6 +15,7 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Objects;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -59,9 +60,46 @@ public class RiskGuard {
 
         checkOrdersPerMinute(ctx);
         checkOrdersPerDay(ctx);
+        checkLevelNotTaken(ctx, intent);
         checkNoShort(ctx, intent);
         checkPosition(ctx, intent);
         checkCapital(ctx, intent);
+    }
+
+    /**
+     * На одном уровне сетки не может висеть двух одинаковых заявок.
+     *
+     * Это инвариант, а не настройка: уровень — это одна цена и один незакрытый цикл,
+     * и вторая заявка на нём удваивает вложенные деньги, а встречная продажа потом
+     * закрывает только половину.
+     *
+     * Проверка живёт здесь по той же причине, что и запрет шорта: она обязана пережить
+     * ЛЮБУЮ ошибку стратегии. 09.08.2026 бот на SOL/USDT выставил на нулевом уровне
+     * две покупки подряд — стратегия сочла уровень свободным дважды, и остановить её
+     * было нечему. Что именно скрыло первую заявку от второго прохода, по журналу
+     * восстановить не удалось, поэтому дубль сделан структурно невозможным и громким:
+     * причина всплывёт в отказе, а не в деньгах.
+     */
+    private void checkLevelNotTaken(BotExecutionContext ctx, PlaceIntent intent) {
+        if (intent.gridLevel() == null || intent.side() != OrderSide.BUY) {
+            // Только покупки. Заявка вне сетки (ликвидация, продажа пыли) уровня не
+            // имеет вовсе, а ПРОДАЖ на одном уровне законно бывает несколько: уровень
+            // мог набираться частями, и каждая закрывается своей встречной заявкой.
+            // Запрет на них означал бы, что вторая часть уровня не продастся никогда.
+            return;
+        }
+        for (BotOrderEntity o : orderRepo.findAllByBotIdAndStatusIn(ctx.botId(), OPEN_STATUSES)) {
+            if (o.isDryRun() != ctx.dryRun()
+                    || o.getSide() != intent.side()
+                    || !Objects.equals(o.getGridLevel(), intent.gridLevel())) {
+                continue;
+            }
+            throw new RiskRejectedException(
+                    ("На уровне %d уже висит покупка (%s, осталось %s). Вторая удвоила бы "
+                            + "вложенное в уровень, а встречная продажа закрыла бы половину.")
+                            .formatted(intent.gridLevel(), o.getStatus(),
+                                    plain(o.remainingQuantity())));
+        }
     }
 
     /**

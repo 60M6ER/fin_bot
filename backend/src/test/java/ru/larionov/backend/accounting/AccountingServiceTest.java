@@ -376,6 +376,88 @@ class AccountingServiceTest {
                 .allSatisfy(row -> assertThat(row.getCurrency()).isEqualTo("USDT"));
     }
 
+    /**
+     * Пыль уходит из позиции вместе со своей себестоимостью, а не «примерно».
+     *
+     * Себестоимость берётся из той партии, из которой хвост и остался: у каждого
+     * своя цена, и усреднять их с живой позицией нельзя.
+     */
+    @Test
+    void dustLeavesTheInventoryWithItsOwnCost() {
+        BotOrderEntity buy = saveOrder(OrderSide.BUY, 6, "100", "1.00");
+        accounting.recordOrderState(ctx, buy);
+        // Куплено 10 штук по 100 плюс рубль комиссии: 1001 за партию, 100.1 за штуку.
+
+        accounting.recordDust(ctx, 6, new BigDecimal("2"));
+
+        assertThat(accounting.dust(botId, false).quantity()).isEqualByComparingTo("2");
+        assertThat(accounting.dust(botId, false).costBasis()).isEqualByComparingTo("200.20");
+        var summary = accounting.summary(botId, false);
+        assertThat(summary.openQuantity())
+                .as("изъятое из партий больше не торгуемая позиция")
+                .isEqualByComparingTo("8");
+        assertThat(summary.costBasisOpen()).isEqualByComparingTo("800.80");
+        assertThat(accounting.dustByLevel(botId, false)).containsEntry(6, new BigDecimal("2.0000000000"));
+    }
+
+    /** Продажа пыли расходует корзину, а не партии сетки: её товар давно из них изъят. */
+    @Test
+    void sellingDustConsumesTheBucketRatherThanTheGridParcels() {
+        BotOrderEntity buy = saveOrder(OrderSide.BUY, 6, "100", "1.00");
+        accounting.recordOrderState(ctx, buy);
+        accounting.recordDust(ctx, 6, new BigDecimal("2"));
+
+        BotOrderEntity dustSale = orderRepo.save(order(OrderSide.SELL, null, "110", "0.20")
+                .purpose(ru.larionov.backend.enums.OrderPurpose.DUST)
+                .requestedQuantity(new BigDecimal("2"))
+                .executedQuantity(new BigDecimal("2"))
+                .exchangeLotSize(BigDecimal.ONE)
+                .build());
+        accounting.recordOrderState(ctx, dustSale);
+
+        assertThat(accounting.dust(botId, false).isEmpty())
+                .as("корзина опустела")
+                .isTrue();
+        assertThat(accounting.summary(botId, false).openQuantity())
+                .as("партии сетки продажа пыли не трогает")
+                .isEqualByComparingTo("8");
+    }
+
+    /**
+     * Разовый ремонт: пыль, осевшая до появления её учёта, собирается задним числом.
+     * Повторный проход не должен найти ничего — иначе корзина росла бы на пустом месте.
+     */
+    @Test
+    void historicalRemaindersAreSweptOnceAndOnlyOnce() {
+        BotExecutionContext fractional = new BotExecutionContext(
+                botId, ctx.connectionId(), new AccountId("acc-1"), new InstrumentId("uid-1", null),
+                false, BigDecimal.ONE, new BigDecimal("0.001"), null, null, null, null, null);
+
+        BotOrderEntity buy = orderRepo.save(order(OrderSide.BUY, 3, "50", "0.10")
+                .requestedQuantity(new BigDecimal("1.000"))
+                .executedQuantity(new BigDecimal("1.0004"))
+                .exchangeLotSize(BigDecimal.ONE)
+                .build());
+        accounting.recordOrderState(fractional, buy);
+
+        BotOrderEntity sell = orderRepo.save(order(OrderSide.SELL, 3, "51", "0.10")
+                .requestedQuantity(new BigDecimal("1.000"))
+                .executedQuantity(new BigDecimal("1.000"))
+                .exchangeLotSize(BigDecimal.ONE)
+                .build());
+        accounting.recordOrderState(fractional, sell);
+
+        assertThat(accounting.sweepUntradableRemainders(fractional))
+                .as("хвост 0.0004 мельче шага 0.001 — продать его нельзя никогда")
+                .isEqualByComparingTo("0.0004");
+        assertThat(accounting.dust(botId, false).quantity()).isEqualByComparingTo("0.0004");
+
+        assertThat(accounting.sweepUntradableRemainders(fractional))
+                .as("второй проход не должен найти ничего")
+                .isEqualByComparingTo("0");
+        assertThat(accounting.dust(botId, false).quantity()).isEqualByComparingTo("0.0004");
+    }
+
     private BotOrderEntity saveOrder(OrderSide side, int level, String price, String fee) {
         return orderRepo.save(order(side, level, price, fee)
                 .requestedQuantity(LOT)
@@ -384,7 +466,7 @@ class AccountingServiceTest {
                 .build());
     }
 
-    private BotOrderEntity.BotOrderEntityBuilder order(OrderSide side, int level, String price, String fee) {
+    private BotOrderEntity.BotOrderEntityBuilder order(OrderSide side, Integer level, String price, String fee) {
         return BotOrderEntity.builder()
                 .botId(botId)
                 .connectionId(ctx.connectionId())
