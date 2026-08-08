@@ -224,7 +224,7 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
                     // Кэш наполняем ЗДЕСЬ, а не в BotEventLoop: цикл склеивает цены
                     // (priceQueued) и полностью отбрасывает их после close(), а рыночная
                     // оценка должна видеть каждый тик и жить после остановки бота.
-                    lastPriceCache.put(botId, mid, book.ts());
+                    lastPriceCache.put(botId, instrument.primary(), mid, book.ts());
                     loop.submitPrice(new LastPrice(book.instrumentId(),
                             new ru.larionov.backend.exchange.api.model.market.Price(mid, null), book.ts()));
                 });
@@ -232,7 +232,7 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
                 md.subscribeLastPrice(instruments, p -> {
                     if (!isOurs(p.instrumentId())) return;
                     if (p.price() != null) {
-                        lastPriceCache.put(botId, p.price().value(), p.ts());
+                        lastPriceCache.put(botId, instrument.primary(), p.price().value(), p.ts());
                     }
                     loop.submitPrice(p);
                 });

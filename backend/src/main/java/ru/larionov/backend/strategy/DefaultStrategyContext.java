@@ -2,6 +2,7 @@ package ru.larionov.backend.strategy;
 
 import lombok.RequiredArgsConstructor;
 import ru.larionov.backend.accounting.AccountingService;
+import ru.larionov.backend.accounting.DustBucket;
 import ru.larionov.backend.accounting.GridGenerationService;
 import ru.larionov.backend.dto.GridGenerationDto;
 import ru.larionov.backend.enums.BotEventLevel;
@@ -54,7 +55,7 @@ public class DefaultStrategyContext implements StrategyContext {
     @Override
     public void observedPrice(BigDecimal price, Instant at) {
         if (price != null) {
-            lastPriceCache.put(botId, price, at);
+            lastPriceCache.put(botId, execution.instrumentId().primary(), price, at);
         }
     }
 
@@ -101,6 +102,21 @@ public class DefaultStrategyContext implements StrategyContext {
     @Override
     public Inventory inventory() {
         return accounting.inventory(botId, execution.dryRun());
+    }
+
+    @Override
+    public DustBucket dust() {
+        return accounting.dust(botId, execution.dryRun());
+    }
+
+    @Override
+    public Map<Integer, BigDecimal> dustByLevel() {
+        return accounting.dustByLevel(botId, execution.dryRun());
+    }
+
+    @Override
+    public void recordDust(Integer gridLevel, BigDecimal quantity) {
+        accounting.recordDust(execution, gridLevel, quantity);
     }
 
     @Override

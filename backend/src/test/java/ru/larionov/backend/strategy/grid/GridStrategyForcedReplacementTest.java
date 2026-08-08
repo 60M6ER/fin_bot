@@ -8,6 +8,7 @@ import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.exchange.api.ExchangeClient;
 import ru.larionov.backend.exchange.api.MarketDataApi;
 import ru.larionov.backend.exchange.api.enums.CandleInterval;
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.model.FeeInfo;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
@@ -289,7 +290,7 @@ class GridStrategyForcedReplacementTest {
         return new BotOrderView(
                 UUID.randomUUID(), UUID.randomUUID().toString(), null,
                 intent.side(), ru.larionov.backend.exchange.api.enums.OrderStatus.NEW,
-                intent.gridLevel(), intent.quantity(), BigDecimal.ZERO,
+                intent.gridLevel(), intent.purpose(), intent.quantity(), BigDecimal.ZERO,
                 intent.limitPrice(), null, null, false, null, null, "rub", BigDecimal.ONE,
                 false, null, currentTime.get(), currentTime.get());
     }

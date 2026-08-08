@@ -6,7 +6,6 @@ import ru.larionov.backend.dto.BotAccountingDto;
 import ru.larionov.backend.dto.ConnectionValuationDto;
 import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.runtime.LastPriceCache;
-import ru.larionov.backend.service.AccountCashService;
 import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
@@ -34,7 +33,7 @@ class ConnectionValuationTest {
 
     private AccountingService accounting;
     private LastPriceCache prices;
-    private AccountCashService accountCash;
+    private ExchangeBalanceService exchangeBalance;
     private ru.larionov.backend.money.FxRateService fx;
     private BotValuationService service;
 
@@ -42,7 +41,7 @@ class ConnectionValuationTest {
     void setUp() {
         accounting = mock(AccountingService.class);
         prices = new LastPriceCache();
-        accountCash = mock(AccountCashService.class);
+        exchangeBalance = mock(ExchangeBalanceService.class);
         fx = mock(ru.larionov.backend.money.FxRateService.class);
         // Курс по умолчанию известен: рубли к рублям — единица.
         when(fx.rate(any(), any())).thenAnswer(i -> {
@@ -55,10 +54,29 @@ class ConnectionValuationTest {
         });
         var appSettings = mock(ru.larionov.backend.service.AppSettingService.class);
         when(appSettings.get(any(), any())).thenAnswer(i -> i.getArgument(1));
-        service = new BotValuationService(accounting, prices, accountCash,
+        service = new BotValuationService(accounting, prices, exchangeBalance,
+                mock(ru.larionov.backend.repository.ExchangeConnectionRepository.class),
+                mock(ru.larionov.backend.service.ExchangeConnectionContextResolver.class),
                 mock(ru.larionov.backend.repository.InstrumentRepository.class), new ObjectMapper(),
                 fx, appSettings);
-        when(accountCash.dominantCurrency(any())).thenReturn("RUB");
+        wallet("0", "0");
+    }
+
+    /**
+     * Кошелёк подключения: деньги расчётной валюты и всё прочее по рынку.
+     *
+     * @param cash   деньги, включая заблокированные заявками
+     * @param assets стоимость позиций и монет, пересчитанная в расчётную валюту
+     */
+    private void wallet(String cash, String assets) {
+        when(exchangeBalance.balance(any(), any())).thenReturn(new ExchangeBalanceService.ExchangeBalance(
+                "RUB", new BigDecimal(cash), new BigDecimal(assets),
+                new BigDecimal(cash).add(new BigDecimal(assets)), java.util.Map.of(), false));
+    }
+
+    private void walletUnknown() {
+        when(exchangeBalance.balance(any(), any()))
+                .thenReturn(ExchangeBalanceService.ExchangeBalance.unknown("RUB"));
     }
 
     private BotEntity bot(UUID id, String budget, String policy) {
@@ -105,12 +123,13 @@ class ConnectionValuationTest {
         UUID b = UUID.randomUUID();
         // Бот A вложил 4000 в позицию, которая сейчас стоит 4500.
         when(accounting.summaryFast(eq(a), anyBoolean())).thenReturn(stateOf("4000", 100, "0"));
-        prices.put(a, new BigDecimal("45"), Instant.now());
+        prices.put(a, "uid", new BigDecimal("45"), Instant.now());
         // Бот B ничего не купил.
         when(accounting.summaryFast(eq(b), anyBoolean())).thenReturn(stateOf("0", 0, "0"));
 
-        // Свободных денег на счёте: 10000 (бот A) − 4000 (вложено) + 5000 (бот B) + 3000 ничьих.
-        when(accountCash.available(any(), eq("RUB"))).thenReturn(new BigDecimal("14000"));
+        // На счёте: 14000 деньгами (10000 бота A минус вложенные 4000, 5000 бота B
+        // и 3000 ничьих) плюс позиция бота A, которая сейчас стоит 4500.
+        wallet("14000", "4500");
 
         ConnectionValuationDto v = service.connectionValuation(
                 connectionId, List.of(bot(a, "10000", "WITHDRAW"), bot(b, "5000", "WITHDRAW")));
@@ -121,11 +140,11 @@ class ConnectionValuationTest {
         assertThat(v.allocatedBudget()).isEqualByComparingTo("15000");
         // A: 10000 + 500 нереализованного, B: ровно свой бюджет.
         assertThat(v.botsBalance()).isEqualByComparingTo("15500");
-        // Свободные деньги ботов: (10000−4000) + (5000−0) = 11000. Ничьих осталось 3000.
+        // Ничейное = сколько стоит счёт минус то, что боты считают своим.
         assertThat(v.unallocatedCash()).isEqualByComparingTo("3000");
         assertThat(v.total()).isEqualByComparingTo("18500");
 
-        // Сходимость: то же самое = свободные деньги счёта + рыночная стоимость позиций.
+        // Сходимость: то же самое = деньги счёта + рыночная стоимость позиций.
         assertThat(v.total()).isEqualByComparingTo(new BigDecimal("14000").add(new BigDecimal("4500")));
     }
 
@@ -133,7 +152,7 @@ class ConnectionValuationTest {
     void negativeRemainderMeansMoreWasAllocatedThanTheAccountHolds() {
         UUID a = UUID.randomUUID();
         when(accounting.summaryFast(eq(a), anyBoolean())).thenReturn(stateOf("0", 0, "0"));
-        when(accountCash.available(any(), eq("RUB"))).thenReturn(new BigDecimal("3000"));
+        wallet("3000", "0");
 
         ConnectionValuationDto v = service.connectionValuation(
                 connectionId, List.of(bot(a, "10000", "WITHDRAW")));
@@ -148,7 +167,7 @@ class ConnectionValuationTest {
         UUID legacy = UUID.randomUUID();
         when(accounting.summaryFast(eq(a), anyBoolean())).thenReturn(stateOf("0", 0, "0"));
         when(accounting.summaryFast(eq(legacy), anyBoolean())).thenReturn(stateOf("0", 0, "250"));
-        when(accountCash.available(any(), eq("RUB"))).thenReturn(new BigDecimal("12000"));
+        wallet("12000", "0");
 
         ConnectionValuationDto v = service.connectionValuation(
                 connectionId, List.of(bot(a, "10000", "WITHDRAW"), legacyBot(legacy)));
@@ -165,7 +184,7 @@ class ConnectionValuationTest {
     void withoutAccountCashTheAggregateStaysHonestlyEmpty() {
         UUID a = UUID.randomUUID();
         when(accounting.summaryFast(eq(a), anyBoolean())).thenReturn(stateOf("0", 0, "0"));
-        when(accountCash.available(any(), any())).thenReturn(null);
+        walletUnknown();
 
         ConnectionValuationDto v = service.connectionValuation(
                 connectionId, List.of(bot(a, "10000", "WITHDRAW")));
@@ -178,7 +197,7 @@ class ConnectionValuationTest {
 
     @Test
     void connectionWithoutBotsReportsOnlyItsCash() {
-        when(accountCash.available(any(), eq("RUB"))).thenReturn(new BigDecimal("7000"));
+        wallet("7000", "0");
 
         ConnectionValuationDto v = service.connectionValuation(connectionId, List.of());
 

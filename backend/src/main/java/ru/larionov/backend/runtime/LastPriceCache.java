@@ -37,18 +37,45 @@ public class LastPriceCache {
     private final ConcurrentHashMap<UUID, CachedPrice> byBot = new ConcurrentHashMap<>();
 
     /**
+     * Та же цена, но под ключом инструмента.
+     *
+     * Второй индекс нужен оценке кошелька: чтобы перевести остаток монеты в расчётную
+     * валюту, нужна цена ПАРЫ, а не цена «того, на что смотрит бот номер такой-то».
+     * Ключ по боту для этого не годится — спрашивающий не знает, какой бот торгует
+     * DOGE_USDT и торгует ли его вообще.
+     *
+     * Здесь затирание друг друга (два бота на одной паре с разным priceSource)
+     * безвредно ровно потому, чем оно вредно для {@link #byBot}: оценке кошелька
+     * нужна рыночная цена пары, а не та, по которой принимает решения конкретный бот.
+     */
+    private final ConcurrentHashMap<String, CachedPrice> byInstrument = new ConcurrentHashMap<>();
+
+    /**
      * Пишется из потоков gRPC-стрима, читается из потоков HTTP.
      * Последняя запись побеждает: для «текущей цены» это и есть нужная семантика.
      */
-    public void put(UUID botId, BigDecimal price, Instant exchangeTs) {
-        if (botId == null || price == null) {
+    public void put(UUID botId, String instrumentKey, BigDecimal price, Instant exchangeTs) {
+        if (price == null) {
             return;
         }
-        byBot.put(botId, new CachedPrice(price, exchangeTs, Instant.now()));
+        CachedPrice cached = new CachedPrice(price, exchangeTs, Instant.now());
+        if (botId != null) {
+            byBot.put(botId, cached);
+        }
+        if (instrumentKey != null && !instrumentKey.isBlank()) {
+            byInstrument.put(instrumentKey, cached);
+        }
     }
 
     public Optional<CachedPrice> get(UUID botId) {
         return botId == null ? Optional.empty() : Optional.ofNullable(byBot.get(botId));
+    }
+
+    /** Цена инструмента, кем бы из ботов она ни была получена. */
+    public Optional<CachedPrice> getByInstrument(String instrumentKey) {
+        return instrumentKey == null || instrumentKey.isBlank()
+                ? Optional.empty()
+                : Optional.ofNullable(byInstrument.get(instrumentKey));
     }
 
     /**

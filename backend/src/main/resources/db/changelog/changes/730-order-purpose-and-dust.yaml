@@ -1,0 +1,34 @@
+databaseChangeLog:
+  - changeSet:
+      id: 730-order-purpose-and-dust
+      author: boris
+      comment: >
+        Назначение ордера становится явным полем вместо косвенного признака
+        «продажа без уровня сетки значит ликвидация». Договорённость держалась,
+        пока не-сеточная заявка была ровно одна; с появлением продажи пыли
+        ликвидация нашла бы чужую заявку и сняла её, приняв за свою.
+
+        Та же колонка в денежной книге: продажа пыли расходует не партии сетки,
+        а корзину пыли, и без признака перестроение инвентаря списало бы её
+        стоимость не оттуда.
+
+        Существующие строки — сеточные: другого назначения до сих пор не было
+        (ликвидационные заявки живут считанные минуты и к моменту миграции
+        исполнены или сняты).
+      changes:
+        - addColumn:
+            tableName: bot_order
+            columns:
+              - column:
+                  name: purpose
+                  type: varchar(16)
+                  defaultValue: GRID
+                  constraints: { nullable: false }
+        - addColumn:
+            tableName: money_ledger
+            columns:
+              - column:
+                  name: purpose
+                  type: varchar(16)
+                  defaultValue: GRID
+                  constraints: { nullable: false }

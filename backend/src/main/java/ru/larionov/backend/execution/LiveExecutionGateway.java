@@ -89,6 +89,7 @@ public class LiveExecutionGateway implements ExecutionGateway {
                 .side(tradable.side())
                 .status(OrderStatus.PENDING)
                 .gridLevel(tradable.gridLevel())
+                .purpose(tradable.purpose())
                 .requestedQuantity(tradable.quantity())
                 .executedQuantity(BigDecimal.ZERO)
                 .limitPrice(tradable.limitPrice())

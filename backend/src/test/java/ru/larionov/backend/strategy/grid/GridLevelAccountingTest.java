@@ -1,6 +1,7 @@
 package ru.larionov.backend.strategy.grid;
 
 import org.junit.jupiter.api.Test;
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 import ru.larionov.backend.execution.BotOrderView;
@@ -29,7 +30,7 @@ class GridLevelAccountingTest {
     private static BotOrderView order(OrderSide side, int gridLevel, OrderStatus status, long executed) {
         return new BotOrderView(
                 UUID.randomUUID(), UUID.randomUUID().toString(), "exch-1",
-                side, status, gridLevel,
+                side, status, gridLevel, OrderPurpose.GRID,
                 BigDecimal.ONE, BigDecimal.valueOf(executed),
                 new BigDecimal("22.1"), new BigDecimal("22.1"),
                 null, false, null, null, null, BigDecimal.ONE,

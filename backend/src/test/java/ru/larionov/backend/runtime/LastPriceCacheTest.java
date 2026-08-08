@@ -26,9 +26,9 @@ class LastPriceCacheTest {
         UUID second = UUID.randomUUID();
         Instant ts = Instant.parse("2026-01-08T12:00:00Z");
 
-        cache.put(first, new BigDecimal("100"), ts);
-        cache.put(first, new BigDecimal("101"), ts.plusSeconds(1));
-        cache.put(second, new BigDecimal("55"), ts);
+        cache.put(first, "uid", new BigDecimal("100"), ts);
+        cache.put(first, "uid", new BigDecimal("101"), ts.plusSeconds(1));
+        cache.put(second, "uid", new BigDecimal("55"), ts);
 
         // Ключ по боту, а не по инструменту: два бота на одном инструменте могут
         // смотреть на разные цены (стакан против цены сделки).
@@ -41,7 +41,7 @@ class LastPriceCacheTest {
         UUID botId = UUID.randomUUID();
         Instant before = Instant.now();
 
-        cache.put(botId, new BigDecimal("100"), Instant.parse("2020-01-01T00:00:00Z"));
+        cache.put(botId, "uid", new BigDecimal("100"), Instant.parse("2020-01-01T00:00:00Z"));
 
         var cached = cache.get(botId).orElseThrow();
         // exchangeTs может быть каким угодно, свежесть считается по receivedAt.
@@ -52,7 +52,7 @@ class LastPriceCacheTest {
     @Test
     void ignoresNullPrice() {
         UUID botId = UUID.randomUUID();
-        cache.put(botId, null, Instant.now());
+        cache.put(botId, "uid", null, Instant.now());
         assertThat(cache.get(botId)).isEmpty();
     }
 
@@ -60,8 +60,8 @@ class LastPriceCacheTest {
     void evictsOnlyTheRequestedBot() {
         UUID kept = UUID.randomUUID();
         UUID removed = UUID.randomUUID();
-        cache.put(kept, new BigDecimal("1"), null);
-        cache.put(removed, new BigDecimal("2"), null);
+        cache.put(kept, "uid", new BigDecimal("1"), null);
+        cache.put(removed, "uid", new BigDecimal("2"), null);
 
         cache.evict(removed);
 
@@ -82,7 +82,7 @@ class LastPriceCacheTest {
                 try {
                     start.await();
                     for (int i = 0; i < 500; i++) {
-                        cache.put(botId, BigDecimal.valueOf(seed * 1000L + i), Instant.now());
+                        cache.put(botId, "uid", BigDecimal.valueOf(seed * 1000L + i), Instant.now());
                         cache.get(botId);
                     }
                 } catch (InterruptedException e) {

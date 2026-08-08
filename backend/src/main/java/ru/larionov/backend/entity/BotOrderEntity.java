@@ -2,6 +2,7 @@ package ru.larionov.backend.entity;
 
 import jakarta.persistence.*;
 import lombok.*;
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 
@@ -60,6 +61,12 @@ public class BotOrderEntity {
     /** Уровень сетки, к которому относится ордер. Для не-сеточных стратегий null. */
     @Column(name = "grid_level")
     private Integer gridLevel;
+
+    /** Зачем выставлен ордер: сетка, ликвидация или продажа пыли. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "purpose", nullable = false, length = 16)
+    @Builder.Default
+    private OrderPurpose purpose = OrderPurpose.GRID;
 
     /**
      * Количество в ЕДИНИЦАХ БАЗОВОГО АКТИВА (штуки бумаг, монеты), а не в лотах биржи.

@@ -13,6 +13,7 @@ import ru.larionov.backend.exchange.api.model.instrument.TradingConstraints;
 import ru.larionov.backend.exchange.api.model.market.Candle;
 import ru.larionov.backend.exchange.api.model.market.LastPrice;
 import ru.larionov.backend.exchange.api.model.market.Price;
+import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.larionov.backend.execution.BotExecutionContext;
 import ru.larionov.backend.execution.BotOrderView;
 import ru.larionov.backend.execution.ExecutionGateway;
@@ -219,6 +220,113 @@ class GridStrategyAutoRangeTest {
         verify(marketData, times(1)).getLastPrice(instrumentId);
     }
 
+    /**
+     * Инцидент 08.08.2026, SOL/USDT на Poloniex.
+     *
+     * Пробой вверх подтверждён, покупки сняты, все продажи исполнились — и бот встал
+     * навсегда. В журнале остались 0.0000031120 монеты: сумма хвостов, которые
+     * оставляет каждый закрытый цикл там, где комиссия удерживается монетой. Шагу
+     * биржи эта сумма уже кратна, но стоит четверть тысячной доллара — заявку на неё
+     * не примут никогда. Прежнее условие требовало РОВНО нуля, и бот ждал вечно:
+     * ни заявок, ни событий, тупик выглядел как молчание.
+     */
+    @Test
+    void untradableDustDoesNotBlockReplacingRangeUp() {
+        withCryptoQuantityLimits();
+        GridStrategy strategy = new GridStrategy(replaceUpperConfig());
+        strategy.onStart(ctx, reconciled("0"));
+        strategy.onReconcile(reconciled("0.0000031120"));
+
+        strategy.onPrice(lastPrice("111"));
+        currentTime.set(now.plusSeconds(11));
+        strategy.onPrice(lastPrice("111"));
+
+        GridStrategyState state = saved.get();
+        assertThat(state.awaitingUpperReplacement())
+                .as("остаток мельче шага количества продать нечем — ждать его вечно")
+                .isFalse();
+        assertThat(state.generation()).isEqualTo(2);
+        assertThat(state.activeRange().origin()).isEqualTo(GridRange.Origin.ATR_REPLACED_UP);
+    }
+
+    /**
+     * Обратная сторона допуска: остаток, который биржа принять ГОТОВА, — это деньги,
+     * и молча бросать его нельзя. Бот по-прежнему ждёт продажи, но теперь ждёт
+     * громко: заявок на бирже нет, значит исполниться нечему и само не рассосётся.
+     */
+    @Test
+    void sellableRemainderKeepsWaitingButSaysSoOnce() {
+        withCryptoQuantityLimits();
+        GridStrategy strategy = new GridStrategy(replaceUpperConfig());
+        strategy.onStart(ctx, reconciled("0"));
+        strategy.onReconcile(reconciled("0.5"));
+
+        strategy.onPrice(lastPrice("111"));
+        currentTime.set(now.plusSeconds(11));
+        strategy.onPrice(lastPrice("111"));
+        currentTime.set(now.plusSeconds(12));
+        strategy.onPrice(lastPrice("111"));
+
+        assertThat(saved.get().awaitingUpperReplacement())
+                .as("продаваемый остаток бросать нельзя — перестановки не будет")
+                .isTrue();
+        verify(ctx, times(1)).event(any(),
+                org.mockito.ArgumentMatchers.contains("заявок на бирже не осталось"));
+    }
+
+    /**
+     * Инцидент 08.08.2026, 20:50: биржа закрылась, стрим сообщил об этом двум ботам
+     * из трёх. Третий события не увидел и до утра ставил заявку каждую минуту, получая
+     * «Instrument is not available for trading» — сотни строк в журнале и ни одной
+     * сделки. Отказ в постановке теперь повод переспросить биржу, а не молча повторять.
+     */
+    @Test
+    void rejectedOrderMakesTheBotAskWhetherTheExchangeClosed() {
+        when(gateway.placeLimit(any(), any())).thenThrow(new IllegalStateException("30079"));
+        when(marketData.getTradingStatus(instrumentId)).thenReturn(
+                new TradingStatusEvent(instrumentId, true, true, "NORMAL_TRADING", now),
+                new TradingStatusEvent(instrumentId, false, false, "NOT_AVAILABLE_FOR_TRADING", now));
+
+        GridStrategy strategy = new GridStrategy(autoConfig());
+        strategy.onStart(ctx, reconciled("0"));
+        strategy.onPrice(lastPrice("100"));
+
+        verify(ctx).event(any(), org.mockito.ArgumentMatchers.contains("Торги закрыты"));
+
+        // И, главное, повторять отвергнутую заявку бот больше не пытается.
+        org.mockito.Mockito.clearInvocations(gateway);
+        strategy.onPrice(lastPrice("100"));
+        verify(gateway, never()).placeLimit(any(), any());
+    }
+
+    /**
+     * Заявка на продажу пыли не должна задерживать перестановку.
+     *
+     * Пыль копится ЧЕРЕЗ поколения диапазона, поэтому её продажа переживает
+     * перестановку и в проверке «наших заявок на бирже не осталось» не участвует.
+     * Иначе мы вернули бы тупик 08.08.2026 — теперь уже с заявкой на бирже.
+     */
+    @Test
+    void dustSaleDoesNotHoldUpTheReplacement() {
+        BotOrderView dustSale = mock(BotOrderView.class);
+        when(dustSale.side()).thenReturn(OrderSide.SELL);
+        when(dustSale.purpose()).thenReturn(ru.larionov.backend.enums.OrderPurpose.DUST);
+        when(gateway.openOrders(botId)).thenReturn(List.of(dustSale));
+
+        GridStrategy strategy = new GridStrategy(replaceUpperConfig());
+        strategy.onStart(ctx, reconciled("0"));
+        strategy.onReconcile(reconciled("0"));
+
+        strategy.onPrice(lastPrice("111"));
+        currentTime.set(now.plusSeconds(11));
+        strategy.onPrice(lastPrice("111"));
+
+        assertThat(saved.get().generation()).isEqualTo(2);
+        assertThat(saved.get().awaitingUpperReplacement()).isFalse();
+        // И сама заявка на пыль при этом не снята: её товар к сетке не относится.
+        verify(gateway, never()).cancel(any(), any());
+    }
+
     @Test
     void watchdogCompletesConfirmationWithoutAnotherPriceEvent() {
         when(gateway.reconcile(any())).thenReturn(reconciled("0"));
@@ -312,6 +420,20 @@ class GridStrategyAutoRangeTest {
         assertThat(saved.get().awaitingUpperReplacement()).isTrue();
         assertThat(strategy.snapshot().orElseThrow().halted()).isTrue();
         verify(ctx, never()).ledgerMarker(any(), any());
+    }
+
+    /**
+     * Криптовые ограничения: монету можно дробить до шести знаков, но заявку дешевле
+     * минимальной суммы биржа не примет. Пыль живёт ровно между этими двумя числами.
+     */
+    private void withCryptoQuantityLimits() {
+        BigDecimal step = new BigDecimal("0.000001");
+        when(ctx.constraints()).thenReturn(new TradingConstraints(
+                BigDecimal.ONE, step, step, null, new BigDecimal("0.01"), "rub"));
+        when(ctx.execution()).thenReturn(new BotExecutionContext(
+                botId, UUID.randomUUID(), new AccountId("acc"), instrumentId,
+                false, BigDecimal.ONE, step, new BigDecimal("0.1"),
+                null, null, null, null));
     }
 
     private GridConfig autoConfig() {

@@ -9,12 +9,14 @@ import ru.larionov.backend.dto.BotAccountingDto;
 import ru.larionov.backend.dto.BotValuationDto;
 import ru.larionov.backend.dto.ConnectionValuationDto;
 import ru.larionov.backend.entity.BotEntity;
+import ru.larionov.backend.exchange.api.model.ExchangeConnectionSettings;
+import ru.larionov.backend.repository.ExchangeConnectionRepository;
 import ru.larionov.backend.repository.InstrumentRepository;
+import ru.larionov.backend.service.ExchangeConnectionContextResolver;
 import ru.larionov.backend.runtime.LastPriceCache;
 import ru.larionov.backend.money.CurrencyCode;
 import ru.larionov.backend.money.FxRate;
 import ru.larionov.backend.money.FxRateService;
-import ru.larionov.backend.service.AccountCashService;
 import ru.larionov.backend.service.AppSettingKeys;
 import ru.larionov.backend.service.AppSettingService;
 import ru.larionov.backend.strategy.BotRuntimeConfig;
@@ -54,7 +56,9 @@ public class BotValuationService {
 
     private final AccountingService accounting;
     private final LastPriceCache lastPriceCache;
-    private final AccountCashService accountCash;
+    private final ExchangeBalanceService exchangeBalance;
+    private final ExchangeConnectionRepository connectionRepo;
+    private final ExchangeConnectionContextResolver settingsResolver;
     private final InstrumentRepository instrumentRepo;
     private final ObjectMapper objectMapper;
     private final FxRateService fx;
@@ -96,31 +100,21 @@ public class BotValuationService {
     public ConnectionValuationDto connectionValuation(UUID connectionId, List<BotEntity> bots) {
         String displayCurrency = displayCurrency();
 
-        if (bots.isEmpty()) {
-            String dominant = accountCash.dominantCurrency(connectionId);
-            BigDecimal cash = accountCash.available(connectionId, dominant);
-            Map<String, BigDecimal> byCurrency = cash == null
-                    ? Map.of()
-                    : Map.of(CurrencyCode.normalize(dominant), cash);
-            return withDisplayTotal(new ConnectionValuationDto(0, 0, null, null, null,
-                    cash, cash, cash, false, dominant,
-                    byCurrency, null, displayCurrency, null, null));
-        }
+        // Расчётная валюта — свойство ПОДКЛЮЧЕНИЯ, а не его ботов. Прежде её выбирали
+        // голосованием ботов, а при их отсутствии — «той, которой больше на счёте»;
+        // на спотовом кошельке с пылью из десятка монет это давало баланс в HTX.
+        ExchangeBalanceService.ExchangeBalance wallet = exchangeBalance.balance(
+                connectionId, configuredBaseCurrency(connectionId));
+        String currency = wallet.baseCurrency();
 
         List<BotValuationDto> valuations = bots.stream().map(this::valuation).toList();
-
-        // Основная валюта подключения — та, в которой считает больше всего его ботов.
-        // Запасной вариант для бота без единой сделки: валюта, которой больше на счёте.
-        String currency = dominantBotCurrency(valuations)
-                .orElseGet(() -> CurrencyCode.normalize(accountCash.dominantCurrency(connectionId)));
 
         BigDecimal allocated = BigDecimal.ZERO;
         BigDecimal balance = BigDecimal.ZERO;
         BigDecimal pnl = BigDecimal.ZERO;
-        BigDecimal botsFreeCash = BigDecimal.ZERO;
         Map<String, BigDecimal> byCurrency = new HashMap<>();
         int valued = 0;
-        boolean incomplete = false;
+        boolean incomplete = wallet.incomplete();
 
         for (BotValuationDto v : valuations) {
             String botCurrency = CurrencyCode.normalize(v.currency());
@@ -145,7 +139,7 @@ public class BotValuationService {
                 incomplete = true;
             }
 
-            // Числовые поля подключения остаются в его основной валюте: смешивать
+            // Числовые поля подключения остаются в его расчётной валюте: смешивать
             // их с чужими нельзя, а пересчитывать здесь — значит протащить курс
             // в места, которые про него знать не должны.
             if (!sameAsMain) {
@@ -153,22 +147,31 @@ public class BotValuationService {
             }
             allocated = allocated.add(v.workingBudget());
             balance = balance.add(v.equity());
-            botsFreeCash = botsFreeCash.add(v.workingBudget().subtract(nvl(v.costBasisOpen())));
             valued++;
         }
 
-        BigDecimal freeCash = accountCash.available(connectionId, currency);
-        // Отрицательный остаток — не ошибка, а перераспределённый бюджет: показываем как есть.
-        BigDecimal unallocated = freeCash == null ? null : freeCash.subtract(botsFreeCash);
-        BigDecimal total = unallocated == null ? null : balance.add(unallocated);
+        /*
+         * Что осталось незанятым = сколько стоит счёт МИНУС то, что боты уже считают
+         * своим (их деньги плюс их позиции по рынку).
+         *
+         * Раньше вычиталось иначе: из СВОБОДНЫХ денег счёта вычитались свободные
+         * деньги ботов. Обе части считались по-разному — счёт не показывал денег
+         * под выставленными заявками, а бот считал их своими свободными, — и разница
+         * дважды теряла одни и те же деньги. 08.08.2026 на Poloniex это дало
+         * «свободно −48.81 USDT» при 118 на счёте и 125 розданных: настоящий минус
+         * был около семи.
+         *
+         * Минус сам по себе — не ошибка расчёта, а розданные бюджеты сверх того,
+         * что есть. Показать его важнее, чем спрятать.
+         */
+        BigDecimal total = wallet.total();
+        BigDecimal unallocated = total == null ? null : total.subtract(balance);
 
-        // Свободные деньги счёта в прочих валютах тоже часть кошелька подключения.
-        for (Map.Entry<String, BigDecimal> cash : accountCash.availableByCurrency(connectionId).entrySet()) {
-            if (CurrencyCode.sameMoney(cash.getKey(), currency)) {
-                continue;
-            }
-            byCurrency.merge(CurrencyCode.normalize(cash.getKey()), cash.getValue(), BigDecimal::add);
-        }
+        // Свободные деньги подключения — та часть счёта, которая всё ещё деньги.
+        BigDecimal freeCash = wallet.cash();
+
+        // Остатки, не покрытые ботами, показываем в валюте счёта: это то же самое
+        // ничейное, что и unallocated, только уже пересчитанное в расчётную валюту.
         if (unallocated != null && currency != null) {
             byCurrency.merge(CurrencyCode.normalize(currency), unallocated, BigDecimal::add);
         }
@@ -179,21 +182,19 @@ public class BotValuationService {
                 byCurrency, null, displayCurrency, null, null));
     }
 
-    /** Валюта, в которой считает наибольшее число ботов подключения. */
-    private Optional<String> dominantBotCurrency(List<BotValuationDto> valuations) {
-        Map<String, Long> counts = new HashMap<>();
-        for (BotValuationDto v : valuations) {
-            String code = CurrencyCode.normalize(v.currency());
-            if (code != null) {
-                counts.merge(code, 1L, Long::sum);
-            }
+    /** Расчётная валюта из настроек подключения; null — не задана, спросим биржу. */
+    private String configuredBaseCurrency(UUID connectionId) {
+        try {
+            return connectionRepo.findById(connectionId)
+                    .map(settingsResolver::parseSettings)
+                    .map(ExchangeConnectionSettings::baseCurrency)
+                    .orElse(null);
+        } catch (Exception e) {
+            log.debug("Не удалось прочитать настройки подключения {}: {}", connectionId, e.getMessage());
+            return null;
         }
-        return counts.entrySet().stream()
-                // При ничьей выбираем детерминированно, иначе основная валюта
-                // подключения прыгала бы от опроса к опросу.
-                .max(Map.Entry.<String, Long>comparingByValue().thenComparing(Map.Entry.comparingByKey()))
-                .map(Map.Entry::getKey);
     }
+
 
     /**
      * Досчитывает сводный итог в валюте показа.

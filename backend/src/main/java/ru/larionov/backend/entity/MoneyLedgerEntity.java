@@ -3,6 +3,7 @@ package ru.larionov.backend.entity;
 import jakarta.persistence.*;
 import lombok.*;
 import ru.larionov.backend.enums.LedgerEntryType;
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 
 import java.math.BigDecimal;
@@ -55,6 +56,15 @@ public class MoneyLedgerEntity {
 
     @Column(name = "grid_level")
     private Integer gridLevel;
+
+    /**
+     * Назначение записи. Продажа пыли расходует не партии сетки, а корзину пыли:
+     * без этого признака перестроение инвентаря списало бы стоимость не оттуда.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "purpose", nullable = false, length = 16)
+    @Builder.Default
+    private OrderPurpose purpose = OrderPurpose.GRID;
 
     /** Количество в ЕДИНИЦАХ БАЗОВОГО АКТИВА. Деньги строки = price × quantity. */
     @Column(name = "quantity", precision = 28, scale = 10)

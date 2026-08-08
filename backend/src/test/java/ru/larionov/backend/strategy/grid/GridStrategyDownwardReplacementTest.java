@@ -9,6 +9,7 @@ import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.exchange.api.ExchangeClient;
 import ru.larionov.backend.exchange.api.MarketDataApi;
 import ru.larionov.backend.exchange.api.enums.CandleInterval;
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 import ru.larionov.backend.exchange.api.model.FeeInfo;
@@ -356,7 +357,7 @@ class GridStrategyDownwardReplacementTest {
         BigDecimal q = BigDecimal.valueOf(quantity);
         return new BotOrderView(
                 UUID.randomUUID(), UUID.randomUUID().toString(), "exch-1",
-                side, OrderStatus.FILLED, gridLevel, q, q,
+                side, OrderStatus.FILLED, gridLevel, OrderPurpose.GRID, q, q,
                 new BigDecimal("100"), new BigDecimal("100"),
                 null, false, null, null, "rub", BigDecimal.ONE,
                 false, null, createdAt, createdAt);
@@ -404,7 +405,7 @@ class GridStrategyDownwardReplacementTest {
     private BotOrderView order(PlaceIntent intent) {
         return new BotOrderView(
                 UUID.randomUUID(), UUID.randomUUID().toString(), null,
-                intent.side(), OrderStatus.NEW, intent.gridLevel(), intent.quantity(), BigDecimal.ZERO,
+                intent.side(), OrderStatus.NEW, intent.gridLevel(), intent.purpose(), intent.quantity(), BigDecimal.ZERO,
                 intent.limitPrice(), null, null, false, null, null, "rub", BigDecimal.ONE,
                 false, null, currentTime.get(), currentTime.get());
     }

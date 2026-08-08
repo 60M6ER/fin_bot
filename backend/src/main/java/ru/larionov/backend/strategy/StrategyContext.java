@@ -3,6 +3,7 @@ package ru.larionov.backend.strategy;
 import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.LedgerEntryType;
+import ru.larionov.backend.accounting.DustBucket;
 import ru.larionov.backend.accounting.Inventory;
 import ru.larionov.backend.dto.GridGenerationDto;
 import ru.larionov.backend.exchange.api.ExchangeClient;
@@ -63,6 +64,26 @@ public interface StrategyContext {
     void observedPrice(BigDecimal price, Instant at);
 
     Inventory inventory();
+
+    /** Накопленная пыль: непродаваемые хвосты закрытых циклов и их себестоимость. */
+    DustBucket dust();
+
+    /**
+     * Сколько с каждого уровня уже переведено в пыль.
+     *
+     * Без этой суммы уровень выглядел бы занятым тем, что с него давно изъято:
+     * заявки в журнале ордеров остаются навсегда, а изъятие повторялось бы
+     * каждый проход, наращивая корзину из воздуха.
+     */
+    java.util.Map<Integer, java.math.BigDecimal> dustByLevel();
+
+    /**
+     * Переводит непродаваемый хвост уровня в корзину пыли.
+     *
+     * Себестоимость берётся из тех же партий, из которых хвост и остался, —
+     * стратегия её не считает и передавать не может.
+     */
+    void recordDust(Integer gridLevel, BigDecimal quantity);
 
     BigDecimal realizedPnl();
 

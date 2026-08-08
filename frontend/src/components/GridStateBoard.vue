@@ -4,10 +4,10 @@
     <div class="grid-state__orders">
       <div class="grid-state__title">
         Активные заявки
-        <q-badge :label="orders.length" color="grey-7" outline class="q-ml-xs" />
+        <q-badge :label="gridOrders.length" color="grey-7" outline class="q-ml-xs" />
       </div>
 
-      <div v-if="!orders.length" class="text-caption text-grey q-mt-sm">
+      <div v-if="!gridOrders.length" class="text-caption text-grey q-mt-sm">
         Заявок на бирже нет
       </div>
 
@@ -89,6 +89,29 @@
         Вне сетки: {{ offGrid.length }} — закрытие позиции по рынку
       </div>
     </div>
+
+    <!--
+      Пыль стоит отдельно от сетки намеренно: она не занимает уровня, переживает
+      перестановку диапазона и продаётся по своей себестоимости, а не по лесенке.
+      В общем столбце заявок она читалась бы как заявка сетки, которой там нет.
+    -->
+    <div v-if="dustOrders.length" class="grid-state__dust">
+      <div class="grid-state__title">Пыль</div>
+
+      <div
+        v-for="o in dustOrders"
+        :key="o.id"
+        class="grid-state__order text-purple-8"
+      >
+        <span class="grid-state__side">▲</span>
+        <span class="grid-state__price mono">{{ formatMoney(o.limitPrice) }}</span>
+        <span class="grid-state__lots mono">{{ remaining(o) }}</span>
+        <q-tooltip anchor="top middle" self="bottom middle">
+          Продажа накопленной пыли · {{ orderStatusLabel(o.status) }}
+          <br>Непродаваемые по отдельности хвосты закрытых циклов, собранные вместе
+        </q-tooltip>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -117,17 +140,22 @@ const remaining = remainingQuantity
 
 /** Дешевле сверху вниз — читается как ценовая шкала. */
 const sortedOrders = computed(() =>
-  [...props.orders].sort((a, b) => Number(b.limitPrice || 0) - Number(a.limitPrice || 0)))
+  [...gridOrders.value].sort((a, b) => Number(b.limitPrice || 0) - Number(a.limitPrice || 0)))
 
-const rows = computed(() => buildGridRows(props.snapshot, props.orders))
+/** Пыль живёт своим столбцом: в сетке ей места нет, и в «вне сетки» она не ошибка. */
+const dustOrders = computed(() => props.orders.filter(o => o.purpose === 'DUST'))
 
-const offGrid = computed(() => offGridOrders(props.snapshot, props.orders))
+const gridOrders = computed(() => props.orders.filter(o => o.purpose !== 'DUST'))
+
+const rows = computed(() => buildGridRows(props.snapshot, gridOrders.value))
+
+const offGrid = computed(() => offGridOrders(props.snapshot, gridOrders.value))
 </script>
 
 <style scoped>
 .grid-state {
   display: grid;
-  grid-template-columns: minmax(150px, 200px) 1fr;
+  grid-template-columns: minmax(150px, 200px) 1fr auto;
   gap: 16px;
 }
 

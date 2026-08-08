@@ -13,6 +13,7 @@ import ru.larionov.backend.entity.MoneyLedgerEntity;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.enums.LedgerEntryType;
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.execution.BotExecutionContext;
 import ru.larionov.backend.repository.BotOrderRepository;
@@ -150,6 +151,97 @@ public class AccountingService {
         return rebuildInventory(ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(botId, dryRun));
     }
 
+    /**
+     * Переводит непродаваемый хвост уровня из партий сетки в корзину пыли.
+     *
+     * Себестоимость не выдумывается: она берётся из тех же партий, из которых хвост
+     * и остался, пропорционально изъятому. Именно поэтому пыль нельзя усреднять
+     * с живой позицией — у каждого хвоста своя цена, и распродать их одной ценой
+     * значило бы соврать о результате того цикла, из которого хвост пришёл.
+     *
+     * @param gridLevel уровень, на котором остался хвост
+     * @param quantity  сколько именно перевести в пыль
+     */
+    @Transactional
+    public void recordDust(BotExecutionContext ctx, Integer gridLevel, BigDecimal quantity) {
+        if (quantity == null || quantity.signum() <= 0) {
+            return;
+        }
+        List<MoneyLedgerEntity> rows =
+                ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(ctx.botId(), ctx.dryRun());
+        BigDecimal cost = consumeCost(rebuildOpenParcels(rows), gridLevel, quantity);
+
+        ledgerRepo.save(MoneyLedgerEntity.builder()
+                .botId(ctx.botId())
+                .dryRun(ctx.dryRun())
+                .entryType(LedgerEntryType.DUST)
+                .affectsCash(false)
+                .purpose(OrderPurpose.DUST)
+                .gridLevel(gridLevel)
+                .quantity(quantity)
+                .price(cost.divide(quantity, 9, RoundingMode.HALF_UP))
+                .grossAmount(cost)
+                .amount(BigDecimal.ZERO)
+                .exchangeLotSize(ctx.exchangeLotSize())
+                .note("Непродаваемый хвост уровня %s: %s по себестоимости %s"
+                        .formatted(gridLevel, quantity.stripTrailingZeros().toPlainString(),
+                                cost.stripTrailingZeros().toPlainString()))
+                .build());
+        publishLedgerChanged(ctx.botId(), ctx.dryRun());
+    }
+
+    /**
+     * Сколько с каждого уровня переведено в пыль за всю жизнь бота.
+     *
+     * Именно за всю жизнь, а не «сколько ещё не продано»: заявки уровня остаются
+     * в журнале ордеров навсегда, и уровневый учёт вычитает отсюда ровно то,
+     * что с него было изъято. Продажа пыли уровня не касается — у неё его нет.
+     */
+    @Transactional(readOnly = true)
+    public Map<Integer, BigDecimal> dustByLevel(UUID botId, boolean dryRun) {
+        Map<Integer, BigDecimal> result = new HashMap<>();
+        for (MoneyLedgerEntity row : ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(botId, dryRun)) {
+            if (row.getEntryType() == LedgerEntryType.DUST && row.getGridLevel() != null) {
+                result.merge(row.getGridLevel(), nvl(row.getQuantity()), BigDecimal::add);
+            }
+        }
+        return result;
+    }
+
+    /** Сколько пыли накоплено и во сколько она обошлась. */
+    @Transactional
+    public DustBucket dust(UUID botId, boolean dryRun) {
+        return rebuildDust(ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(botId, dryRun));
+    }
+
+    /**
+     * Корзина пыли восстанавливается из книги, а не хранится отдельным счётчиком:
+     * второй источник правды о деньгах рано или поздно разойдётся с первым.
+     */
+    private DustBucket rebuildDust(List<MoneyLedgerEntity> rows) {
+        BigDecimal quantity = BigDecimal.ZERO;
+        BigDecimal cost = BigDecimal.ZERO;
+        for (MoneyLedgerEntity row : rows) {
+            if (row.getEntryType() == LedgerEntryType.DUST) {
+                quantity = quantity.add(nvl(row.getQuantity()));
+                cost = cost.add(nvl(row.getGrossAmount()));
+            } else if (row.getEntryType() == LedgerEntryType.TRADE_SELL
+                    && row.getPurpose() == OrderPurpose.DUST) {
+                // Продали пыль: уходит и количество, и пропорциональная ему стоимость.
+                BigDecimal sold = nvl(row.getQuantity()).min(quantity);
+                if (sold.signum() <= 0) {
+                    continue;
+                }
+                BigDecimal part = quantity.signum() == 0
+                        ? BigDecimal.ZERO
+                        : cost.multiply(sold).divide(quantity, 18, RoundingMode.HALF_UP);
+                quantity = quantity.subtract(sold);
+                cost = cost.subtract(part);
+            }
+        }
+        return new DustBucket(quantity, cost);
+    }
+
     @Transactional
     public List<MoneyLedgerDto> ledger(UUID botId, boolean dryRun) {
         repairLedgerRows(botId, dryRun);
@@ -230,6 +322,7 @@ public class AccountingService {
                 .clientOrderId(order.getClientOrderId())
                 .side(order.getSide())
                 .gridLevel(order.getGridLevel())
+                .purpose(order.getPurpose())
                 .quantity(delta)
                 .exchangeLotSize(order.getExchangeLotSize())
                 .price(order.getAvgPrice())
@@ -497,7 +590,14 @@ public class AccountingService {
                         .add(nvl(row.getCommission()))
                         .add(takeCommissionCorrection(row, remainingBuyCorrections, remainingBuyQuantity));
                 parcels.addLast(new OpenParcel(row.getGridLevel(), nvl(row.getQuantity()), cost));
-            } else if (row.getEntryType() == LedgerEntryType.TRADE_SELL) {
+            } else if (row.getEntryType() == LedgerEntryType.DUST) {
+                // Хвост ушёл в корзину пыли: из партий сетки он изымается ровно так же,
+                // как если бы его продали, — вместе со своей долей себестоимости.
+                consumeCost(parcels, row.getGridLevel(), nvl(row.getQuantity()));
+            } else if (row.getEntryType() == LedgerEntryType.TRADE_SELL
+                    && row.getPurpose() != OrderPurpose.DUST) {
+                // Продажа пыли партий сетки не касается: её товар давно из них изъят,
+                // и списывать его отсюда во второй раз значило бы обнулить чужой уровень.
                 consumeCost(parcels, row.getGridLevel(), nvl(row.getQuantity()));
             }
         }

@@ -3,7 +3,9 @@ package ru.larionov.backend.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import ru.larionov.backend.exchange.api.model.account.AccountState;
 import ru.larionov.backend.exchange.api.model.account.MoneyBalance;
+import ru.larionov.backend.exchange.api.model.account.Position;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
 
 import java.math.BigDecimal;
@@ -16,14 +18,17 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 /**
- * Свободные деньги брокерского счёта, с коротким кэшем.
+ * Состояние брокерского счёта, с коротким кэшем.
  *
- * Кэш здесь обязателен, а не приятен: этот баланс читают и предпросмотр сетки
+ * Кэш здесь обязателен, а не приятен: эти данные читают и предпросмотр сетки
  * (срабатывает по debounce на каждую пачку нажатий клавиш), и список подключений
  * (опрашивается фронтендом раз в несколько секунд). Без кэша каждый из них
- * молотил бы gRPC до упора в лимиты брокера.
+ * молотил бы gRPC до упора в лимиты брокера. Кэшируется весь ответ счёта целиком,
+ * а не одни свободные деньги: остальные его части нужны оценке подключения,
+ * и второй поход к бирже за тем же ответом был бы платой ни за что.
  *
  * Ошибки намеренно проглатываются в пустой результат: ни форма настроек, ни список
  * не должны падать из-за того, что баланс временно недоступен.
@@ -41,37 +46,75 @@ public class AccountCashService {
 
     /** Свободные деньги по валютам. Пустая карта — баланс недоступен. */
     public Map<String, BigDecimal> availableByCurrency(UUID connectionId) {
-        if (connectionId == null) {
+        return sum(connectionId, MoneyBalance::available);
+    }
+
+    /**
+     * ВЕСЬ остаток по валютам: свободное плюс заблокированное заявками.
+     *
+     * Разница не косметическая. Деньги под выставленной покупкой биржа показывает
+     * как hold, и для «сколько у меня свободно прямо сейчас» их правильно вычесть,
+     * а для «сколько у меня всего» — нет: заявку можно снять, деньги никуда не делись.
+     * Пока баланс подключения считался по одному лишь available, каждая висящая
+     * покупка выглядела как пропавшие деньги: 08.08.2026 на Poloniex это дало
+     * «свободно в портфеле −48.81 USDT» при реальном минусе около семи.
+     */
+    public Map<String, BigDecimal> totalByCurrency(UUID connectionId) {
+        return sum(connectionId, b -> b.available() == null && b.blocked() == null
+                ? null
+                : nvl(b.available()).add(nvl(b.blocked())));
+    }
+
+    /** Позиции счёта. У спотовых бирж список пуст: там позиции и есть балансы монет. */
+    public List<Position> positions(UUID connectionId) {
+        AccountState state = state(connectionId);
+        return state == null || state.positions() == null ? List.of() : state.positions();
+    }
+
+    private Map<String, BigDecimal> sum(UUID connectionId,
+                                        Function<MoneyBalance, BigDecimal> amount) {
+        AccountState state = state(connectionId);
+        if (state == null || state.balances() == null) {
             return Map.of();
+        }
+        Map<String, BigDecimal> result = new HashMap<>();
+        for (MoneyBalance balance : state.balances()) {
+            BigDecimal value = balance.currency() == null ? null : amount.apply(balance);
+            if (value != null) {
+                result.merge(normalize(balance.currency()), value, BigDecimal::add);
+            }
+        }
+        return result;
+    }
+
+    /** Ответ счёта целиком, из кэша. null — подключение не поднято или биржа молчит. */
+    private AccountState state(UUID connectionId) {
+        if (connectionId == null) {
+            return null;
         }
         Cached cached = byConnection.get(connectionId);
         Instant now = Instant.now();
         if (cached != null && cached.until().isAfter(now)) {
-            return cached.byCurrency();
+            return cached.state();
         }
 
         Optional<ExchangeHandler> handler = exchangeRuntimeService.get(connectionId);
         if (handler.isEmpty()) {
             // Подключение не поднято — спрашивать некого. Отрицательный результат
             // тоже кэшируем, иначе каждый опрос списка будет ходить сюда впустую.
-            byConnection.put(connectionId, new Cached(Map.of(), now.plus(TTL)));
-            return Map.of();
+            byConnection.put(connectionId, new Cached(null, now.plus(TTL)));
+            return null;
         }
 
         try {
             AccountId accountId = handler.get().tradingAccountId();
-            Map<String, BigDecimal> result = new HashMap<>();
-            for (MoneyBalance balance : handler.get().client().accounts().getState(accountId).balances()) {
-                if (balance.currency() != null && balance.available() != null) {
-                    result.merge(normalize(balance.currency()), balance.available(), BigDecimal::add);
-                }
-            }
-            byConnection.put(connectionId, new Cached(Map.copyOf(result), now.plus(TTL)));
-            return result;
+            AccountState state = handler.get().client().accounts().getState(accountId);
+            byConnection.put(connectionId, new Cached(state, now.plus(TTL)));
+            return state;
         } catch (Exception e) {
-            log.debug("Не удалось получить свободные деньги подключения {}: {}", connectionId, e.getMessage());
-            byConnection.put(connectionId, new Cached(Map.of(), now.plus(TTL)));
-            return Map.of();
+            log.debug("Не удалось получить состояние счёта подключения {}: {}", connectionId, e.getMessage());
+            byConnection.put(connectionId, new Cached(null, now.plus(TTL)));
+            return null;
         }
     }
 
@@ -81,6 +124,10 @@ public class AccountCashService {
             return null;
         }
         return availableByCurrency(connectionId).get(normalize(currency));
+    }
+
+    private static BigDecimal nvl(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value;
     }
 
     /**
@@ -141,6 +188,7 @@ public class AccountCashService {
         return currency.toUpperCase(Locale.ROOT);
     }
 
-    private record Cached(Map<String, BigDecimal> byCurrency, Instant until) {
+    /** @param state null — ответа нет; отрицательный результат кэшируется наравне с положительным */
+    private record Cached(AccountState state, Instant until) {
     }
 }

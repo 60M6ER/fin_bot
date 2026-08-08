@@ -4,6 +4,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import ru.larionov.backend.exchange.api.ExchangeClient;
 import ru.larionov.backend.exchange.api.MarketDataApi;
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 import ru.larionov.backend.exchange.api.model.FeeInfo;
@@ -320,7 +321,7 @@ class GridStrategyFeeInBaseCurrencyTest {
                               BigDecimal requested, BigDecimal executed, OrderStatus status, UUID id) {
         return new BotOrderView(
                 id, id.toString(), "exch-" + id,
-                side, status, level, requested, executed,
+                side, status, level, OrderPurpose.GRID, requested, executed,
                 price, price, null, false, null, null, "usdt", BigDecimal.ONE,
                 false, null, currentTime.get(), currentTime.get());
     }

@@ -1,5 +1,6 @@
 package ru.larionov.backend.execution;
 
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 
 import java.math.BigDecimal;
@@ -13,14 +14,26 @@ import java.math.BigDecimal;
  *                  Приведение к заявочным единицам биржи и к её шагу количества —
  *                  дело гейтвея, стратегия про лотность не знает
  * @param gridLevel уровень сетки, к которому относится ордер (для не-сеточных стратегий null)
+ * @param purpose   зачем заявка выставлена. Ликвидация и продажа пыли живут по своим
+ *                  правилам, и отличать их по «уровень не задан» больше нельзя:
+ *                  таких заявок стало две
  */
 public record PlaceIntent(
         OrderSide side,
         BigDecimal quantity,
         BigDecimal limitPrice,
-        Integer gridLevel
+        Integer gridLevel,
+        OrderPurpose purpose
 ) {
+    /** Обычная заявка сетки. */
+    public PlaceIntent(OrderSide side, BigDecimal quantity, BigDecimal limitPrice, Integer gridLevel) {
+        this(side, quantity, limitPrice, gridLevel, OrderPurpose.GRID);
+    }
+
     public PlaceIntent {
+        if (purpose == null) {
+            purpose = OrderPurpose.GRID;
+        }
         if (quantity == null || quantity.signum() <= 0) {
             throw new IllegalArgumentException("quantity must be > 0");
         }

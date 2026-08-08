@@ -4,7 +4,9 @@ import lombok.extern.slf4j.Slf4j;
 import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.LedgerEntryType;
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.accounting.Inventory;
+import ru.larionov.backend.accounting.DustBucket;
 import ru.larionov.backend.dto.GridGenerationDto;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
@@ -23,6 +25,7 @@ import ru.larionov.backend.strategy.StrategyContext;
 import ru.larionov.backend.strategy.StrategySnapshot;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
@@ -145,8 +148,19 @@ public class GridStrategy implements Strategy {
      */
     private int consecutiveMismatches;
 
+    /**
+     * Наценка сверх себестоимости и комиссии, с которой продаётся накопленная пыль.
+     *
+     * Пыль продаётся не ради заработка, а чтобы перестать быть пылью, — но и в убыток
+     * отдавать её незачем: она не портится и вполне может подождать своей цены.
+     */
+    private static final BigDecimal DUST_SALE_MARGIN = new BigDecimal("0.001");
+
     /** Об остановке ликвидации сообщаем один раз за эпизод, а не каждый тик. */
     private boolean liquidationStallReported;
+
+    /** То же для перестановки вверх, застрявшей на незакрываемом остатке позиции. */
+    private boolean upperReplacementStallReported;
 
     public GridStrategy(GridConfig cfg) {
         this.cfg = cfg;
@@ -331,17 +345,48 @@ public class GridStrategy implements Strategy {
      * и потерянное открытие означало бы, что бот молчит весь торговый день — отказ
      * куда неприятнее лишнего запроса.
      *
-     * Обратное направление переспрашивать не нужно: пока заявки ставятся, о закрытии
-     * сессии сообщит стрим, а в худшем случае биржа просто отклонит заявку.
+     * Обратное направление — {@link #refreshTradingStatusAfterRejection()}.
      */
     private void refreshTradingStatusIfClosed() {
         if (limitOrdersAvailable) {
             return;
         }
+        refreshTradingStatus(true);
+    }
+
+    /**
+     * Заявку не приняли — спрашиваем биржу, не закрылась ли она.
+     *
+     * Раньше здесь ничего не спрашивали: считалось, что о закрытии сессии сообщит
+     * стрим, а отклонённая заявка — худший случай, который сам себя исчерпает.
+     * 08.08.2026 в 20:50 стрим сообщил о закрытии двум ботам из трёх, а третий
+     * (MAGN) события не увидел — и до утра ставил заявку каждую минуту, получая
+     * «30079 Instrument is not available for trading». Каждая попытка оставляла
+     * запись PENDING, которую следом разбирала сверка: сотни строк в журнале
+     * и ровно ноль пользы.
+     *
+     * Спрашиваем именно биржу, а не разбираем код ошибки: коды у каждой площадки
+     * свои, а торговый статус — общий для всех и уже есть в модели. Один запрос
+     * на неудачный проход, и то лишь пока бот считает торги открытыми: как только
+     * статус переключится, {@link #ensureOrders} перестанет доходить до постановки.
+     */
+    private void refreshTradingStatusAfterRejection() {
+        if (!limitOrdersAvailable) {
+            return;
+        }
+        refreshTradingStatus(false);
+    }
+
+    /**
+     * @param expectingOpen какого ответа ждём: true — «открылись ли», false — «закрылись ли».
+     *                      Ответ в другую сторону здесь ничего не меняет: его уже
+     *                      отражает текущий флаг.
+     */
+    private void refreshTradingStatus(boolean expectingOpen) {
         try {
             TradingStatusEvent status = ctx.exchange().marketData()
                     .getTradingStatus(ctx.execution().instrumentId());
-            if (status != null && status.limitOrdersAvailable()) {
+            if (status != null && status.limitOrdersAvailable() == expectingOpen) {
                 // Через общий обработчик: он сам напишет событие и расставит сетку.
                 onTradingStatus(status);
             }
@@ -538,6 +583,193 @@ public class GridStrategy implements Strategy {
         return quantity;
     }
 
+    /**
+     * Собирает по закрытым уровням то, что уже невозможно продать, в корзину пыли.
+     *
+     * Условий два, и оба обязательны. Уровень должен быть СВОБОДЕН — ни покупки,
+     * ни продажи на нём не висит, значит цикл закрыт и остаток уже ничей. И остаток
+     * должен быть непродаваем по отдельности: мельче шага количества либо дешевле
+     * минимальной суммы заявки. Без первого условия в пыль ушла бы половина живого
+     * цикла, без второго — деньги, которые можно продать прямо сейчас.
+     *
+     * Себестоимость каждого хвоста считает книга: она знает, из какой партии он остался.
+     */
+    private void sweepDust(Map<Integer, BotOrderView> openBuys,
+                           Map<Integer, BigDecimal> openSellQuantityByLevel) {
+        Map<Integer, BigDecimal> heldByLevel = heldIncludingUncollectedDust();
+        if (heldByLevel.isEmpty()) {
+            return;
+        }
+        for (Map.Entry<Integer, BigDecimal> entry : heldByLevel.entrySet()) {
+            int level = entry.getKey();
+            if (openBuys.containsKey(level)
+                    || openSellQuantityByLevel.getOrDefault(level, BigDecimal.ZERO).signum() > 0) {
+                continue;
+            }
+            BigDecimal held = entry.getValue();
+            if (held == null || held.signum() <= 0
+                    || sellableQuantity(held, ladder.priceAt(level)).signum() > 0) {
+                continue;
+            }
+            try {
+                ctx.recordDust(level, held);
+                ctx.event(BotEventType.HOUSEKEEPING,
+                        "Уровень %d закрыт, непродаваемый хвост %s ушёл в пыль"
+                                .formatted(level, plainQuantity(held)));
+            } catch (Exception e) {
+                ctx.error("Не удалось записать пыль уровня " + level, e);
+                return;
+            }
+        }
+    }
+
+    /**
+     * Держит одну заявку на продажу накопленной пыли.
+     *
+     * Цена — себестоимость корзины плюс комиссия оборота плюс небольшая наценка:
+     * пыль продаётся не ради заработка, а чтобы перестать быть пылью, но продавать
+     * её в убыток бессмысленно — она никуда не денется и подождёт.
+     *
+     * Долив: если пыль прибыла, а заявка ещё висит, старая снимается и выставляется
+     * новая на всё сразу. Себестоимость при этом пересчитывается — у нового хвоста
+     * своя цена, и держать старую значило бы продать корзину дешевле, чем она обошлась.
+     */
+    private void manageDustSale() {
+        if (lastPrice == null || !limitOrdersAvailable || halted || positionMismatched) {
+            return;
+        }
+        BotOrderView open = openDustOrder();
+        DustBucket bucket;
+        try {
+            bucket = ctx.dust();
+        } catch (Exception e) {
+            ctx.error("Не удалось прочитать накопленную пыль", e);
+            return;
+        }
+        if (bucket == null || bucket.isEmpty()) {
+            return;
+        }
+
+        BigDecimal quantity = sellableQuantity(bucket.quantity(), dustPrice(bucket));
+        if (quantity.signum() <= 0) {
+            // Накопленного всё ещё не хватает на заявку, которую биржа примет.
+            return;
+        }
+
+        BigDecimal price = dustPrice(bucket);
+        if (open != null) {
+            boolean sameQuantity = open.remainingQuantity().compareTo(quantity) == 0;
+            boolean samePrice = open.limitPrice() != null
+                    && open.limitPrice().compareTo(price) == 0;
+            if (sameQuantity && samePrice) {
+                return;
+            }
+            try {
+                ctx.gateway().cancel(ctx.execution(), open.id());
+            } catch (Exception e) {
+                ctx.error("Не удалось снять заявку на продажу пыли перед переоценкой", e);
+                return;
+            }
+        }
+
+        try {
+            ctx.gateway().placeLimit(ctx.execution(),
+                    new PlaceIntent(OrderSide.SELL, quantity, price, null, OrderPurpose.DUST));
+            ctx.event(BotEventType.HOUSEKEEPING,
+                    "Продажа пыли: %s по %s (себестоимость %s)"
+                            .formatted(plainQuantity(quantity), price.toPlainString(),
+                                    plainQuantity(bucket.averagePrice())));
+        } catch (RiskRejectedException e) {
+            ctx.event(BotEventType.RISK_BLOCKED, "Продажа пыли пока запрещена лимитом: " + e.getMessage());
+        } catch (Exception e) {
+            ctx.error("Не удалось выставить заявку на продажу пыли", e);
+        }
+    }
+
+    /**
+     * Цена продажи пыли: себестоимость плюс комиссия оборота плюс наценка.
+     *
+     * Ниже себестоимости пыль не отдаём — она не портится. Выше рынка тоже ничего
+     * страшного: это обычная лимитная заявка, она просто подождёт своей цены, а если
+     * расчётная цена окажется ниже рынка, биржа исполнит её по рыночной, то есть лучше.
+     */
+    private BigDecimal dustPrice(DustBucket bucket) {
+        BigDecimal average = bucket.averagePrice();
+        BigDecimal fees = activeFees == null ? BigDecimal.ZERO : activeFees.makerRoundTripRate();
+        BigDecimal price = average.multiply(BigDecimal.ONE.add(fees).add(DUST_SALE_MARGIN));
+        BigDecimal step = ctx.constraints().minPriceIncrement();
+        if (step == null || step.signum() <= 0) {
+            return price;
+        }
+        // Округляем ВВЕРХ: округление вниз съело бы ту самую наценку, ради которой всё.
+        return price.divide(step, 0, RoundingMode.CEILING).multiply(step);
+    }
+
+    /** Наша живая заявка на продажу пыли, если она есть. */
+    private BotOrderView openDustOrder() {
+        return ctx.gateway().openOrders(ctx.botId()).stream()
+                .filter(o -> o.purpose() == OrderPurpose.DUST)
+                .findFirst()
+                .orElse(null);
+    }
+
+    /** Заявки, которые считаются «нашими» для проверок сетки. Пыль живёт отдельно. */
+    private List<BotOrderView> gridOrders() {
+        return ctx.gateway().openOrders(ctx.botId()).stream()
+                .filter(o -> o.purpose() != OrderPurpose.DUST)
+                .toList();
+    }
+
+    /**
+     * Позиция закрыта настолько, насколько её вообще возможно закрыть на бирже.
+     *
+     * Критерий один и тот же для всего кода: остаток «закрыт», если из него нельзя
+     * составить заявку, которую биржа примет, — то есть ровно {@link #sellableQuantity}.
+     * Оба его условия здесь по делу:
+     * <ul>
+     *   <li>мельче шага количества — остаток нечем выразить. Такой хвост оставляет
+     *       КАЖДЫЙ закрытый цикл там, где комиссия удерживается монетой: зачисляется
+     *       0.09101534, продать можно 0.091015;</li>
+     *   <li>дешевле минимальной суммы заявки — заявку отвергнет биржа. Именно сюда
+     *       попадает накопленное: хвосты десяти циклов складываются в остаток,
+     *       который шагу уже кратен, а по деньгам всё ещё ничто.</li>
+     * </ul>
+     *
+     * Ждать такой остаток бессмысленно вдвойне: продать его нельзя сейчас и нельзя
+     * будет потом. Уровневый учёт следующего поколения его не увидит — {@link
+     * #computeHeldQuantityByLevel()} отбирает заявки по времени начала диапазона, —
+     * так что он не сольётся с будущей покупкой и не станет продаваемым сам собой.
+     *
+     * Требовать здесь строгого нуля значило требовать невыполнимого. 08.08.2026 бот на
+     * SOL/USDT подтвердил пробой вверх, снял покупки, дождался исполнения всех продаж —
+     * и встал навсегда из-за 0.0000031 монеты на четверть тысячной доллара: заявок нет,
+     * исполняться нечему, событий не пишется. Снаружи это выглядело как «бот молчит».
+     */
+    private boolean positionIsFlat(BigDecimal position) {
+        if (position == null || position.signum() < 0) {
+            return false;
+        }
+        // Пыль в позиции журнала есть, но сетке она уже не принадлежит: её продаёт
+        // отдельная заявка, живущая своей жизнью. Ждать её здесь значило бы ждать
+        // ровно того, чего эта проверка и не должна ждать.
+        BigDecimal tradable = position.subtract(dustQuantity());
+        if (tradable.signum() <= 0) {
+            return true;
+        }
+        return sellableQuantity(tradable, lastPrice).signum() <= 0;
+    }
+
+    /** Сколько из позиции журнала — накопленная пыль. Ошибка чтения = «пыли нет». */
+    private BigDecimal dustQuantity() {
+        try {
+            DustBucket bucket = ctx.dust();
+            return bucket == null ? BigDecimal.ZERO : bucket.quantity();
+        } catch (Exception e) {
+            log.debug("Не удалось прочитать корзину пыли: {}", e.getMessage());
+            return BigDecimal.ZERO;
+        }
+    }
+
     @Override
     public void onPrice(LastPrice price) {
         if (!isReady() || price == null || price.price() == null) {
@@ -721,12 +953,20 @@ public class GridStrategy implements Strategy {
             }
         }
 
+        // Сначала убираем с уровней то, что уже никогда не продать: иначе уровень
+        // остаётся формально занятым непродаваемым хвостом, и следующая покупка
+        // на нём не встанет. Порядок важен — heldByLevel после этого пересчитан.
+        sweepDust(openBuys, openSellQuantityByLevel);
         Map<Integer, BigDecimal> heldByLevel = computeHeldQuantityByLevel();
 
         openOrderCount += placeMissingSells(openBuys, openSellQuantityByLevel, heldByLevel, openOrderCount);
         if (!buyingStopped) {
             placeMissingBuys(openBuys, openSellQuantityByLevel, heldByLevel, openOrderCount);
         }
+
+        // Пыль продаётся последней и независимо от сетки: её заявка не занимает уровня
+        // и не участвует в лимите капитала сетки — этот товар уже куплен и оплачен.
+        manageDustSale();
     }
 
     /**
@@ -745,10 +985,31 @@ public class GridStrategy implements Strategy {
      * риск-контроль, а покупку — сама эта запись.
      */
     private Map<Integer, BigDecimal> computeHeldQuantityByLevel() {
+        Map<Integer, BigDecimal> held = rawHeldByLevel();
+
+
+        // Уже собранное в корзину пыли уровню больше не принадлежит. Вычитаем именно
+        // здесь: заявки в журнале ордеров остаются навсегда, и без вычитания уровень
+        // считался бы занятым тем, что с него давно изъято, — а изъятие бы повторялось
+        // каждый проход, наращивая корзину из воздуха.
+        Map<Integer, BigDecimal> collected = dustByLevel();
+        collected.forEach((level, quantity) -> held.computeIfPresent(level,
+                (__, value) -> value.subtract(quantity)));
+
+        // Остаток мельче шага количества продать невозможно: биржа такую заявку не примет.
+        // Считать уровень занятым из-за него — значит вывести уровень из игры навсегда:
+        // продать нечего, а покупку блокирует сама эта запись. Такая пыль неизбежна там,
+        // где комиссия удерживается монетой: зачисляется 140.544348, а продать можно
+        // 140.544 — разница оседает на уровне после КАЖДОГО закрытого цикла.
+        BigDecimal step = ctx.execution().quantityStep();
+        held.values().removeIf(v -> v.signum() <= 0 || (step != null && v.compareTo(step) < 0));
+        return held;
+    }
+
+    /** Купленное минус проданное по уровням текущего поколения, без каких-либо скидок. */
+    private Map<Integer, BigDecimal> rawHeldByLevel() {
         Instant generationStart = activeRange == null ? null : activeRange.since();
-
         Map<Integer, BigDecimal> held = new HashMap<>();
-
         for (BotOrderView o : ctx.gateway().recentOrders(ctx.botId())) {
             BigDecimal executed = o.executedQuantity();
             if (o.gridLevel() == null || executed == null || executed.signum() <= 0) {
@@ -761,15 +1022,33 @@ public class GridStrategy implements Strategy {
             BigDecimal delta = o.side() == OrderSide.BUY ? executed : executed.negate();
             held.merge(o.gridLevel(), delta, BigDecimal::add);
         }
-
-        // Остаток мельче шага количества продать невозможно: биржа такую заявку не примет.
-        // Считать уровень занятым из-за него — значит вывести уровень из игры навсегда:
-        // продать нечего, а покупку блокирует сама эта запись. Такая пыль неизбежна там,
-        // где комиссия удерживается монетой: зачисляется 140.544348, а продать можно
-        // 140.544 — разница оседает на уровне после КАЖДОГО закрытого цикла.
-        BigDecimal dust = ctx.execution().quantityStep();
-        held.values().removeIf(v -> v.signum() <= 0 || (dust != null && v.compareTo(dust) < 0));
         return held;
+    }
+
+    /**
+     * Что на уровнях лежит на самом деле — до отбрасывания непродаваемых хвостов.
+     *
+     * Нужна ровно сборщику пыли: {@link #computeHeldQuantityByLevel()} эти хвосты
+     * прячет (и правильно делает — иначе уровень выпадает из игры), но спрятанное
+     * невозможно собрать.
+     */
+    private Map<Integer, BigDecimal> heldIncludingUncollectedDust() {
+        Map<Integer, BigDecimal> held = rawHeldByLevel();
+        dustByLevel().forEach((level, quantity) -> held.computeIfPresent(level,
+                (__, value) -> value.subtract(quantity)));
+        held.values().removeIf(v -> v.signum() <= 0);
+        return held;
+    }
+
+    /** Сколько с каждого уровня уже переведено в пыль. Ошибка чтения = «нисколько». */
+    private Map<Integer, BigDecimal> dustByLevel() {
+        try {
+            Map<Integer, BigDecimal> collected = ctx.dustByLevel();
+            return collected == null ? new HashMap<>() : new HashMap<>(collected);
+        } catch (Exception e) {
+            log.debug("Не удалось прочитать пыль по уровням: {}", e.getMessage());
+            return new HashMap<>();
+        }
     }
 
     /**
@@ -901,6 +1180,10 @@ public class GridStrategy implements Strategy {
             // Сетевая ошибка: запись осталась PENDING, её разрешит сверка.
             // Продолжать этот проход бессмысленно — биржа недоступна.
             ctx.error("Не удалось выставить заявку на уровне " + level, e);
+            // Отказ бывает не только сетевым: так же выглядит закрытие сессии,
+            // о котором стрим не сообщил. Спрашиваем биржу, чтобы не повторять
+            // ту же заявку каждую минуту до утра.
+            refreshTradingStatusAfterRejection();
             return false;
         }
     }
@@ -923,6 +1206,7 @@ public class GridStrategy implements Strategy {
             if (lastPrice.compareTo(activeRange.upper()) <= 0) {
                 awaitingUpperReplacement = false;
                 upperBreakoutCandidateAt = null;
+                upperReplacementStallReported = false;
                 halted = false;
                 buyingStopped = shouldStopBuying();
                 persistState();
@@ -969,6 +1253,7 @@ public class GridStrategy implements Strategy {
 
         awaitingUpperReplacement = true;
         upperBreakoutCandidateAt = null;
+        upperReplacementStallReported = false;
         buyingStopped = true;
         cancelOpenBuys();
         persistState();
@@ -1125,15 +1410,17 @@ public class GridStrategy implements Strategy {
                 || reconciledPosition == null) {
             return;
         }
-        if (reconciledPosition.signum() == 0) {
-            for (BotOrderView order : ctx.gateway().openOrders(ctx.botId())) {
+        // Тот же допуск, что и при перестановке вверх: остаток, на который биржа
+        // не примет заявки, ликвидации не «допродать», а ждать его — ждать вечно.
+        if (positionIsFlat(reconciledPosition)) {
+            for (BotOrderView order : gridOrders()) {
                 try {
                     ctx.gateway().cancel(ctx.execution(), order.id());
                 } catch (Exception e) {
                     ctx.error("Не удалось снять остаточную заявку после ликвидации", e);
                 }
             }
-            if (ctx.gateway().openOrders(ctx.botId()).isEmpty()) {
+            if (gridOrders().isEmpty()) {
                 tryCompleteDownwardReplacement();
             }
             return;
@@ -1162,9 +1449,12 @@ public class GridStrategy implements Strategy {
     }
 
     private void placeOrRepriceLiquidation(BigDecimal bid) {
-        List<BotOrderView> open = ctx.gateway().openOrders(ctx.botId());
+        // Заявки сетки, без пыли: её продажа к ликвидации отношения не имеет и
+        // снимать её нельзя. Раньше «продажа без уровня» означала ликвидацию —
+        // с появлением второй такой заявки эта договорённость перестала работать.
+        List<BotOrderView> open = gridOrders();
         BotOrderView liquidation = open.stream()
-                .filter(o -> o.side() == OrderSide.SELL && o.gridLevel() == null)
+                .filter(o -> o.purpose() == OrderPurpose.LIQUIDATION)
                 .findFirst()
                 .orElse(null);
 
@@ -1188,7 +1478,7 @@ public class GridStrategy implements Strategy {
             manageDownwardLiquidation();
             return;
         }
-        List<BotOrderView> stillOpen = ctx.gateway().openOrders(ctx.botId());
+        List<BotOrderView> stillOpen = gridOrders();
         if (!stillOpen.isEmpty()) {
             // Раньше здесь был молчаливый return, и это скрывало тупик: заявки, которые
             // не удалось ни снять, ни разрешить, оставались «открытыми», ликвидация
@@ -1222,7 +1512,7 @@ public class GridStrategy implements Strategy {
         try {
             BigDecimal quantity = afterCancel.position();
             ctx.gateway().placeLimit(ctx.execution(),
-                    new PlaceIntent(OrderSide.SELL, quantity, freshBid, null));
+                    new PlaceIntent(OrderSide.SELL, quantity, freshBid, null, OrderPurpose.LIQUIDATION));
             ctx.event(BotEventType.HOUSEKEEPING,
                     "Ликвидационная SELL: %s по лучшему биду %s"
                             .formatted(plainQuantity(quantity), freshBid.toPlainString()));
@@ -1436,9 +1726,15 @@ public class GridStrategy implements Strategy {
                     "Позиция журнала расходится с биржей. Пока расхождение не устранено, "
                             + "закрывать позицию по рынку нельзя: неизвестно, сколько её на самом деле.");
         }
+        // Перестановку вверх кнопка раньше отвергала: «дождитесь завершения». Но ждать
+        // её можно бесконечно — она завершится только продажами по сетке, а если
+        // остаток позиции им не по зубам (кратен шагу, но дешевле минимальной суммы
+        // заявки), продать его нечем, и другого рычага у оператора нет: рестарт
+        // не помогает, флаг восстанавливается из сохранённого состояния. Отменяем
+        // ожидание и закрываем позицию по рынку тем же путём, что и при пробое вниз.
         if (awaitingUpperReplacement) {
-            throw new IllegalStateException(
-                    "Идёт перестановка вверх. Дождитесь её завершения или остановите бота.");
+            awaitingUpperReplacement = false;
+            upperReplacementStallReported = false;
         }
 
         forcedReplacement = true;
@@ -1559,12 +1855,19 @@ public class GridStrategy implements Strategy {
 
     private boolean tryCompleteUpperReplacement() {
         if (!awaitingUpperReplacement || halted || positionMismatched || lastPrice == null
-                || reconciledPosition == null || reconciledPosition.signum() != 0) {
+                || reconciledPosition == null) {
+            return false;
+        }
+        if (!positionIsFlat(reconciledPosition)) {
+            reportUpperReplacementStall();
             return false;
         }
 
         cancelOpenBuys();
-        if (!ctx.gateway().openOrders(ctx.botId()).isEmpty()) {
+        // Пыль исключена намеренно: её продажа переживает перестановку диапазона,
+        // потому что и сама пыль копится ЧЕРЕЗ поколения. Ждать её здесь означало
+        // бы вернуть тот же вечный тупик, только уже с заявкой на бирже.
+        if (!gridOrders().isEmpty()) {
             return false;
         }
 
@@ -1607,6 +1910,7 @@ public class GridStrategy implements Strategy {
         gridGeneration++;
         lastReplacementAt = ctx.clock().instant();
         awaitingUpperReplacement = false;
+        upperReplacementStallReported = false;
         buyingStopped = shouldStopBuying();
         halted = false;
         try {
@@ -1637,6 +1941,30 @@ public class GridStrategy implements Strategy {
         ctx.event(BotEventType.GRID_REPLACED, note);
         ensureOrders(null);
         return true;
+    }
+
+    /**
+     * Ожидание, из которого нечему вывести, — это тупик, а не терпение.
+     *
+     * Пока на бирже висят продажи, ждать правильно: они и закроют позицию. Но если
+     * заявок нет ВОВСЕ, а остаток продаваем — значит его никто не выставил и уже не
+     * выставит: сюда мы попадаем только после {@link #ensureOrders}, у которой была
+     * ровно эта возможность. Дальше бот будет ждать вечно.
+     *
+     * Раньше это ожидание было вдобавок беззвучным — ни события, ни строки в логе,
+     * и разбирать инцидент приходилось по исходникам. Сообщаем один раз за эпизод:
+     * тик частый, а журнал событий читают люди.
+     */
+    private void reportUpperReplacementStall() {
+        if (upperReplacementStallReported || !gridOrders().isEmpty()) {
+            return;
+        }
+        upperReplacementStallReported = true;
+        ctx.event(BotEventType.RISK_BLOCKED,
+                ("Перестановка вверх ждёт закрытия позиции, но заявок на бирже не осталось: "
+                        + "остаток %s никто не продаёт. Сетка не переставится сама — "
+                        + "нужна перестройка с фиксацией убытка.")
+                        .formatted(plainQuantity(reconciledPosition)));
     }
 
     private void failUpperReplacement(String reason) {

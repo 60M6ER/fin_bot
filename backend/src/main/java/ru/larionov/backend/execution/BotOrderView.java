@@ -1,6 +1,7 @@
 package ru.larionov.backend.execution;
 
 import ru.larionov.backend.entity.BotOrderEntity;
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 
@@ -16,6 +17,7 @@ public record BotOrderView(
         OrderSide side,
         OrderStatus status,
         Integer gridLevel,
+        OrderPurpose purpose,
         BigDecimal requestedQuantity,
         BigDecimal executedQuantity,
         BigDecimal limitPrice,
@@ -40,6 +42,7 @@ public record BotOrderView(
                 e.getSide(),
                 e.getStatus(),
                 e.getGridLevel(),
+                e.getPurpose(),
                 e.getRequestedQuantity(),
                 e.getExecutedQuantity(),
                 e.getLimitPrice(),

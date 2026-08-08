@@ -347,6 +347,22 @@
                   hint="Пусто — подойдёт, только если счёт единственный"
                 />
 
+                <q-input
+                  v-model="settingsForm.baseCurrency"
+                  label="Расчётная валюта"
+                  outlined
+                  dense
+                  clearable
+                  :disable="settingsSaving || detail.active"
+                  hint="В ней считается баланс подключения. Пусто — спросим у биржи (у брокера RUB, у Poloniex USDT)"
+                />
+
+                <div class="text-caption text-grey">
+                  Баланс подключения — это деньги расчётной валюты плюс всё остальное
+                  на счёте по текущей цене. Купленное не перестаёт быть вашим оттого,
+                  что перестало быть деньгами.
+                </div>
+
                 <template v-if="usesManualFee">
                   <q-input
                     v-model.number="settingsForm.commissionPercent"
@@ -662,7 +678,7 @@ const accounts = ref([])
 const accountsOwnerId = ref(null)
 const accountsLoading = ref(false)
 const settingsSaving = ref(false)
-const settingsForm = reactive({ accountId: null, commissionPercent: 0.3 })
+const settingsForm = reactive({ accountId: null, commissionPercent: 0.3, baseCurrency: '' })
 
 const accountOptions = computed(() => {
   const options = accounts.value.map(a => ({
@@ -725,7 +741,12 @@ async function saveSettings () {
     await apiClient.patch(`/api/v1/exchange-connections/${id}/settings`, {
       id,
       accountId: settingsForm.accountId,
-      settings: { ...(detail.value.settings || {}), commissionRate: rate }
+      settings: {
+        ...(detail.value.settings || {}),
+        commissionRate: rate,
+        // Пустая строка означает «не задано»: пусть решает биржа, а не пустой код валюты.
+        baseCurrency: (settingsForm.baseCurrency || '').trim().toUpperCase() || null
+      }
     })
     toast?.ok('Успешно сохранено')
     await loadDetail(id)
@@ -1021,6 +1042,7 @@ async function loadDetail (id) {
     settingsForm.commissionPercent = Number(
       ((detail.value?.settings?.commissionRate ?? 0.003) * 100).toFixed(4)
     )
+    settingsForm.baseCurrency = detail.value?.settings?.baseCurrency || ''
 
     if (selectedId.value === id) {
       await loadRuntime(id)

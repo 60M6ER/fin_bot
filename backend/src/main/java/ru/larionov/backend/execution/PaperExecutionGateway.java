@@ -58,7 +58,7 @@ public class PaperExecutionGateway implements ExecutionGateway {
                             .formatted(plain(intent.quantity()), plain(ctx.quantityStep())));
         }
         PlaceIntent tradable = new PlaceIntent(
-                intent.side(), quantity, intent.limitPrice(), intent.gridLevel());
+                intent.side(), quantity, intent.limitPrice(), intent.gridLevel(), intent.purpose());
         riskGuard.check(ctx, tradable);
 
         BotOrderEntity entity = orderRepo.save(BotOrderEntity.builder()
@@ -70,6 +70,7 @@ public class PaperExecutionGateway implements ExecutionGateway {
                 .side(tradable.side())
                 .status(OrderStatus.NEW)
                 .gridLevel(tradable.gridLevel())
+                .purpose(tradable.purpose())
                 .requestedQuantity(tradable.quantity())
                 .executedQuantity(BigDecimal.ZERO)
                 .limitPrice(tradable.limitPrice())

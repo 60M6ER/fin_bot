@@ -6,7 +6,6 @@ import ru.larionov.backend.dto.BotAccountingDto;
 import ru.larionov.backend.dto.BotValuationDto;
 import ru.larionov.backend.entity.BotEntity;
 import ru.larionov.backend.runtime.LastPriceCache;
-import ru.larionov.backend.service.AccountCashService;
 import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
@@ -38,7 +37,6 @@ class BotValuationServiceTest {
 
     private AccountingService accounting;
     private LastPriceCache prices;
-    private AccountCashService accountCash;
     private ru.larionov.backend.money.FxRateService fx;
     private BotValuationService service;
     private UUID botId;
@@ -47,7 +45,6 @@ class BotValuationServiceTest {
     void setUp() {
         accounting = mock(AccountingService.class);
         prices = new LastPriceCache();
-        accountCash = mock(AccountCashService.class);
         fx = mock(ru.larionov.backend.money.FxRateService.class);
         // Курс по умолчанию известен: рубли к рублям — единица.
         when(fx.rate(any(), any())).thenAnswer(i -> {
@@ -60,7 +57,10 @@ class BotValuationServiceTest {
         });
         var appSettings = mock(ru.larionov.backend.service.AppSettingService.class);
         when(appSettings.get(any(), any())).thenAnswer(i -> i.getArgument(1));
-        service = new BotValuationService(accounting, prices, accountCash,
+        service = new BotValuationService(accounting, prices,
+                mock(ExchangeBalanceService.class),
+                mock(ru.larionov.backend.repository.ExchangeConnectionRepository.class),
+                mock(ru.larionov.backend.service.ExchangeConnectionContextResolver.class),
                 mock(ru.larionov.backend.repository.InstrumentRepository.class), new ObjectMapper(),
                 fx, appSettings);
         botId = UUID.randomUUID();
@@ -97,7 +97,7 @@ class BotValuationServiceTest {
     @Test
     void marketValueAndUnrealizedPnlUseTheStreamedPrice() {
         when(accounting.summaryFast(any(), anyBoolean())).thenReturn(summary("0"));
-        prices.put(botId, new BigDecimal("100"), Instant.now());
+        prices.put(botId, "uid", new BigDecimal("100"), Instant.now());
 
         BotValuationDto v = service.valuation(bot(BUDGET_CONFIG.formatted("WITHDRAW")));
 
@@ -165,7 +165,7 @@ class BotValuationServiceTest {
     @Test
     void balanceMatchesItsComponentDecomposition() {
         when(accounting.summaryFast(any(), anyBoolean())).thenReturn(summary("300"));
-        prices.put(botId, new BigDecimal("100"), Instant.now());
+        prices.put(botId, "uid", new BigDecimal("100"), Instant.now());
 
         BotValuationDto v = service.valuation(bot(BUDGET_CONFIG.formatted("COMPOUND")));
 
@@ -181,11 +181,11 @@ class BotValuationServiceTest {
     @Test
     void bothProfitPoliciesReportTheSameTotalWealth() {
         when(accounting.summaryFast(any(), anyBoolean())).thenReturn(summary("300"));
-        prices.put(botId, new BigDecimal("100"), Instant.now());
+        prices.put(botId, "uid", new BigDecimal("100"), Instant.now());
 
         BotValuationDto withdraw = service.valuation(bot(BUDGET_CONFIG.formatted("WITHDRAW")));
         service.forget(botId);
-        prices.put(botId, new BigDecimal("100"), Instant.now());
+        prices.put(botId, "uid", new BigDecimal("100"), Instant.now());
         BotValuationDto compound = service.valuation(bot(BUDGET_CONFIG.formatted("COMPOUND")));
 
         // WITHDRAW: бюджет заморожен, прибыль лежит отдельной строкой.
@@ -206,7 +206,7 @@ class BotValuationServiceTest {
     @Test
     void legacyBotWithoutBudgetHasNoEquityButKeepsPnl() {
         when(accounting.summaryFast(any(), anyBoolean())).thenReturn(summary("300"));
-        prices.put(botId, new BigDecimal("100"), Instant.now());
+        prices.put(botId, "uid", new BigDecimal("100"), Instant.now());
 
         BotValuationDto v = service.valuation(bot("""
                 {"instrumentUid":"uid-1","lowerPrice":100,"upperPrice":110,"levels":10,"lotsPerOrder":1}
@@ -251,10 +251,10 @@ class BotValuationServiceTest {
         when(accounting.summaryFast(any(), anyBoolean())).thenReturn(summary("0"));
         BotEntity bot = bot(BUDGET_CONFIG.formatted("WITHDRAW"));
 
-        prices.put(botId, new BigDecimal("100"), Instant.now());
+        prices.put(botId, "uid", new BigDecimal("100"), Instant.now());
         assertThat(service.valuation(bot).marketValue()).isEqualByComparingTo("10000");
 
-        prices.put(botId, new BigDecimal("120"), Instant.now());
+        prices.put(botId, "uid", new BigDecimal("120"), Instant.now());
         assertThat(service.valuation(bot).marketValue()).isEqualByComparingTo("12000");
 
         verify(accounting, times(1)).summaryFast(any(), anyBoolean());
@@ -289,7 +289,7 @@ class BotValuationServiceTest {
     @Test
     void forgettingABotDropsItsCachedPriceToo() {
         when(accounting.summaryFast(any(), anyBoolean())).thenReturn(summary("0"));
-        prices.put(botId, new BigDecimal("100"), Instant.now());
+        prices.put(botId, "uid", new BigDecimal("100"), Instant.now());
         service.valuation(bot(BUDGET_CONFIG.formatted("WITHDRAW")));
 
         service.forget(botId);
