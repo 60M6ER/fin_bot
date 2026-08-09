@@ -16,11 +16,16 @@ import ru.larionov.backend.exchange.api.model.stream.StreamHealth;
 import ru.larionov.backend.exchange.common.StreamHealthTracker;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /**
@@ -31,21 +36,49 @@ import java.util.function.Consumer;
  * на очередь событий бота.
  *
  * <h3>Про переподключение</h3>
- * За время разрыва события теряются безвозвратно, поэтому реконнект обязан приводить
- * к REST-сверке — иначе бот продолжит действовать по состоянию, которое биржа уже
- * не подтверждает. Хук {@link #onReconnect} для этого и существует; вызывающая
- * сторона (StrategyBotHandler) вешает на него сверку.
+ * Вебсокет рвётся — это обычная его жизнь, а не исключительная ситуация. Раньше
+ * адаптер об обрыве только СООБЩАЛ: писал в лог, помечал здоровье и дёргал хуки, —
+ * но подписку не восстанавливал. 09.08.2026 стримы оборвались, и оба бота простояли
+ * до тех пор, пока подключение не перезапустили руками: снаружи подключение выглядело
+ * рабочим, потому что REST-вызовы у него живы.
+ *
+ * Теперь подписка помнит себя и поднимается заново с нарастающей паузой. Хуки
+ * {@link #onReconnect} вызываются ПОСЛЕ успешного восстановления, а не в момент
+ * обрыва: за время разрыва события потерялись безвозвратно, и сверка нужна тогда,
+ * когда есть с чем сверяться.
+ *
+ * Сторож подключения в RuntimeSupervisor при этом остаётся: он страхует случай,
+ * когда переподключиться не удаётся вовсе.
  */
 @Slf4j
 public class PoloniexMarketDataStreamService implements MarketDataStreamService {
 
+    /** Первая пауза перед повтором. Дальше удваивается до {@link #RECONNECT_MAX}. */
+    private static final Duration RECONNECT_MIN = Duration.ofSeconds(1);
+
+    /**
+     * Потолок паузы. Минута выбрана по цене ошибки: биржа, лежащая дольше минуты,
+     * от более частых попыток не поднимется, а бот и так уже не торгует.
+     */
+    private static final Duration RECONNECT_MAX = Duration.ofMinutes(1);
+
     private final SpotPoloPublicWebsocketClient client;
     private final StreamHealthTracker health = new StreamHealthTracker();
-    private final List<WebSocket> sockets = new CopyOnWriteArrayList<>();
+    private final List<Subscription> subscriptions = new CopyOnWriteArrayList<>();
     private final List<Runnable> reconnectHandlers = new CopyOnWriteArrayList<>();
 
+    /** Сервис закрыт насовсем: обрывы в этот момент ожидаемы и восстановления не требуют. */
+    private volatile boolean stopping;
+
+    private volatile ScheduledExecutorService retries;
+
     public PoloniexMarketDataStreamService(String wsUrl) {
-        this.client = new SpotPoloPublicWebsocketClient(wsUrl);
+        this(new SpotPoloPublicWebsocketClient(wsUrl));
+    }
+
+    /** Шов для теста: восстановление подписки иначе не проверить без живой биржи. */
+    PoloniexMarketDataStreamService(SpotPoloPublicWebsocketClient client) {
+        this.client = client;
     }
 
     @Override
@@ -54,32 +87,102 @@ public class PoloniexMarketDataStreamService implements MarketDataStreamService 
         if (symbols.isEmpty()) {
             return;
         }
+        Subscription subscription = new Subscription(symbols, handler);
+        subscriptions.add(subscription);
+        open(subscription, false);
+    }
 
-        sockets.add(client.onTickerEvent(symbols, new PoloApiCallback<TickerEvent>() {
-            @Override
-            public void onResponse(PoloEvent<TickerEvent> event) {
-                health.markEvent();
-                if (event == null || event.getData() == null) {
-                    return;
-                }
-                for (TickerEvent ticker : event.getData()) {
-                    LastPrice price = toLastPrice(ticker);
-                    if (price != null) {
-                        handler.accept(price);
-                    }
-                }
-            }
+    /**
+     * @param afterBreak true — это восстановление после обрыва: о нём надо сообщить
+     *                   подписчикам, чтобы они сверились с биржей
+     */
+    private void open(Subscription subscription, boolean afterBreak) {
+        try {
+            subscription.socket = client.onTickerEvent(subscription.symbols,
+                    new PoloApiCallback<TickerEvent>() {
+                        @Override
+                        public void onResponse(PoloEvent<TickerEvent> event) {
+                            health.markEvent();
+                            if (event == null || event.getData() == null) {
+                                return;
+                            }
+                            for (TickerEvent ticker : event.getData()) {
+                                LastPrice price = toLastPrice(ticker);
+                                if (price != null) {
+                                    subscription.handler.accept(price);
+                                }
+                            }
+                        }
 
-            @Override
-            public void onFailure(Throwable t) {
-                // Разрыв — не исключительная ситуация, а обычная жизнь вебсокета.
-                // Важно не проглотить его молча: после переподключения нужна сверка.
-                log.warn("Стрим рыночных данных Poloniex оборвался: {}", t.getMessage());
-                health.markError(t.getMessage());
+                        @Override
+                        public void onFailure(Throwable t) {
+                            health.markError(t == null ? "разрыв соединения" : t.getMessage());
+                            scheduleReconnect(subscription, t);
+                        }
+                    });
+            health.markConnected();
+            subscription.attempt = 0;
+            if (afterBreak) {
+                log.info("Стрим Poloniex восстановлен: {}", subscription.symbols);
                 reconnectHandlers.forEach(PoloniexMarketDataStreamService::runQuietly);
             }
-        }));
-        health.markConnected();
+        } catch (Exception e) {
+            health.markError(e.getMessage());
+            scheduleReconnect(subscription, e);
+        }
+    }
+
+    /**
+     * Ставит одну — и только одну — попытку восстановления на подписку.
+     *
+     * Обрыв приходит по всем сокетам сразу, и без этого флага каждая пришедшая
+     * ошибка заводила бы собственный цикл повторов.
+     */
+    private void scheduleReconnect(Subscription subscription, Throwable cause) {
+        if (stopping || subscription.cancelled
+                || !subscription.reconnecting.compareAndSet(false, true)) {
+            return;
+        }
+        long delayMs = Math.min(
+                RECONNECT_MIN.toMillis() << Math.min(subscription.attempt, 6),
+                RECONNECT_MAX.toMillis());
+        subscription.attempt++;
+        log.warn("Стрим рыночных данных Poloniex оборвался ({}), повтор через {} мс: {}",
+                cause == null ? "без причины" : cause.getMessage(), delayMs, subscription.symbols);
+
+        try {
+            retries().schedule(() -> {
+                subscription.reconnecting.set(false);
+                // Подписку могли снять, пока мы ждали: поднимать её заново — значит
+                // завести поток, которого никто не просил и который некому закрыть.
+                if (stopping || subscription.cancelled) {
+                    return;
+                }
+                closeQuietly(subscription.socket);
+                open(subscription, true);
+            }, delayMs, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            // Планировщик мог быть уже погашен закрытием сервиса — это не беда.
+            subscription.reconnecting.set(false);
+            log.debug("Повтор подписки Poloniex не запланирован: {}", e.getMessage());
+        }
+    }
+
+    private ScheduledExecutorService retries() {
+        ScheduledExecutorService existing = retries;
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (this) {
+            if (retries == null) {
+                retries = Executors.newSingleThreadScheduledExecutor(r -> {
+                    Thread t = new Thread(r, "poloniex-md-reconnect");
+                    t.setDaemon(true);
+                    return t;
+                });
+            }
+            return retries;
+        }
     }
 
     /**
@@ -123,20 +226,50 @@ public class PoloniexMarketDataStreamService implements MarketDataStreamService 
 
     @Override
     public void close() {
+        stopping = true;
         closeSockets();
         reconnectHandlers.clear();
+        ScheduledExecutorService pool = retries;
+        if (pool != null) {
+            pool.shutdownNow();
+        }
     }
 
     private void closeSockets() {
-        for (WebSocket socket : sockets) {
-            try {
-                client.close(socket);
-            } catch (Exception e) {
-                log.debug("Не удалось закрыть вебсокет Poloniex: {}", e.getMessage());
-            }
+        for (Subscription subscription : subscriptions) {
+            subscription.cancelled = true;
+            closeQuietly(subscription.socket);
         }
-        sockets.clear();
+        subscriptions.clear();
         health.markClosed();
+    }
+
+    private void closeQuietly(WebSocket socket) {
+        if (socket == null) {
+            return;
+        }
+        try {
+            client.close(socket);
+        } catch (Exception e) {
+            log.debug("Не удалось закрыть вебсокет Poloniex: {}", e.getMessage());
+        }
+    }
+
+    /** Подписка, которая помнит себя: без этого её нечем восстановить после обрыва. */
+    private static final class Subscription {
+        private final List<String> symbols;
+        private final Consumer<LastPrice> handler;
+        private final AtomicBoolean reconnecting = new AtomicBoolean();
+        private volatile WebSocket socket;
+        /** Подписку сняли: восстанавливать её больше не нужно. */
+        private volatile boolean cancelled;
+        /** Номер попытки для нарастающей паузы. Пишется только из потока повторов. */
+        private volatile int attempt;
+
+        private Subscription(List<String> symbols, Consumer<LastPrice> handler) {
+            this.symbols = List.copyOf(symbols);
+            this.handler = handler;
+        }
     }
 
     private static LastPrice toLastPrice(TickerEvent ticker) {

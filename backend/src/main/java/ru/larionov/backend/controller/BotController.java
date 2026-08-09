@@ -97,6 +97,26 @@ public class BotController {
         return ResponseEntity.accepted().build();
     }
 
+    /**
+     * Плановая остановка: снять покупки и дождаться, пока распродастся позиция.
+     *
+     * В отличие от обычной остановки, не бросает купленное на счёте: бот доводит
+     * циклы до конца по своим ценам и выключается сам, когда продавать станет нечего.
+     * После этого его можно безопасно удалить — живых заявок не остаётся.
+     */
+    @PostMapping("/{id}/schedule-stop")
+    public ResponseEntity<Void> scheduleStop(@PathVariable UUID id) {
+        runtimeService.command(id, StrategyCommand.SCHEDULE_STOP);
+        return ResponseEntity.accepted().build();
+    }
+
+    /** Передумали: вернуть бота к обычной работе. */
+    @PostMapping("/{id}/cancel-scheduled-stop")
+    public ResponseEntity<Void> cancelScheduledStop(@PathVariable UUID id) {
+        runtimeService.command(id, StrategyCommand.CANCEL_SCHEDULED_STOP);
+        return ResponseEntity.accepted().build();
+    }
+
     /** Что бот делает прямо сейчас: позиция, активные заявки, очередь событий. */
     @GetMapping("/{id}/state")
     public BotTradingStateDto state(@PathVariable UUID id) {

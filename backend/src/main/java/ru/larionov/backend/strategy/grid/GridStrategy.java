@@ -93,6 +93,18 @@ public class GridStrategy implements Strategy {
      * остаются: они не про деньги, а про то, знаем ли мы, чем торгуем.
      */
     private boolean forcedReplacement;
+
+    /**
+     * Оператор запросил плановую остановку: покупки прекращены, ждём распродажи.
+     *
+     * Отдельно от halted намеренно. halted — это авария: бот замер, и что делать
+     * с позицией, решает человек. Здесь наоборот, решение уже принято и работа
+     * продолжается — просто в одну сторону, до полного выхода из позиции.
+     */
+    private boolean stopScheduled;
+
+    /** Остановка уже запрошена: просить её второй раз незачем. Живёт до конца процесса. */
+    private boolean stopRequested;
     private Instant lastReplacementAt;
     private BigDecimal reconciledPosition;
     private volatile StrategySnapshot snapshot;
@@ -162,6 +174,21 @@ public class GridStrategy implements Strategy {
     /** То же для перестановки вверх, застрявшей на незакрываемом остатке позиции. */
     private boolean upperReplacementStallReported;
 
+    /**
+     * Уровни, которые биржа только что отказалась принимать, и до какого момента
+     * их не трогать.
+     *
+     * Отказ отказу рознь, но снаружи они неотличимы, а последствие одно: без паузы
+     * бот повторяет ту же заявку каждый проход. 09.08.2026 бот на MVID полдня бился
+     * об «30099 The price is outside the limits for this instrument» — цена уровня 13
+     * вышла за дневной коридор бумаги, и это не лечится повтором через минуту.
+     * Каждая попытка оставляла запись PENDING, которую следом разбирала сверка.
+     *
+     * Пауза не вечная: коридор меняется вместе с рынком и заведомо другой в новой
+     * сессии, поэтому счётчик сбрасывается и по времени, и при открытии торгов.
+     */
+    private final Map<String, Instant> placementCooldowns = new HashMap<>();
+
     public GridStrategy(GridConfig cfg) {
         this.cfg = cfg;
     }
@@ -197,6 +224,7 @@ public class GridStrategy implements Strategy {
         this.downwardLossBaseline = restored == null ? null : restored.downwardLossBaseline();
         this.lastReplacementAt = restored == null ? null : restored.lastReplacementAt();
         this.forcedReplacement = restored != null && restored.forcedReplacement();
+        this.stopScheduled = restored != null && restored.stopScheduled();
         boolean restoredStateCleared = false;
         if (awaitingUpperReplacement
                 && cfg.onUpperBreakout() != GridConfig.UpperBreakoutAction.REPLACE_UPPER) {
@@ -221,7 +249,7 @@ public class GridStrategy implements Strategy {
             forcedReplacement = false;
             restoredStateCleared = true;
         }
-        this.buyingStopped = awaitingUpperReplacement || awaitingDownwardReplacement;
+        this.buyingStopped = awaitingUpperReplacement || awaitingDownwardReplacement || stopScheduled;
         this.lastPrice = resolution.referencePrice();
         // Цена пришла REST-запросом оценщика диапазона, а не стримом. Сообщаем её
         // наружу: иначе бот торгует по ней, а рыночная оценка позиции пустует.
@@ -413,7 +441,14 @@ public class GridStrategy implements Strategy {
 
     private RangeResolution resolveActiveRange(ReconcileResult initialState, TradingConstraints constraints) {
         if (!cfg.autoRange()) {
-            return new RangeResolution(GridRange.manual(cfg, ctx.clock().instant()), 0, null, false, null);
+            // Диапазон ручной сетки задаёт конфиг — его восстанавливать неоткуда и незачем.
+            // А вот остальные флаги состояния принадлежат БОТУ, а не диапазону: ожидание
+            // перестановки, идущая ликвидация, запрошенная плановая остановка. Пока
+            // состояние здесь не читалось вовсе, поднятый супервизором ручной бот забывал
+            // решение владельца и как ни в чём не бывало начинал покупать заново.
+            GridStrategyState restored = ctx.loadState(GridStrategyState.class).orElse(null);
+            return new RangeResolution(GridRange.manual(cfg, ctx.clock().instant()),
+                    0, null, false, restored);
         }
 
         Optional<GridStrategyState> restored = ctx.loadState(GridStrategyState.class);
@@ -467,6 +502,8 @@ public class GridStrategy implements Strategy {
         limitOrdersAvailable = event.limitOrdersAvailable();
 
         if (!was && limitOrdersAvailable) {
+            // Новая сессия — новый коридор цен: прошлые отказы к ней отношения не имеют.
+            placementCooldowns.clear();
             ctx.event(BotEventType.HOUSEKEEPING,
                     "Торги открыты (%s) — сверяюсь и расставляю сетку".formatted(event.rawStatus()));
             ReconcileResult reconciled = reconcileAndCheck();
@@ -728,6 +765,44 @@ public class GridStrategy implements Strategy {
         return price.divide(step, 0, RoundingMode.CEILING).multiply(step);
     }
 
+    /**
+     * Пауза после отказа биржи: столько уровень не пытаемся выставить снова.
+     *
+     * Минута — период тика, и повтор на каждом тике как раз и давал шторм в журнале.
+     * Пятнадцать минут — компромисс: достаточно редко, чтобы не шуметь, достаточно
+     * часто, чтобы вернуться в игру, как только коридор цен раздвинется.
+     */
+    private static final Duration PLACEMENT_COOLDOWN = Duration.ofMinutes(15);
+
+    private static String placementKey(OrderSide side, int level) {
+        return side + ":" + level;
+    }
+
+    private boolean levelIsCoolingDown(OrderSide side, int level) {
+        Instant until = placementCooldowns.get(placementKey(side, level));
+        return until != null && ctx.clock().instant().isBefore(until);
+    }
+
+    private void clearPlacementFailure(OrderSide side, int level) {
+        placementCooldowns.remove(placementKey(side, level));
+    }
+
+    /**
+     * Сообщаем об отказе ОДИН раз за паузу, а не каждый проход: журнал событий
+     * читают люди, и сотня одинаковых строк прячет всё остальное.
+     */
+    private void notePlacementFailure(OrderSide side, int level, Exception e) {
+        String key = placementKey(side, level);
+        boolean firstTime = placementCooldowns.put(key, ctx.clock().instant().plus(PLACEMENT_COOLDOWN)) == null;
+        if (firstTime) {
+            ctx.error(("Не удалось выставить заявку на уровне %d (%s). "
+                    + "Повторю не раньше чем через %d минут")
+                    .formatted(level, side, PLACEMENT_COOLDOWN.toMinutes()), e);
+        } else {
+            log.debug("Уровень {} снова отвергнут биржей: {}", level, e.getMessage());
+        }
+    }
+
     /** Наша живая заявка на продажу пыли, если она есть. */
     private BotOrderView openDustOrder() {
         return ctx.gateway().openOrders(ctx.botId()).stream()
@@ -847,6 +922,11 @@ public class GridStrategy implements Strategy {
         // Тот же сторож для торговой сессии: потерянное стримом открытие иначе
         // означало бы, что бот молчит весь день.
         refreshTradingStatusIfClosed();
+
+        // Отдельно от ensureOrders: та выходит раньше на закрытой бирже и при
+        // расхождении позиции, а плановая остановка вполне может завершиться и там —
+        // например, если продавать было нечего с самого начала.
+        completeScheduledStopIfDone();
 
         if (awaitingDownwardReplacement) {
             manageDownwardLiquidation();
@@ -990,6 +1070,10 @@ public class GridStrategy implements Strategy {
         // Пыль продаётся последней и независимо от сетки: её заявка не занимает уровня
         // и не участвует в лимите капитала сетки — этот товар уже куплен и оплачен.
         manageDustSale();
+
+        // Продавать могло стать нечего именно сейчас — например, последняя встречная
+        // продажа исполнилась на этом же проходе.
+        completeScheduledStopIfDone();
     }
 
     /**
@@ -1192,17 +1276,21 @@ public class GridStrategy implements Strategy {
             // верхний, продажный уровень). Ноль до PlaceIntent доходить не должен.
             return true;
         }
+        if (levelIsCoolingDown(side, level)) {
+            // Этот уровень биржа только что отвергла. Пропускаем именно его,
+            // а не весь проход: остальные уровни ни в чём не виноваты.
+            return true;
+        }
         try {
             ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(side, quantity, price, level));
+            clearPlacementFailure(side, level);
             return true;
         } catch (RiskRejectedException e) {
             // Штатный отказ: лимит сработал так, как задумано.
             ctx.event(BotEventType.RISK_BLOCKED, e.getMessage());
             return false;
         } catch (Exception e) {
-            // Сетевая ошибка: запись осталась PENDING, её разрешит сверка.
-            // Продолжать этот проход бессмысленно — биржа недоступна.
-            ctx.error("Не удалось выставить заявку на уровне " + level, e);
+            notePlacementFailure(side, level, e);
             // Отказ бывает не только сетевым: так же выглядит закрытие сессии,
             // о котором стрим не сообщил. Спрашиваем биржу, чтобы не повторять
             // ту же заявку каждую минуту до утра.
@@ -1721,10 +1809,97 @@ public class GridStrategy implements Strategy {
 
     @Override
     public void onCommand(StrategyCommand command) {
-        if (command != StrategyCommand.FORCE_GRID_REPLACEMENT) {
-            throw new UnsupportedOperationException("GRID не поддерживает команду " + command);
+        switch (command) {
+            case FORCE_GRID_REPLACEMENT -> forceReplacement();
+            case SCHEDULE_STOP -> scheduleStop();
+            case CANCEL_SCHEDULED_STOP -> cancelScheduledStop();
+            default -> throw new UnsupportedOperationException("GRID не поддерживает команду " + command);
         }
-        forceReplacement();
+    }
+
+    /**
+     * Плановая остановка: снять покупки и дождаться, пока распродастся позиция.
+     *
+     * Покупки снимаются сразу и целиком — это и есть «уже не начавшие выполняться
+     * заявки». Встречные продажи остаются: они и закрывают позицию, каждая по своей
+     * цене уровня. Бот выключится сам, когда продавать станет нечего.
+     *
+     * Ждать может долго: продажи стоят по ценам сетки, а не по рынку. Это осознанный
+     * размен — цена вместо скорости. Кому нужна скорость, у того есть перестройка
+     * с фиксацией убытка, которая закрывает позицию по рынку.
+     */
+    private void scheduleStop() {
+        if (stopped || ctx == null) {
+            throw new IllegalStateException("Бот не запущен");
+        }
+        if (stopScheduled) {
+            return;
+        }
+        stopScheduled = true;
+        buyingStopped = true;
+        cancelOpenBuys();
+        persistState();
+        updateSnapshot();
+
+        ctx.event(BotEventType.RANGE_EXIT,
+                "Запланирована остановка: покупки сняты, жду исполнения продаж. "
+                        + "Бот выключится сам, когда позиция закроется.");
+
+        // Возможно, продавать уже нечего — тогда незачем ждать вообще.
+        completeScheduledStopIfDone();
+    }
+
+    /** Отмена решения: бот возвращается в обычную работу с той же сеткой. */
+    private void cancelScheduledStop() {
+        if (!stopScheduled) {
+            return;
+        }
+        stopScheduled = false;
+        stopRequested = false;
+        buyingStopped = shouldStopBuying();
+        persistState();
+        updateSnapshot();
+        ctx.event(BotEventType.HOUSEKEEPING,
+                "Плановая остановка отменена — бот возвращается к работе.");
+        ensureOrders(null);
+    }
+
+    /**
+     * Выключает бота, когда продавать больше нечего.
+     *
+     * Условий два. Позиция закрыта — с той же оговоркой про непродаваемый остаток,
+     * что и везде: точного нуля на бирже с комиссией монетой не бывает. И на бирже
+     * не осталось наших заявок, включая продажу пыли: бота после плановой остановки
+     * должно быть можно удалить, а удалению мешает любая живая заявка.
+     */
+    private void completeScheduledStopIfDone() {
+        if (!stopScheduled || stopRequested || halted
+                || positionMismatched || reconciledPosition == null) {
+            return;
+        }
+        if (!positionIsFlat(reconciledPosition)) {
+            return;
+        }
+        for (BotOrderView order : ctx.gateway().openOrders(ctx.botId())) {
+            try {
+                ctx.gateway().cancel(ctx.execution(), order.id());
+            } catch (Exception e) {
+                ctx.error("Не удалось снять заявку при плановой остановке", e);
+                return;
+            }
+        }
+        if (!ctx.gateway().openOrders(ctx.botId()).isEmpty()) {
+            // Что-то не снялось — попробуем на следующем проходе, а не выключимся
+            // с живой заявкой на бирже.
+            return;
+        }
+        // Остановку просим ровно один раз: проверка живёт и в тике, и в ensureOrders,
+        // и оба пути законно срабатывают на одном проходе.
+        stopRequested = true;
+        ctx.event(BotEventType.RANGE_EXIT,
+                "Плановая остановка завершена: позиция закрыта, заявок не осталось. "
+                        + "Бота можно безопасно удалить.");
+        ctx.requestStop("Плановая остановка завершена");
     }
 
     /**
@@ -1858,7 +2033,7 @@ public class GridStrategy implements Strategy {
 
     private boolean shouldStopBuying() {
         return blockedByFees || halted || awaitingUpperReplacement
-                || awaitingDownwardReplacement || lowerBreakoutPaused;
+                || awaitingDownwardReplacement || lowerBreakoutPaused || stopScheduled;
     }
 
     /** Снимает только покупки старой сетки; закрывающие продажи обязаны остаться. */
@@ -2035,7 +2210,7 @@ public class GridStrategy implements Strategy {
         ctx.saveState(new GridStrategyState(
                 activeRange, gridGeneration, awaitingUpperReplacement, lastReplacementAt,
                 awaitingDownwardReplacement, pendingDownwardRange, downwardReplacements,
-                realizedDownwardLoss, downwardLossBaseline, forcedReplacement));
+                realizedDownwardLoss, downwardLossBaseline, forcedReplacement, stopScheduled));
     }
 
     /**
@@ -2156,7 +2331,7 @@ public class GridStrategy implements Strategy {
                 activeRange.origin().name(), activeRange.since(), gridGeneration,
                 buyingStopped, awaitingUpperReplacement || awaitingDownwardReplacement,
                 awaitingDownwardReplacement ? "DOWN" : awaitingUpperReplacement ? "UP" : null,
-                downwardReplacements, realizedDownwardLoss, halted,
+                downwardReplacements, realizedDownwardLoss, halted, stopScheduled,
                 sizing == null ? null : sizing.quantityByLevel(),
                 sizing == null ? null : sizing.mode().name(),
                 sizing == null ? null : sizing.workingBudget(),

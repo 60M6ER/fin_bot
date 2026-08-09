@@ -69,6 +69,10 @@ public class RuntimeSupervisor {
             UUID id = conn.getId();
 
             if (exchangeRuntimeService.isRunning(id)) {
+                if (marketDataStreamIsDead(id)) {
+                    restartForDeadStream(conn);
+                    continue;
+                }
                 backoffs.remove(id);
                 continue;
             }
@@ -107,6 +111,46 @@ public class RuntimeSupervisor {
             botRuntimeService.start(botId, false);
             recordOutcome(botId, botRuntimeService.isRunning(botId));
         }
+    }
+
+    /**
+     * Оборвавшийся стрим рыночных данных при живом подключении.
+     *
+     * Подключение считается работающим, пока живы его REST-вызовы, и молчащий
+     * стрим этому не мешает — а бот при этом ослеп: цен нет, решений нет, заявок нет.
+     * 09.08.2026 стримы Poloniex оборвались, и оба бота простояли до тех пор, пока
+     * подключение не перезапустили руками. Само оно не восстановилось бы: адаптер
+     * Poloniex при обрыве сокета только сообщает об этом, но не переподписывается.
+     *
+     * Смотрим ИМЕННО на флаг соединения, а не на тишину. Тишина — нормальное
+     * состояние стрима закрытой биржи: у брокера ночью не проходит ни одной сделки,
+     * и перезапуск по тишине означал бы перезапуск каждые несколько минут до утра.
+     */
+    private boolean marketDataStreamIsDead(UUID connectionId) {
+        try {
+            return exchangeRuntimeService.get(connectionId)
+                    .map(h -> !h.marketDataStreamHealth().connected())
+                    .orElse(false);
+        } catch (Exception e) {
+            // Не смогли спросить — не наше дело гадать: пусть подключение работает.
+            log.debug("Не удалось прочитать здоровье стрима {}: {}", connectionId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Перезапуск идёт через тот же backoff, что и обычный подъём: если стрим падает
+     * снова и снова, попытки должны редеть, а не молотить биржу по кругу.
+     */
+    private void restartForDeadStream(ExchangeConnectionEntity conn) {
+        UUID id = conn.getId();
+        if (!shouldAttempt(id)) {
+            return;
+        }
+        log.warn("Supervisor: market data stream of connection {} ({}) is down. Restarting.",
+                conn.getName(), id);
+        exchangeRuntimeService.restart(id);
+        recordOutcome(id, exchangeRuntimeService.isRunning(id) && !marketDataStreamIsDead(id));
     }
 
     // ==============================

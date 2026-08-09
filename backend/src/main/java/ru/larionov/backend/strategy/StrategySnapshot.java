@@ -18,6 +18,8 @@ public record StrategySnapshot(
         int downwardReplacements,
         BigDecimal realizedDownwardLoss,
         boolean halted,
+        /** Запрошена плановая остановка: покупок нет, ждём распродажи позиции. */
+        boolean stopScheduled,
         /** Размер заявки по уровням покупки в единицах базового актива: индекс — уровень. */
         List<BigDecimal> quantityByLevel,
         String sizingMode,

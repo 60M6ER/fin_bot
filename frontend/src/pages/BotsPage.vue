@@ -76,6 +76,34 @@
               @click="doActivateDeactivate"
             />
 
+            <!--
+              Плановая остановка стоит рядом с обычной намеренно: это две ветки
+              одного решения. Обычная гасит бота там, где он есть, вместе с купленным;
+              плановая доводит циклы до конца и выключает бота сам.
+            -->
+            <q-btn
+              v-if="detail && detail.active && stopScheduled"
+              dense
+              outline
+              color="primary"
+              icon="undo"
+              label="Отменить остановку"
+              :loading="scheduleStopLoading"
+              :disable="detailLoading || scheduleStopLoading"
+              @click="doCancelScheduledStop"
+            />
+            <q-btn
+              v-else-if="detail && detail.active"
+              dense
+              outline
+              color="orange-9"
+              icon="hourglass_bottom"
+              label="Запланировать остановку"
+              :loading="scheduleStopLoading"
+              :disable="detailLoading || scheduleStopLoading"
+              @click="scheduleStopDialog = true"
+            />
+
             <q-btn
               dense
               flat
@@ -569,6 +597,11 @@
                         : 'закрытие перед перестановкой вверх'"
                       color="orange-8" outline
                     />
+                    <q-badge
+                      v-if="state.strategySnapshot.stopScheduled"
+                      label="плановая остановка: жду распродажи"
+                      color="orange-9" outline
+                    />
                     <q-badge v-if="state.strategySnapshot.buyingStopped" label="покупки остановлены" color="warning" outline />
                     <q-badge v-if="state.strategySnapshot.halted" label="остановлена" color="negative" outline />
                   </div>
@@ -703,6 +736,37 @@
       </q-card>
     </q-dialog>
 
+    <!-- Плановая остановка -->
+    <q-dialog v-model="scheduleStopDialog">
+      <q-card style="min-width: 520px; max-width: 640px">
+        <q-card-section class="row items-center q-gutter-sm">
+          <q-icon name="hourglass_bottom" color="orange-9" size="md" />
+          <div class="text-subtitle1">Запланировать остановку?</div>
+        </q-card-section>
+
+        <q-card-section class="text-body2">
+          Покупки снимутся сразу, встречные продажи останутся работать. Бот выключится
+          сам, когда позиция закроется, — после этого его можно безопасно удалить.
+          <div class="text-caption text-grey q-mt-sm">
+            Продажи стоят по ценам сетки, а не по рынку, поэтому ждать можно долго:
+            это размен цены на скорость. Нужно закрыться быстро — перестройте сетку
+            с фиксацией убытка, она продаёт по рынку. Решение отменяемо.
+          </div>
+        </q-card-section>
+
+        <q-card-actions align="right">
+          <q-btn flat label="Отмена" v-close-popup :disable="scheduleStopLoading" />
+          <q-btn
+            unelevated
+            color="orange-9"
+            label="Запланировать"
+            :loading="scheduleStopLoading"
+            @click="doScheduleStop"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
     <!-- Перестройка сетки с фиксацией убытка -->
     <q-dialog v-model="forceDialog">
       <q-card style="min-width: 520px; max-width: 640px">
@@ -806,6 +870,10 @@ const createDialog = ref(false)
 const createLoading = ref(false)
 const forceDialog = ref(false)
 const forceLoading = ref(false)
+const scheduleStopDialog = ref(false)
+const scheduleStopLoading = ref(false)
+
+const stopScheduled = computed(() => !!state.value.strategySnapshot?.stopScheduled)
 const createForm = reactive({ name: '', strategyType: null, exchangeConnectionId: null })
 
 const editForm = reactive({ name: '', strategyType: null, exchangeConnectionId: null, strategyConfig: '{}' })
@@ -1044,6 +1112,31 @@ const currentRange = computed(() => {
   if (!s) return null
   return `${formatMoney(s.lowerPrice)} — ${formatMoney(s.upperPrice)}`
 })
+
+async function doScheduleStop () {
+  await sendStopCommand('schedule-stop', 'Остановка запланирована — жду распродажи позиции')
+  scheduleStopDialog.value = false
+}
+
+async function doCancelScheduledStop () {
+  await sendStopCommand('cancel-scheduled-stop', 'Плановая остановка отменена')
+}
+
+async function sendStopCommand (path, okMessage) {
+  const id = detail.value?.id
+  if (!id) return
+  scheduleStopLoading.value = true
+  try {
+    await apiClient.post(`/api/v1/bots/${id}/${path}`)
+    // Ответ означает «команда принята»: работу бот делает у себя в цикле.
+    toast?.ok(okMessage)
+    await loadState(id)
+  } catch (e) {
+    toast?.err(getErrorMessage(e, 'Не удалось выполнить команду'), { timeout: 8000 })
+  } finally {
+    scheduleStopLoading.value = false
+  }
+}
 
 async function doForceReplace () {
   const id = detail.value?.id

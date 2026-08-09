@@ -217,6 +217,35 @@ public class ExchangeRuntimeService {
         }
     }
 
+    /**
+     * Поднять подключение заново, НЕ трогая намерение пользователя.
+     *
+     * Отличие от {@link #deactivate} принципиальное: та снимает флаг «должно
+     * работать» в базе — это команда человека. Здесь же чинится техника: оборвался
+     * стрим, соединение надо пересобрать, а желание владельца торговать никуда
+     * не делось. Перепутать их значит погасить подключение до утра из-за разрыва
+     * вебсокета.
+     *
+     * Боты поднимутся каскадом внутри {@link #start}, как при обычной активации.
+     */
+    public void restart(UUID id) {
+        synchronized (lock(id)) {
+            botRuntimeService.onConnectionDeactivating(id);
+
+            ExchangeHandler handler = handlers.remove(id);
+            if (handler != null) {
+                try {
+                    handler.stop();
+                } catch (Exception ex) {
+                    log.warn("Exchange handler stop before restart failed: id={}, err={}",
+                            id, ex.getMessage(), ex);
+                }
+            }
+            runtime.put(id, new RuntimeInfo(id, RuntimeState.ACTIVATING, null, Instant.now()));
+        }
+        start(id, false);
+    }
+
     /** Команда пользователя «остановить подключение»: снимает намерение и гасит runtime вместе с ботами. */
     public void deactivate(UUID id) {
         synchronized (lock(id)) {

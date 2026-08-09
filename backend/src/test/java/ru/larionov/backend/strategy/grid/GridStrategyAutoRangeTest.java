@@ -327,6 +327,86 @@ class GridStrategyAutoRangeTest {
         verify(gateway, never()).cancel(any(), any());
     }
 
+    /**
+     * Инцидент 09.08.2026: бот на MVID полдня бился об «30099 The price is outside
+     * the limits for this instrument» — цена уровня вышла за дневной коридор бумаги.
+     * Биржа при этом открыта, так что переспрашивать её статус бесполезно, а повтор
+     * через минуту не лечит ничего: коридор от повторов не раздвигается. Каждая
+     * попытка оставляла запись PENDING и строку ERROR в журнале.
+     */
+    @Test
+    void aRejectedLevelIsNotRetriedEveryTick() {
+        // Биржа открыта: у неё и спрашивать нечего, коридор цен от этого не раздвинется.
+        when(marketData.getTradingStatus(instrumentId)).thenReturn(
+                new TradingStatusEvent(instrumentId, true, true, "NORMAL_TRADING", now));
+        // Как на MVID: коридор бумаги отсекает ровно один уровень, остальные проходят.
+        when(gateway.placeLimit(any(), any())).thenAnswer(invocation -> {
+            ru.larionov.backend.execution.PlaceIntent intent = invocation.getArgument(1);
+            if (Integer.valueOf(0).equals(intent.gridLevel())) {
+                throw new IllegalStateException("30099 The price is outside the limits");
+            }
+            return null;
+        });
+
+        GridStrategy strategy = new GridStrategy(autoConfig());
+        strategy.onStart(ctx, reconciled("0"));
+        strategy.onPrice(lastPrice("100"));
+
+        currentTime.set(now.plusSeconds(60));
+        strategy.onPrice(lastPrice("100"));
+        currentTime.set(now.plusSeconds(120));
+        strategy.onPrice(lastPrice("100"));
+
+        assertThat(attemptsAtLevel(0))
+                .as("отвергнутый уровень не должен долбиться в биржу каждый тик")
+                .isEqualTo(1);
+        assertThat(failureReports())
+                .as("и повторять одну и ту же строку в журнале тоже не должен")
+                .isEqualTo(1);
+        assertThat(attemptsAtLevel(1))
+                .as("соседние уровни коридор не отсекал — они обязаны выставиться")
+                .isPositive();
+    }
+
+    /** Сколько раз стратегия дошла до биржи с постановкой на этом уровне. */
+    private long attemptsAtLevel(int level) {
+        return org.mockito.Mockito.mockingDetails(gateway).getInvocations().stream()
+                .filter(i -> "placeLimit".equals(i.getMethod().getName()))
+                .filter(i -> i.getArguments().length > 1
+                        && i.getArguments()[1] instanceof ru.larionov.backend.execution.PlaceIntent intent
+                        && Integer.valueOf(level).equals(intent.gridLevel()))
+                .count();
+    }
+
+    /** Сколько раз про отказ написано в журнал событий. */
+    private long failureReports() {
+        return org.mockito.Mockito.mockingDetails(ctx).getInvocations().stream()
+                .filter(i -> "error".equals(i.getMethod().getName()))
+                .filter(i -> i.getArguments().length > 0
+                        && String.valueOf(i.getArguments()[0]).contains("Повторю не раньше"))
+                .count();
+    }
+
+    /** Новая сессия — новый коридор цен: пауза после отказа к ней отношения не имеет. */
+    @Test
+    void anOpeningSessionClearsThePlacementCooldown() {
+        when(marketData.getTradingStatus(instrumentId)).thenReturn(
+                new TradingStatusEvent(instrumentId, true, true, "NORMAL_TRADING", now));
+        when(gateway.placeLimit(any(), any())).thenThrow(new IllegalStateException("30099"));
+
+        GridStrategy strategy = new GridStrategy(autoConfig());
+        strategy.onStart(ctx, reconciled("0"));
+        strategy.onPrice(lastPrice("100"));
+        org.mockito.Mockito.clearInvocations(gateway);
+
+        strategy.onTradingStatus(new TradingStatusEvent(
+                instrumentId, false, false, "CLOSED", now));
+        strategy.onTradingStatus(new TradingStatusEvent(
+                instrumentId, true, true, "NORMAL_TRADING", now));
+
+        verify(gateway, org.mockito.Mockito.atLeastOnce()).placeLimit(any(), any());
+    }
+
     @Test
     void watchdogCompletesConfirmationWithoutAnotherPriceEvent() {
         when(gateway.reconcile(any())).thenReturn(reconciled("0"));
