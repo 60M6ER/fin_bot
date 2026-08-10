@@ -106,7 +106,7 @@ class GridStrategyForcedReplacementTest {
         when(marketData.getOrderBook(instrumentId, 1)).thenAnswer(__ -> orderBook(bid.get()));
 
         when(gateway.openOrders(botId)).thenAnswer(__ -> List.copyOf(openOrders));
-        when(gateway.recentOrders(botId)).thenReturn(List.of());
+        when(gateway.levelOrders(eq(botId), any())).thenReturn(List.of());
         when(gateway.reconcile(any())).thenAnswer(__ -> reconciled(position.get()));
         doAnswer(__ -> {
             int count = openOrders.size();

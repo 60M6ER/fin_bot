@@ -104,7 +104,7 @@ class GridStrategyDownwardReplacementTest {
         when(marketData.getOrderBook(instrumentId, 1)).thenAnswer(__ -> orderBook(bid.get()));
 
         when(gateway.openOrders(botId)).thenAnswer(__ -> List.copyOf(openOrders));
-        when(gateway.recentOrders(botId)).thenReturn(List.of());
+        when(gateway.levelOrders(eq(botId), any())).thenReturn(List.of());
         when(gateway.reconcile(any())).thenAnswer(__ -> reconciled(position.get()));
         doAnswer(__ -> {
             int count = openOrders.size();
@@ -320,9 +320,8 @@ class GridStrategyDownwardReplacementTest {
 
         // Покупка старого поколения исполнилась и была закрыта ликвидационной
         // продажей без уровня — ровно как в бою.
-        when(gateway.recentOrders(botId)).thenReturn(List.of(
-                executed(OrderSide.BUY, 0, 1, now),
-                executed(OrderSide.SELL, null, 1, now.plusSeconds(5))));
+        journal(executed(OrderSide.BUY, 0, 1, now),
+                executed(OrderSide.SELL, null, 1, now.plusSeconds(5)));
 
         confirmLowerBreakout(strategy);
 
@@ -342,8 +341,7 @@ class GridStrategyDownwardReplacementTest {
     @Test
     void levelHeldWithinCurrentGenerationIsStillCounted() {
         GridStrategy strategy = start(config("50", 2));
-        when(gateway.recentOrders(botId)).thenReturn(List.of(
-                executed(OrderSide.BUY, 0, 1, now.plusSeconds(1))));
+        journal(executed(OrderSide.BUY, 0, 1, now.plusSeconds(1)));
         position.set(BigDecimal.ONE);
         strategy.onReconcile(reconciled(BigDecimal.ONE));
         clearInvocations(gateway);
@@ -351,6 +349,22 @@ class GridStrategyDownwardReplacementTest {
         strategy.onPrice(lastPrice("100"));
 
         verify(gateway).placeLimit(any(), argThat(i -> i.side() == OrderSide.SELL && i.gridLevel() == 0));
+    }
+
+    /**
+     * Журнал уровней с той же отсечкой по времени, что и у боевого запроса
+     * ({@code created_at >= :since}). Без неё заглушка врала бы стратегии: возвращала
+     * бы ордера прошлого поколения, которых база ей не отдаёт, — и проверка «уровни
+     * ликвидированного поколения не занимают новую сетку» проходила бы вхолостую.
+     */
+    private void journal(BotOrderView... orders) {
+        List<BotOrderView> all = List.of(orders);
+        when(gateway.levelOrders(eq(botId), any())).thenAnswer(invocation -> {
+            Instant since = invocation.getArgument(1);
+            return all.stream()
+                    .filter(o -> since == null || !o.createdAt().isBefore(since))
+                    .toList();
+        });
     }
 
     private BotOrderView executed(OrderSide side, Integer gridLevel, long quantity, Instant createdAt) {

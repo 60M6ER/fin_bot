@@ -3,6 +3,7 @@ package ru.larionov.backend.execution;
 import ru.larionov.backend.exchange.api.model.market.LastPrice;
 import ru.larionov.backend.exchange.api.model.order.OrderState;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -44,11 +45,18 @@ public interface ExecutionGateway {
     List<BotOrderView> openOrders(UUID botId);
 
     /**
-     * История ордеров бота — нужна, чтобы восстановить, на каких уровнях лежит
-     * купленное и ещё не проданное. По одним лишь открытым заявкам это не выводится:
-     * исполненная покупка из списка открытых исчезает.
+     * Исполненные ордера с уровнями, начиная с момента {@code since} — из них
+     * восстанавливается, на каких уровнях лежит купленное и ещё не проданное.
+     * По одним лишь открытым заявкам это не выводится: исполненная покупка из
+     * списка открытых исчезает.
+     *
+     * Возвращается ВСЯ история поколения, без ограничения по числу строк. Обрезка
+     * здесь недопустима: продажа всегда новее своей покупки, поэтому на границе
+     * окна уровень теряет покупку раньше, чем закрывшую её продажу, и остаток
+     * уровня молча уходит в ноль или в минус. Ровно так 10.08.2026 бот перестал
+     * видеть собственные 20 лотов и встал на перестановке диапазона.
      */
-    List<BotOrderView> recentOrders(UUID botId);
+    List<BotOrderView> levelOrders(UUID botId, Instant since);
 
     /**
      * Быстрый путь: событие из ордерного стрима. Сопоставляется с журналом по

@@ -94,7 +94,7 @@ class GridStrategyScheduledStopTest {
                 new TradingStatusEvent(instrumentId, true, true, "NORMAL_TRADING", now));
 
         when(gateway.openOrders(botId)).thenAnswer(__ -> List.copyOf(openOrders));
-        when(gateway.recentOrders(botId)).thenAnswer(__ -> List.of());
+        when(gateway.levelOrders(eq(botId), any())).thenAnswer(__ -> List.of());
         when(gateway.reconcile(any())).thenAnswer(__ -> reconciled());
         when(gateway.placeLimit(any(), any())).thenAnswer(invocation -> {
             PlaceIntent intent = invocation.getArgument(1);
@@ -221,6 +221,26 @@ class GridStrategyScheduledStopTest {
 
         assertThat(restarted.snapshot().orElseThrow().stopScheduled()).isTrue();
         assertThat(openBuys()).as("после рестарта покупок тоже быть не должно").isEmpty();
+    }
+
+    /**
+     * Команду мало реализовать — её ещё должен пропустить синхронный список
+     * {@code supports}, который спрашивают до постановки в очередь. Плановая
+     * остановка работала, но в списке её не было, и оператор в ответ на «Остановить»
+     * получал отказ про перестройку сетки — команду, которой не нажимал.
+     *
+     * Сетка здесь ручная (autoRange=false): плановой остановке автодиапазон не нужен,
+     * она ничего не строит, а только снимает покупки и ждёт продажи.
+     */
+    @Test
+    void manualGridAcceptsScheduledStopButNotGridRebuild() {
+        GridStrategy strategy = start();
+
+        assertThat(strategy.supports(StrategyCommand.SCHEDULE_STOP)).isTrue();
+        assertThat(strategy.supports(StrategyCommand.CANCEL_SCHEDULED_STOP)).isTrue();
+        assertThat(strategy.supports(StrategyCommand.FORCE_GRID_REPLACEMENT))
+                .as("перестройка строит новый диапазон, а в ручном режиме его задаёт человек")
+                .isFalse();
     }
 
     // ==============================

@@ -14,6 +14,7 @@ import ru.larionov.backend.repository.BotOrderRepository;
 import ru.larionov.backend.service.BotEventService;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -124,9 +125,8 @@ public class PaperExecutionGateway implements ExecutionGateway {
     }
 
     @Override
-    public List<BotOrderView> recentOrders(UUID botId) {
-        return orderRepo.findTop200ByBotIdOrderByCreatedAtDesc(botId).stream()
-                .filter(BotOrderEntity::isDryRun)
+    public List<BotOrderView> levelOrders(UUID botId, Instant since) {
+        return orderRepo.findLevelOrders(botId, true, since == null ? Instant.EPOCH : since).stream()
                 .map(BotOrderView::of)
                 .toList();
     }

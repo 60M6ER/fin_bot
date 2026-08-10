@@ -14,6 +14,7 @@ import ru.larionov.backend.exchange.api.model.id.InstrumentId;
 import ru.larionov.backend.exchange.api.model.instrument.TradingConstraints;
 import ru.larionov.backend.exchange.api.model.market.LastPrice;
 import ru.larionov.backend.exchange.api.model.market.Price;
+import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.larionov.backend.execution.BotExecutionContext;
 import ru.larionov.backend.execution.BotOrderView;
@@ -96,7 +97,7 @@ class GridStrategyLevelReuseTest {
                 new TradingStatusEvent(instrumentId, true, true, "NORMAL_TRADING", now));
 
         when(gateway.openOrders(botId)).thenAnswer(__ -> List.copyOf(openOrders));
-        when(gateway.recentOrders(botId)).thenAnswer(__ -> List.copyOf(journal));
+        when(gateway.levelOrders(eq(botId), any())).thenAnswer(__ -> List.copyOf(journal));
         when(gateway.placeLimit(any(), any())).thenAnswer(invocation -> {
             PlaceIntent intent = invocation.getArgument(1);
             BotOrderView order = view(intent.side(), intent.gridLevel(), intent.limitPrice(),
@@ -167,6 +168,29 @@ class GridStrategyLevelReuseTest {
     // HARNESS
     // ==============================
 
+    /**
+     * Инцидент 10.08.2026: позиция есть, а уровня, который за неё отвечает, нет.
+     *
+     * Продажи ставятся по уровневому учёту, а закрытия позиции ждут по позиции журнала.
+     * Пока эти величины сходятся, разницы не видно; как только разошлись — на разницу
+     * никто никогда не выставит заявку. Раньше расхождение не проверялось вовсе и
+     * всплывало через сутки, на пробое диапазона, в виде вставшей перестановки.
+     */
+    @Test
+    void positionNoLevelAnswersForIsReportedOnce() {
+        GridStrategy strategy = start();
+        // Журнал уровней пуст — ровно так выглядела обрезанная выборка, — а по позиции
+        // за ботом числятся два лота.
+        strategy.onReconcile(reconciled(new BigDecimal("2")));
+
+        strategy.onPrice(price("50.25"));
+        strategy.onPrice(price("50.24"));
+        strategy.onPrice(price("50.26"));
+
+        verify(ctx, times(1)).event(eq(BotEventType.RISK_BLOCKED),
+                contains("не покрыта уровнями сетки"));
+    }
+
     private GridStrategy start() {
         GridStrategy strategy = new GridStrategy(new GridConfig(
                 new BigDecimal("50.00"), new BigDecimal("50.50"),
@@ -231,7 +255,12 @@ class GridStrategyLevelReuseTest {
     }
 
     private ReconcileResult reconciled() {
-        return new ReconcileResult(List.copyOf(openOrders), BigDecimal.ZERO, BigDecimal.ZERO,
+        return reconciled(BigDecimal.ZERO);
+    }
+
+    /** Излишка на счёте нет — расхождение нулевое, чтобы торговлю ничто не блокировало. */
+    private ReconcileResult reconciled(BigDecimal position) {
+        return new ReconcileResult(List.copyOf(openOrders), position, position,
                 BigDecimal.ZERO, 0, 0, BigDecimal.ZERO);
     }
 

@@ -348,8 +348,8 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
         }
         if (!strategy.supports(command)) {
             throw new IllegalStateException(
-                    "Стратегия этого бота не поддерживает перестройку сетки по команде. "
-                            + "Она доступна GRID-боту с автоматическим диапазоном.");
+                    "Стратегия этого бота не поддерживает команду «%s». Она доступна %s."
+                            .formatted(command.title(), command.availableTo()));
         }
         loop.submitCommand(command);
     }

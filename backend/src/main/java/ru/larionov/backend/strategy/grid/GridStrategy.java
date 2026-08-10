@@ -29,9 +29,11 @@ import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -173,6 +175,12 @@ public class GridStrategy implements Strategy {
 
     /** То же для перестановки вверх, застрявшей на незакрываемом остатке позиции. */
     private boolean upperReplacementStallReported;
+
+    /** Уровни, о разъехавшемся учёте которых уже сообщили. */
+    private final Set<Integer> negativeLevelsReported = new HashSet<>();
+
+    /** То же для позиции, не покрытой ни одним уровнем: сообщаем раз за эпизод. */
+    private boolean uncoveredPositionReported;
 
     /**
      * Уровни, которые биржа только что отказалась принимать, и до какого момента
@@ -1061,6 +1069,7 @@ public class GridStrategy implements Strategy {
         // на нём не встанет. Порядок важен — heldByLevel после этого пересчитан.
         sweepDust(openBuys, openSellQuantityByLevel);
         Map<Integer, BigDecimal> heldByLevel = computeHeldQuantityByLevel();
+        reportUncoveredPosition(heldByLevel);
 
         openOrderCount += placeMissingSells(openBuys, openSellQuantityByLevel, heldByLevel, openOrderCount);
         if (!buyingStopped) {
@@ -1103,6 +1112,8 @@ public class GridStrategy implements Strategy {
         collected.forEach((level, quantity) -> held.computeIfPresent(level,
                 (__, value) -> value.subtract(quantity)));
 
+        reportNegativeLevels(held);
+
         // Остаток мельче шага количества продать невозможно: биржа такую заявку не примет.
         // Считать уровень занятым из-за него — значит вывести уровень из игры навсегда:
         // продать нечего, а покупку блокирует сама эта запись. Такая пыль неизбежна там,
@@ -1113,17 +1124,48 @@ public class GridStrategy implements Strategy {
         return held;
     }
 
-    /** Купленное минус проданное по уровням текущего поколения, без каких-либо скидок. */
+    /**
+     * Отрицательный остаток уровня — не то же самое, что пустой.
+     *
+     * Ноль означает «цикл закрыт», и молчать о нём правильно. Минус означает, что по
+     * уровню продано больше, чем куплено, — то есть учёт уровня врёт, и следующая
+     * покупка встанет на уровень, который на самом деле не свободен. Отбрасывались оба
+     * случая одним {@code signum() <= 0}, и именно эта немота прятала обрезанную выборку
+     * журнала: уровень уходил в минус, тихо исчезал, и позиция оставалась без продажи.
+     *
+     * Сообщаем один раз на уровень: тик частый, а журнал событий читают люди.
+     */
+    private void reportNegativeLevels(Map<Integer, BigDecimal> held) {
+        held.forEach((level, quantity) -> {
+            if (quantity.signum() >= 0) {
+                negativeLevelsReported.remove(level);
+                return;
+            }
+            if (negativeLevelsReported.add(level)) {
+                ctx.warn(("Учёт уровня %d разошёлся: продано больше, чем куплено (остаток %s). "
+                        + "Уровень исключён из расчёта до выяснения.")
+                        .formatted(level, plainQuantity(quantity)));
+            }
+        });
+    }
+
+    /**
+     * Купленное минус проданное по уровням текущего поколения, без каких-либо скидок.
+     *
+     * Источник — ВСЯ история поколения, а не последние N записей журнала. Обрезка
+     * здесь стоила застрявшей позиции: продажа всегда новее своей покупки, поэтому на
+     * границе окна уровень терял покупку раньше закрывшей её продажи и уходил в ноль
+     * или в минус. 10.08.2026 на боте DOGE уровень с реальными +20 лотами показывал в
+     * окне ровно 0, исчезал из учёта, трижды перекупался и не получил ни одной
+     * встречной продажи — а перестановка диапазона вверх ждала закрытия позиции,
+     * которой больше никто не видел.
+     */
     private Map<Integer, BigDecimal> rawHeldByLevel() {
-        Instant generationStart = activeRange == null ? null : activeRange.since();
+        Instant generationStart = activeRange == null ? Instant.EPOCH : activeRange.since();
         Map<Integer, BigDecimal> held = new HashMap<>();
-        for (BotOrderView o : ctx.gateway().recentOrders(ctx.botId())) {
+        for (BotOrderView o : ctx.gateway().levelOrders(ctx.botId(), generationStart)) {
             BigDecimal executed = o.executedQuantity();
             if (o.gridLevel() == null || executed == null || executed.signum() <= 0) {
-                continue;
-            }
-            if (generationStart != null && o.createdAt() != null
-                    && o.createdAt().isBefore(generationStart)) {
                 continue;
             }
             BigDecimal delta = o.side() == OrderSide.BUY ? executed : executed.negate();
@@ -1145,6 +1187,52 @@ public class GridStrategy implements Strategy {
                 (__, value) -> value.subtract(quantity)));
         held.values().removeIf(v -> v.signum() <= 0);
         return held;
+    }
+
+    /**
+     * Позиция, за которую не отвечает ни один уровень, — это позиция без выхода.
+     *
+     * Продажи ставятся только по уровневому учёту, а ждут закрытия позиции (плановая
+     * остановка, перестановка вверх) — по позиции ЖУРНАЛА, которая считается по всей
+     * истории бота. Пока эти две величины сходятся, разницы между ними не видно; как
+     * только расходятся — на разницу никто никогда не выставит заявку, и ожидание
+     * становится вечным. Раньше расхождение не проверялось вовсе, и обнаруживалось
+     * оно в худший момент: при пробое диапазона, спустя сутки после появления.
+     *
+     * Допуск — тот же, что и везде: непродаваемый остаток расхождением не считается.
+     * Пыль вычитается по той же причине, по которой её вычитает {@link #positionIsFlat}:
+     * она принадлежит отдельной заявке, а не сетке.
+     */
+    private void reportUncoveredPosition(Map<Integer, BigDecimal> heldByLevel) {
+        if (reconciledPosition == null || positionMismatched || lastPrice == null) {
+            return;
+        }
+        BigDecimal uncovered = uncoveredPosition(heldByLevel);
+
+        if (sellableQuantity(uncovered, lastPrice).signum() <= 0) {
+            uncoveredPositionReported = false;
+            return;
+        }
+        if (uncoveredPositionReported) {
+            return;
+        }
+        uncoveredPositionReported = true;
+        ctx.event(BotEventType.RISK_BLOCKED,
+                ("Позиция %s не покрыта уровнями сетки: за %s не отвечает ни один уровень, "
+                        + "и встречную продажу на них бот не выставит. Проверьте уровни поколения %d.")
+                        .formatted(plainQuantity(reconciledPosition), plainQuantity(uncovered),
+                                gridGeneration));
+    }
+
+    /**
+     * Часть позиции журнала, за которую не отвечает ни один уровень и ни корзина пыли.
+     * Именно её никто никогда не выставит на продажу.
+     */
+    private BigDecimal uncoveredPosition(Map<Integer, BigDecimal> heldByLevel) {
+        BigDecimal covered = heldByLevel.values().stream()
+                .reduce(BigDecimal.ZERO, BigDecimal::add)
+                .add(dustQuantity());
+        return reconciledPosition.subtract(covered);
     }
 
     /** Сколько с каждого уровня уже переведено в пыль. Ошибка чтения = «нисколько». */
@@ -1802,9 +1890,27 @@ public class GridStrategy implements Strategy {
         ensureOrders(null);
     }
 
+    /**
+     * Список обязан совпадать с разбором в {@link #onCommand}: разъехавшись, они дают
+     * худший вид отказа — команда реализована и работает, но до стратегии не доходит.
+     * Ровно так и случилось с плановой остановкой: и кнопка, и контроллер, и
+     * {@link #scheduleStop()} были на месте, а здесь остался один пункт, и оператор
+     * получал отказ про перестройку сетки в ответ на нажатие «Остановить».
+     *
+     * Автодиапазон требуется только перестройке: она СТРОИТ новый диапазон по ATR,
+     * а ручному боту его задаёт человек, и подменять его нечем. Плановая остановка
+     * ничего не строит — она снимает покупки и ждёт продажи, что осмысленно
+     * для любой сетки.
+     */
     @Override
     public boolean supports(StrategyCommand command) {
-        return command == StrategyCommand.FORCE_GRID_REPLACEMENT && cfg.autoRange();
+        if (!cfg.enabled()) {
+            return false;
+        }
+        return switch (command) {
+            case FORCE_GRID_REPLACEMENT -> cfg.autoRange();
+            case SCHEDULE_STOP, CANCEL_SCHEDULED_STOP -> true;
+        };
     }
 
     @Override
@@ -2144,25 +2250,38 @@ public class GridStrategy implements Strategy {
     /**
      * Ожидание, из которого нечему вывести, — это тупик, а не терпение.
      *
-     * Пока на бирже висят продажи, ждать правильно: они и закроют позицию. Но если
-     * заявок нет ВОВСЕ, а остаток продаваем — значит его никто не выставил и уже не
-     * выставит: сюда мы попадаем только после {@link #ensureOrders}, у которой была
-     * ровно эта возможность. Дальше бот будет ждать вечно.
+     * Пока на бирже висят продажи, ждать правильно: они и закроют позицию. Пусто тоже
+     * бывает законно — покупки только что сняты, а встречную продажу поставит
+     * {@link #ensureOrders} на этом же проходе. Тупик — это третий случай: заявок нет
+     * И позиция не закреплена ни за одним уровнем, то есть ставить продажу попросту
+     * не из чего.
      *
-     * Раньше это ожидание было вдобавок беззвучным — ни события, ни строки в логе,
-     * и разбирать инцидент приходилось по исходникам. Сообщаем один раз за эпизод:
-     * тик частый, а журнал событий читают люди.
+     * Проверка на «не из чего» здесь обязательна. Раньше её не было, а первым же
+     * вызывающим оказывается ветка подтверждённого пробоя, снимающая покупки строкой
+     * выше, — и сообщение вылетало ВСЕГДА, ещё до того, как продажу успевали
+     * выставить. Хуже того, флаг после этого взведён, и настоящий тупик того же
+     * эпизода прошёл бы молча.
+     *
+     * Сообщаем один раз за эпизод: тик частый, а журнал событий читают люди.
      */
     private void reportUpperReplacementStall() {
         if (upperReplacementStallReported || !gridOrders().isEmpty()) {
             return;
         }
+        BigDecimal uncovered = uncoveredPosition(computeHeldQuantityByLevel());
+        if (sellableQuantity(uncovered, lastPrice).signum() <= 0) {
+            // Позиция за уровнями закреплена — продажа появится сама.
+            return;
+        }
         upperReplacementStallReported = true;
+        // Это сообщение говорит то же самое, что и общая проверка покрытия, только
+        // с последствием. Второй раз повторять его же общими словами незачем.
+        uncoveredPositionReported = true;
         ctx.event(BotEventType.RISK_BLOCKED,
-                ("Перестановка вверх ждёт закрытия позиции, но заявок на бирже не осталось: "
-                        + "остаток %s никто не продаёт. Сетка не переставится сама — "
-                        + "нужна перестройка с фиксацией убытка.")
-                        .formatted(plainQuantity(reconciledPosition)));
+                ("Перестановка вверх ждёт закрытия позиции %s, но на %s не отвечает ни один "
+                        + "уровень сетки: встречной продажи на этот остаток бот не выставит "
+                        + "и ждать будет вечно. Нужна перестройка с фиксацией убытка.")
+                        .formatted(plainQuantity(reconciledPosition), plainQuantity(uncovered)));
     }
 
     private void failUpperReplacement(String reason) {

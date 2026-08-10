@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -79,7 +80,7 @@ class GridStrategyStopRaceTest {
                 .thenReturn(new LastPrice(instrumentId, new Price(new BigDecimal("100"), "rub"), now));
         when(marketData.getCandles(any(), any())).thenReturn(candles());
         when(gateway.openOrders(botId)).thenReturn(List.of());
-        when(gateway.recentOrders(botId)).thenReturn(List.of());
+        when(gateway.levelOrders(eq(botId), any())).thenReturn(List.of());
         when(gateway.reconcile(any())).thenReturn(reconciled());
     }
 

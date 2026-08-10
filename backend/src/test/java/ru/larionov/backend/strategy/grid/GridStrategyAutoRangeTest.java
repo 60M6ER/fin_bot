@@ -252,7 +252,8 @@ class GridStrategyAutoRangeTest {
     /**
      * Обратная сторона допуска: остаток, который биржа принять ГОТОВА, — это деньги,
      * и молча бросать его нельзя. Бот по-прежнему ждёт продажи, но теперь ждёт
-     * громко: заявок на бирже нет, значит исполниться нечему и само не рассосётся.
+     * громко: за остатком не стоит ни один уровень, значит продажу выставлять не из
+     * чего и само это не рассосётся.
      */
     @Test
     void sellableRemainderKeepsWaitingButSaysSoOnce() {
@@ -271,7 +272,7 @@ class GridStrategyAutoRangeTest {
                 .as("продаваемый остаток бросать нельзя — перестановки не будет")
                 .isTrue();
         verify(ctx, times(1)).event(any(),
-                org.mockito.ArgumentMatchers.contains("заявок на бирже не осталось"));
+                org.mockito.ArgumentMatchers.contains("не отвечает ни один уровень сетки"));
     }
 
     /**

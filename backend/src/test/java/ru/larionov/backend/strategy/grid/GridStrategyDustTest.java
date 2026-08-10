@@ -115,7 +115,7 @@ class GridStrategyDustTest {
                 new TradingStatusEvent(instrumentId, true, true, "NORMAL_TRADING", now));
 
         when(gateway.openOrders(botId)).thenAnswer(__ -> List.copyOf(openOrders));
-        when(gateway.recentOrders(botId)).thenAnswer(__ -> List.copyOf(journal));
+        when(gateway.levelOrders(eq(botId), any())).thenAnswer(__ -> List.copyOf(journal));
         when(gateway.placeLimit(any(), any())).thenAnswer(invocation -> {
             PlaceIntent intent = invocation.getArgument(1);
             placed.add(intent);

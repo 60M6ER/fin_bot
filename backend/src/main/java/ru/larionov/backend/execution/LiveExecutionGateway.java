@@ -247,9 +247,10 @@ public class LiveExecutionGateway implements ExecutionGateway {
     }
 
     @Override
-    public List<BotOrderView> recentOrders(UUID botId) {
-        return orderRepo.findTop200ByBotIdOrderByCreatedAtDesc(botId).stream()
-                .filter(o -> !o.isDryRun())
+    public List<BotOrderView> levelOrders(UUID botId, Instant since) {
+        // dryRun отсекает сам запрос. Раньше фильтр стоял ПОСЛЕ выборки, и бумажные
+        // строки съедали место в её пределе, вытесняя живые.
+        return orderRepo.findLevelOrders(botId, false, since == null ? Instant.EPOCH : since).stream()
                 .map(BotOrderView::of)
                 .toList();
     }
