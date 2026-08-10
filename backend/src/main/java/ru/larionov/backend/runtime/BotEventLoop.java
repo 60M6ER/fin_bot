@@ -4,7 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import ru.larionov.backend.exchange.api.model.market.LastPrice;
 import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.larionov.backend.exchange.api.model.order.OrderState;
-import ru.larionov.backend.strategy.StrategyCommand;
+import ru.larionov.backend.strategy.CommandRequest;
 
 import java.util.UUID;
 import java.util.concurrent.PriorityBlockingQueue;
@@ -126,7 +126,7 @@ public final class BotEventLoop implements AutoCloseable {
      * Команда оператора идёт с управляющим приоритетом: человек уже видит,
      * что бот стоит, и ждать своей очереди за котировками ей незачем.
      */
-    public void submitCommand(StrategyCommand command) {
+    public void submitCommand(CommandRequest command) {
         if (!running.get() || command == null) {
             return;
         }
@@ -198,7 +198,7 @@ public final class BotEventLoop implements AutoCloseable {
                         listener.onPrice(price);
                     }
                 }
-                case COMMAND -> listener.onCommand((StrategyCommand) event.payload());
+                case COMMAND -> listener.onCommand((CommandRequest) event.payload());
                 case ORDER -> listener.onOrderUpdate((OrderState) event.payload());
                 case TRADING_STATUS -> listener.onTradingStatus((TradingStatusEvent) event.payload());
                 case RECONNECT -> listener.onStreamReconnect();

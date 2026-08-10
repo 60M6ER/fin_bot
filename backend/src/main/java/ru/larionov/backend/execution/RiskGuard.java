@@ -217,7 +217,7 @@ public class RiskGuard {
             return;
         }
 
-        CapitalUsage usage = capitalUsage(ctx);
+        CapitalUsage usage = capitalUsage(ctx.botId(), ctx.dryRun());
         // compareTo, а не !=: журнал и книга приходят с разной шкалой BigDecimal,
         // и сравнение через equals объявляло бы расхождением 1 против 1.00.
         if (usage.journalPosition().compareTo(nvl(usage.inventory().openQuantity())) != 0) {
@@ -239,22 +239,29 @@ public class RiskGuard {
 
     /** Деньги, занятые открытыми заявками на покупку и себестоимостью позиции из книги. */
     public BigDecimal usedCapital(BotExecutionContext ctx) {
-        return capitalUsage(ctx).amount();
+        return capitalUsage(ctx.botId(), ctx.dryRun()).amount();
     }
 
-    private CapitalUsage capitalUsage(BotExecutionContext ctx) {
-        List<BotOrderEntity> open = orderRepo.findAllByBotIdAndStatusIn(ctx.botId(), OPEN_STATUSES);
+    /**
+     * То же самое, но для тех, у кого контекста исполнения нет.
+     *
+     * Нужно снаружи торгового цикла — например, чтобы ответить оператору, до какой
+     * суммы бюджет вообще можно опустить. Считать это вторым способом было бы прямым
+     * путём к двум разным ответам на один вопрос.
+     */
+    public CapitalUsage capitalUsage(UUID botId, boolean dryRun) {
+        List<BotOrderEntity> open = orderRepo.findAllByBotIdAndStatusIn(botId, OPEN_STATUSES);
 
         BigDecimal reserved = BigDecimal.ZERO;
         for (BotOrderEntity o : open) {
-            if (o.isDryRun() != ctx.dryRun() || o.getSide() != OrderSide.BUY || o.getLimitPrice() == null) {
+            if (o.isDryRun() != dryRun || o.getSide() != OrderSide.BUY || o.getLimitPrice() == null) {
                 continue;
             }
             reserved = reserved.add(o.getLimitPrice().multiply(o.remainingQuantity()));
         }
 
-        BigDecimal journalPosition = nvl(orderRepo.sumPositionQuantity(ctx.botId(), ctx.dryRun()));
-        Inventory inventory = accounting.inventory(ctx.botId(), ctx.dryRun());
+        BigDecimal journalPosition = nvl(orderRepo.sumPositionQuantity(botId, dryRun));
+        Inventory inventory = accounting.inventory(botId, dryRun);
         return new CapitalUsage(reserved.add(inventory.costBasisOpen()), journalPosition, inventory);
     }
 
@@ -267,6 +274,6 @@ public class RiskGuard {
         return value == null ? "—" : value.stripTrailingZeros().toPlainString();
     }
 
-    private record CapitalUsage(BigDecimal amount, BigDecimal journalPosition, Inventory inventory) {
+    public record CapitalUsage(BigDecimal amount, BigDecimal journalPosition, Inventory inventory) {
     }
 }

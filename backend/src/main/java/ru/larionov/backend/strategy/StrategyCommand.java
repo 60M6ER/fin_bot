@@ -43,14 +43,38 @@ public enum StrategyCommand {
      * на час, отменялось бы только полной остановкой бота, то есть ровно тем,
      * чего плановая и позволяет избежать.
      */
-    CANCEL_SCHEDULED_STOP("отмена плановой остановки", "GRID-боту");
+    CANCEL_SCHEDULED_STOP("отмена плановой остановки", "GRID-боту"),
+
+    /**
+     * Изменить рабочий бюджет на лету, не останавливая бота.
+     *
+     * Без неё бюджет меняется только через общую форму настроек, а она требует
+     * остановленного бота — то есть снятия ВСЕХ заявок, включая встречные продажи
+     * незакрытых циклов. Доливка денег или их вывод не должны стоить порванных циклов.
+     *
+     * Меняются размеры будущих покупок: свободные уровни и уже выставленные, но ещё
+     * не начавшие исполняться заявки. Уровни с открытым циклом доживают его прежним
+     * размером — купленное перекроить нельзя, а продавать нужно ровно то, что куплено.
+     */
+    SET_BUDGET("изменение бюджета", "GRID-боту с бюджетным режимом размера заявки", true);
 
     private final String title;
     private final String availableTo;
+    private final boolean requiresAmount;
 
     StrategyCommand(String title, String availableTo) {
+        this(title, availableTo, false);
+    }
+
+    StrategyCommand(String title, String availableTo, boolean requiresAmount) {
         this.title = title;
         this.availableTo = availableTo;
+        this.requiresAmount = requiresAmount;
+    }
+
+    /** Нужна ли команде сумма: без неё выполнять такую команду нечем. */
+    public boolean requiresAmount() {
+        return requiresAmount;
     }
 
     /** Название для человека: отказ в выполнении читает оператор, а не разработчик. */

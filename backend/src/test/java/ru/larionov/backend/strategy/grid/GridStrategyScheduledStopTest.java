@@ -19,6 +19,7 @@ import ru.larionov.backend.execution.BotOrderView;
 import ru.larionov.backend.execution.ExecutionGateway;
 import ru.larionov.backend.execution.PlaceIntent;
 import ru.larionov.backend.execution.ReconcileResult;
+import ru.larionov.backend.strategy.CommandRequest;
 import ru.larionov.backend.strategy.StrategyCommand;
 import ru.larionov.backend.strategy.StrategyContext;
 
@@ -124,7 +125,7 @@ class GridStrategyScheduledStopTest {
         assertThat(openBuys()).as("сетка обязана была выставить покупки").isNotEmpty();
         BotOrderView sell = placeSellManually();
 
-        strategy.onCommand(StrategyCommand.SCHEDULE_STOP);
+        strategy.onCommand(CommandRequest.of(StrategyCommand.SCHEDULE_STOP));
 
         assertThat(openBuys()).as("покупки сняты — это и есть не начавшие исполняться заявки").isEmpty();
         assertThat(openOrders).as("продажа осталась работать").contains(sell);
@@ -140,7 +141,7 @@ class GridStrategyScheduledStopTest {
         strategy.onPrice(price("100"));
         placeSellManually();
 
-        strategy.onCommand(StrategyCommand.SCHEDULE_STOP);
+        strategy.onCommand(CommandRequest.of(StrategyCommand.SCHEDULE_STOP));
         placed.clear();
 
         strategy.onPrice(price("95"));
@@ -162,7 +163,7 @@ class GridStrategyScheduledStopTest {
         GridStrategy strategy = start();
         strategy.onPrice(price("100"));
         placeSellManually();
-        strategy.onCommand(StrategyCommand.SCHEDULE_STOP);
+        strategy.onCommand(CommandRequest.of(StrategyCommand.SCHEDULE_STOP));
         verify(ctx, never()).requestStop(any());
 
         // Продажа исполнилась: позиции больше нет.
@@ -181,7 +182,7 @@ class GridStrategyScheduledStopTest {
         strategy.onPrice(price("100"));
         placeSellManually();
 
-        strategy.onCommand(StrategyCommand.SCHEDULE_STOP);
+        strategy.onCommand(CommandRequest.of(StrategyCommand.SCHEDULE_STOP));
         strategy.onTick();
         strategy.onTick();
 
@@ -195,9 +196,9 @@ class GridStrategyScheduledStopTest {
         GridStrategy strategy = start();
         strategy.onPrice(price("100"));
         placeSellManually();
-        strategy.onCommand(StrategyCommand.SCHEDULE_STOP);
+        strategy.onCommand(CommandRequest.of(StrategyCommand.SCHEDULE_STOP));
 
-        strategy.onCommand(StrategyCommand.CANCEL_SCHEDULED_STOP);
+        strategy.onCommand(CommandRequest.of(StrategyCommand.CANCEL_SCHEDULED_STOP));
 
         assertThat(saved.get().stopScheduled()).isFalse();
         assertThat(strategy.snapshot().orElseThrow().stopScheduled()).isFalse();
@@ -214,7 +215,7 @@ class GridStrategyScheduledStopTest {
         GridStrategy strategy = start();
         strategy.onPrice(price("100"));
         placeSellManually();
-        strategy.onCommand(StrategyCommand.SCHEDULE_STOP);
+        strategy.onCommand(CommandRequest.of(StrategyCommand.SCHEDULE_STOP));
 
         GridStrategy restarted = start();
         restarted.onPrice(price("100"));

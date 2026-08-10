@@ -25,6 +25,7 @@ import ru.larionov.backend.execution.BotOrderView;
 import ru.larionov.backend.execution.ExecutionGateway;
 import ru.larionov.backend.execution.PlaceIntent;
 import ru.larionov.backend.execution.ReconcileResult;
+import ru.larionov.backend.strategy.CommandRequest;
 import ru.larionov.backend.strategy.StrategyCommand;
 import ru.larionov.backend.strategy.StrategyContext;
 
@@ -135,7 +136,7 @@ class GridStrategyForcedReplacementTest {
     void deadlockedBotLiquidatesAndGetsFreshGridOnOperatorCommand() {
         GridStrategy strategy = deadlocked();
 
-        strategy.onCommand(StrategyCommand.FORCE_GRID_REPLACEMENT);
+        strategy.onCommand(CommandRequest.of(StrategyCommand.FORCE_GRID_REPLACEMENT));
 
         ArgumentCaptor<PlaceIntent> intent = ArgumentCaptor.forClass(PlaceIntent.class);
         verify(gateway, atLeastOnce()).placeLimit(any(), intent.capture());
@@ -170,7 +171,7 @@ class GridStrategyForcedReplacementTest {
     void riskBudgetStartsOverAfterForcedReplacement() {
         GridStrategy strategy = deadlocked();
 
-        strategy.onCommand(StrategyCommand.FORCE_GRID_REPLACEMENT);
+        strategy.onCommand(CommandRequest.of(StrategyCommand.FORCE_GRID_REPLACEMENT));
         openOrders.clear();
         position.set(BigDecimal.ZERO);
         inventory.set(Inventory.empty());
@@ -197,7 +198,7 @@ class GridStrategyForcedReplacementTest {
         strategy.onReconcile(mismatched);
         clearInvocations(gateway);
 
-        assertThatThrownBy(() -> strategy.onCommand(StrategyCommand.FORCE_GRID_REPLACEMENT))
+        assertThatThrownBy(() -> strategy.onCommand(CommandRequest.of(StrategyCommand.FORCE_GRID_REPLACEMENT)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("расходится с биржей");
 
@@ -218,7 +219,7 @@ class GridStrategyForcedReplacementTest {
     void forcedReplacementWorksEvenWhenStreamHasNotDeliveredAPriceYet() {
         GridStrategy strategy = deadlocked();
 
-        strategy.onCommand(StrategyCommand.FORCE_GRID_REPLACEMENT);
+        strategy.onCommand(CommandRequest.of(StrategyCommand.FORCE_GRID_REPLACEMENT));
 
         verify(gateway, atLeastOnce()).placeLimit(any(), argThat(i -> i.side() == OrderSide.SELL));
     }

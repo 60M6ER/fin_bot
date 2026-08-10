@@ -326,11 +326,11 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
      * не вовремя. Причина при этом обязана дойти до него — отсюда событие.
      */
     @Override
-    public void onCommand(StrategyCommand command) {
+    public void onCommand(CommandRequest request) {
         try {
-            strategy.onCommand(command);
+            strategy.onCommand(request);
         } catch (Exception e) {
-            log.warn("Bot {}: команда {} не выполнена: {}", botId, command, e.getMessage(), e);
+            log.warn("Bot {}: команда {} не выполнена: {}", botId, request.command(), e.getMessage(), e);
             events.emit(botId, BotEventLevel.ERROR, BotEventType.ERROR,
                     "Команда не выполнена: " + e.getMessage(), Map.of());
         }
@@ -342,16 +342,17 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
      * Проверки — синхронные, до постановки: ответ «эта стратегия так не умеет»
      * должен вернуться нажавшему кнопку, а не потеряться в журнале.
      */
-    public void submitCommand(StrategyCommand command) {
+    public void submitCommand(CommandRequest request) {
         if (!active.get()) {
             throw new IllegalStateException("Бот не запущен: выполнять команду некому.");
         }
+        StrategyCommand command = request.command();
         if (!strategy.supports(command)) {
             throw new IllegalStateException(
                     "Стратегия этого бота не поддерживает команду «%s». Она доступна %s."
                             .formatted(command.title(), command.availableTo()));
         }
-        loop.submitCommand(command);
+        loop.submitCommand(request);
     }
 
     public UUID botId() {

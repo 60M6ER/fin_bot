@@ -10,6 +10,7 @@ import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.runtime.StrategyBotHandler;
 import ru.larionov.backend.runtime.StrategyBotHandlerFactory;
+import ru.larionov.backend.strategy.CommandRequest;
 import ru.larionov.backend.strategy.StrategyCommand;
 import ru.larionov.backend.strategy.StrategySnapshot;
 import ru.larionov.backend.enums.RuntimeState;
@@ -83,11 +84,15 @@ public class BotRuntimeService {
      * цикла, а у остановленного бота ни того, ни другого не существует.
      */
     public void command(UUID botId, StrategyCommand command) {
+        command(botId, CommandRequest.of(command));
+    }
+
+    public void command(UUID botId, CommandRequest request) {
         BotHandler handler = handlers.get(botId);
         if (!(handler instanceof StrategyBotHandler strategyHandler)) {
             throw new IllegalStateException("Бот не запущен: выполнять команду некому.");
         }
-        strategyHandler.submitCommand(command);
+        strategyHandler.submitCommand(request);
     }
 
     public Optional<StrategySnapshot> strategySnapshot(UUID botId) {

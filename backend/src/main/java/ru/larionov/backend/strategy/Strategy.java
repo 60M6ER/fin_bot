@@ -83,8 +83,9 @@ public interface Strategy {
     }
 
     /** Выполняется на потоке событийного цикла, как и всё остальное. */
-    default void onCommand(StrategyCommand command) {
-        throw new UnsupportedOperationException("Стратегия не поддерживает команду " + command);
+    default void onCommand(CommandRequest request) {
+        throw new UnsupportedOperationException(
+                "Стратегия не поддерживает команду " + request.command());
     }
 
     default Optional<StrategySnapshot> snapshot() {

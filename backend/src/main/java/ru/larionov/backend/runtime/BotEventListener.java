@@ -3,7 +3,7 @@ package ru.larionov.backend.runtime;
 import ru.larionov.backend.exchange.api.model.market.LastPrice;
 import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.larionov.backend.exchange.api.model.order.OrderState;
-import ru.larionov.backend.strategy.StrategyCommand;
+import ru.larionov.backend.strategy.CommandRequest;
 
 /**
  * Приёмник событий бота. Все методы вызываются строго последовательно, на одном потоке —
@@ -24,7 +24,7 @@ public interface BotEventListener {
     void onStreamReconnect();
 
     /** Ручная команда оператора — единственный вход, у которого есть автор. */
-    void onCommand(StrategyCommand command);
+    void onCommand(CommandRequest request);
 
     /** Сторожевой тик: housekeeping и проверка, не залип ли стрим. */
     void onTick();

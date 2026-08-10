@@ -217,6 +217,23 @@ public record GridConfig(
     }
 
     /**
+     * Копия с другим бюджетом — для команды оператора «изменить бюджет на лету».
+     *
+     * Копия, а не мутация: конфигурация проходит те же проверки конструктора, что и
+     * при загрузке, и до успешной валидации сетки старая остаётся действующей. Иначе
+     * отклонённое изменение оставило бы бота с полуприменённым бюджетом.
+     */
+    public GridConfig withBudget(BigDecimal newBudget) {
+        return new GridConfig(
+                lowerPrice, upperPrice, levels, quantityPerOrder, maxActiveOrders,
+                onRangeExit, minStepToCommissionRatio, feeRefreshSeconds, enabled,
+                autoRange, atrInterval, atrPeriods, atrMultiplier, minHalfWidthPct,
+                maxHalfWidthPct, onUpperBreakout, breakoutConfirmSeconds, breakoutMarginPct,
+                replaceCooldownSeconds, maxDownwardReplacements, maxRealizedLoss,
+                newBudget, sizingMode, profitPolicy);
+    }
+
+    /**
      * Деньги, которыми бот вправе распоряжаться на момент расчёта размера заявки.
      *
      * Ничего не мутирует: budget в конфигурации всегда остаётся той суммой, которую

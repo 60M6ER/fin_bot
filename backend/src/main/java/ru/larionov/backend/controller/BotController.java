@@ -4,6 +4,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
+import ru.larionov.backend.dto.BotBudgetChangeDto;
+import ru.larionov.backend.dto.BotBudgetUpdateRequest;
 import ru.larionov.backend.dto.BotCreateRequest;
 import ru.larionov.backend.dto.BotDetailDto;
 import ru.larionov.backend.dto.BotEventDto;
@@ -64,6 +66,19 @@ public class BotController {
     public ResponseEntity<Void> update(@PathVariable UUID id, @RequestBody BotUpdateRequest req) {
         service.update(id, req);
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Бюджет на лету: единственная настройка, которую можно менять под работающим ботом.
+     *
+     * Ответ синхронный и содержательный — оператор должен видеть, сколько денег этим
+     * освободилось и сколько остаётся занятым. Сам пересчёт размеров выполняется на
+     * потоке бота и придёт событиями.
+     */
+    @PostMapping("/{id}/budget")
+    public BotBudgetChangeDto updateBudget(@PathVariable UUID id,
+                                           @RequestBody BotBudgetUpdateRequest req) {
+        return service.updateBudget(id, req);
     }
 
     @DeleteMapping("/{id}")

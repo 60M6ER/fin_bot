@@ -20,6 +20,7 @@ import ru.larionov.backend.execution.PlaceIntent;
 import ru.larionov.backend.execution.ReconcileResult;
 import ru.larionov.backend.execution.RiskRejectedException;
 import ru.larionov.backend.strategy.Strategy;
+import ru.larionov.backend.strategy.CommandRequest;
 import ru.larionov.backend.strategy.StrategyCommand;
 import ru.larionov.backend.strategy.StrategyContext;
 import ru.larionov.backend.strategy.StrategySnapshot;
@@ -30,6 +31,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -57,7 +59,12 @@ public class GridStrategy implements Strategy {
     /** Сколько сверок подряд должны показать расхождение, чтобы оно считалось настоящим. */
     private static final int MISMATCH_CONFIRMATIONS = 2;
 
-    private final GridConfig cfg;
+    /**
+     * Не final: бюджет меняется командой оператора без остановки бота. Подменяется
+     * ЦЕЛИКОМ и только после успешной проверки нового размера — полуприменённой
+     * конфигурации не бывает.
+     */
+    private GridConfig cfg;
 
     private StrategyContext ctx;
     private GridLadder ladder;
@@ -181,6 +188,15 @@ public class GridStrategy implements Strategy {
 
     /** То же для позиции, не покрытой ни одним уровнем: сообщаем раз за эпизод. */
     private boolean uncoveredPositionReported;
+
+    /**
+     * Бюджет изменился — выставленные покупки нужно привести к новому размеру.
+     *
+     * Флаг, а не проверка на каждом проходе: сравнивать размер каждой заявки с планом
+     * постоянно означало бы риск вечной пары «снял — поставил» из-за любого расхождения
+     * в округлении. Переразмер делается по факту команды и гаснет, когда сделан.
+     */
+    private boolean resizeRequested;
 
     /**
      * Уровни, которые биржа только что отказалась принимать, и до какого момента
@@ -1073,6 +1089,12 @@ public class GridStrategy implements Strategy {
 
         openOrderCount += placeMissingSells(openBuys, openSellQuantityByLevel, heldByLevel, openOrderCount);
         if (!buyingStopped) {
+            // Порядок намеренный: сначала снять заявки прежнего размера, потом ставить.
+            // Снятые тут же освобождают место под лимитом активных заявок, и уровень
+            // не остаётся пустым до следующего прохода.
+            if (resizeRequested) {
+                openOrderCount -= resizeOpenBuys(openBuys);
+            }
             placeMissingBuys(openBuys, openSellQuantityByLevel, heldByLevel, openOrderCount);
         }
 
@@ -1910,16 +1932,21 @@ public class GridStrategy implements Strategy {
         return switch (command) {
             case FORCE_GRID_REPLACEMENT -> cfg.autoRange();
             case SCHEDULE_STOP, CANCEL_SCHEDULED_STOP -> true;
+            // В FIXED_QUANTITY размер задан в штуках, и бюджет в расчёте не участвует:
+            // менять его молча значило бы обещать эффект, которого не будет.
+            case SET_BUDGET -> cfg.budgetSized();
         };
     }
 
     @Override
-    public void onCommand(StrategyCommand command) {
-        switch (command) {
+    public void onCommand(CommandRequest request) {
+        switch (request.command()) {
             case FORCE_GRID_REPLACEMENT -> forceReplacement();
             case SCHEDULE_STOP -> scheduleStop();
             case CANCEL_SCHEDULED_STOP -> cancelScheduledStop();
-            default -> throw new UnsupportedOperationException("GRID не поддерживает команду " + command);
+            case SET_BUDGET -> applyBudget(request.requireAmount());
+            default -> throw new UnsupportedOperationException(
+                    "GRID не поддерживает команду " + request.command());
         }
     }
 
@@ -2065,6 +2092,116 @@ public class GridStrategy implements Strategy {
 
         seedLastPrice();
         beginDownwardReplacement();
+    }
+
+    /**
+     * Новый бюджет без остановки бота.
+     *
+     * Смысл операции — доливка или вывод денег, а не перестройка сетки: диапазон,
+     * поколение и открытые циклы остаются на месте, меняется только размер БУДУЩИХ
+     * покупок. Купленное перекроить нельзя, и продавать надо ровно то, что куплено,
+     * поэтому уровень с незакрытым циклом доживает его прежним размером.
+     *
+     * Проверка идёт до подмены и по тем же правилам, что и на старте: бюджет, которого
+     * не хватает на шаг количества на каждом уровне, обязан быть отвергнут ЗДЕСЬ, с
+     * понятным текстом, а не превратиться в молчащего бота. Отказ уходит исключением —
+     * его перехватывает хендлер и показывает оператору.
+     */
+    private void applyBudget(BigDecimal newBudget) {
+        if (stopped || ctx == null || ladder == null || activeRange == null) {
+            throw new IllegalStateException("Стратегия ещё не готова — повторите через несколько секунд");
+        }
+        if (!cfg.budgetSized()) {
+            throw new IllegalStateException(
+                    "У бота фиксированный размер заявки — бюджет в расчёте размеров не участвует.");
+        }
+        if (positionMismatched) {
+            throw new IllegalStateException(
+                    "Позиция журнала расходится с биржей. Пока расхождение не устранено, менять "
+                            + "размеры заявок нельзя: неизвестно, сколько позиции на самом деле.");
+        }
+
+        GridConfig candidate = cfg.withBudget(newBudget);
+        BigDecimal candidateBudget = candidate.workingBudget(ctx::realizedPnl);
+        // Бросает с человеческим текстом: не хватило на уровень, не окупается комиссия,
+        // бюджет выше потолка капитала. Действующая конфигурация при этом не тронута.
+        GridSizing candidateSizing = GridValidator.validate(candidate, activeRange, ladder,
+                ctx.constraints().minPriceIncrement(), activeFees, ctx.constraints().quantityStep(),
+                ctx.execution().maxCapital(), candidateBudget).sizing();
+
+        BigDecimal previousBudget = activeBudget;
+        String previousSizing = sizingSummary();
+
+        cfg = candidate;
+        sizing = candidateSizing;
+        activeBudget = candidateBudget;
+        resizeRequested = true;
+        updateSnapshot();
+
+        String note = "Бюджет изменён: %s → %s. Размер заявки: было %s, стало %s"
+                .formatted(plain(previousBudget), plain(activeBudget), previousSizing, sizingSummary());
+        try {
+            // Внешняя доливка и вывод — не прибыль и не убыток бота, в P/L им места нет.
+            // Но без отметки в книге история «сколько в бота вложено» врёт ровно на них.
+            ctx.ledgerMarker(LedgerEntryType.BUDGET_CHANGED, note);
+        } catch (Exception e) {
+            ctx.error("Бюджет изменён, но отметку в книге записать не удалось", e);
+        }
+        ctx.event(BotEventType.HOUSEKEEPING, note);
+        ensureOrders(null);
+    }
+
+    /**
+     * Приводит уже выставленные покупки к действующему размеру заявки.
+     *
+     * Трогаем только заявки, которые ещё не начали исполняться. Снятие частично
+     * исполненной покупки оставило бы на уровне позицию размером «сколько успело»,
+     * и цикл уровня закрывался бы продажей другого объёма — то есть смена бюджета
+     * молча меняла бы уже начатую сделку.
+     *
+     * Продажи не трогаем никогда: их объём берётся из фактически купленного, а не из
+     * бюджета, и переразмерить их значит либо оставить хвост непроданным, либо
+     * выставить необеспеченную заявку.
+     *
+     * @return сколько заявок снято — на столько же освободилось место под лимитом
+     */
+    private int resizeOpenBuys(Map<Integer, BotOrderView> openBuys) {
+        int cancelled = 0;
+        boolean complete = true;
+        for (Iterator<Map.Entry<Integer, BotOrderView>> it = openBuys.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry<Integer, BotOrderView> entry = it.next();
+            BotOrderView order = entry.getValue();
+            if (order == null || (order.executedQuantity() != null
+                    && order.executedQuantity().signum() > 0)) {
+                continue;
+            }
+            BigDecimal planned = sizing.quantityAt(entry.getKey());
+            if (planned == null || planned.signum() <= 0) {
+                continue;
+            }
+            // Сравниваем с тем количеством, которое реально уйдёт на биржу: гейтвей
+            // округляет заявку вниз к шагу. Без этого округление выглядело бы вечным
+            // расхождением, и заявка снималась бы и ставилась заново каждый проход.
+            BigDecimal tradable = ctx.execution().quantizeDown(planned);
+            if (tradable.signum() <= 0 || order.remainingQuantity().compareTo(tradable) == 0) {
+                continue;
+            }
+            try {
+                ctx.gateway().cancel(ctx.execution(), order.id());
+                it.remove();
+                cancelled++;
+            } catch (Exception e) {
+                complete = false;
+                ctx.error("Не удалось снять покупку уровня %d для смены размера"
+                        .formatted(entry.getKey()), e);
+            }
+        }
+        // Флаг гаснет, только когда переразмер действительно доделан: иначе заявка,
+        // которую не удалось снять сейчас, осталась бы старого размера навсегда.
+        if (complete) {
+            resizeRequested = false;
+        }
+        return cancelled;
     }
 
     /**

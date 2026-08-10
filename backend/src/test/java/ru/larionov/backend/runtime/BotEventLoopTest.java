@@ -11,6 +11,7 @@ import ru.larionov.backend.exchange.api.model.market.LastPrice;
 import ru.larionov.backend.exchange.api.model.market.Price;
 import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.larionov.backend.exchange.api.model.order.OrderState;
+import ru.larionov.backend.strategy.CommandRequest;
 import ru.larionov.backend.strategy.StrategyCommand;
 
 import java.math.BigDecimal;
@@ -75,7 +76,7 @@ class BotEventLoopTest {
 
         @Override public void onTradingStatus(TradingStatusEvent e) { events.add("status"); }
         @Override public void onStreamReconnect() { events.add("reconnect"); }
-        @Override public void onCommand(StrategyCommand c) { events.add("command:" + c); }
+        @Override public void onCommand(CommandRequest c) { events.add("command:" + c.command()); }
         @Override public void onTick() { events.add("tick"); }
 
         private void awaitGate() {

@@ -629,6 +629,56 @@
                       · {{ sizingModeLabel(state.strategySnapshot.sizingMode) }}
                     </template>
                   </div>
+                  <!--
+                    Единственная настройка, которую можно менять под работающим ботом:
+                    общая форма требует остановки, а остановка снимает встречные
+                    продажи незакрытых циклов.
+
+                    Вводится ПРИБАВКА, а не итоговый бюджет: пополнение и вывод — это
+                    «сколько денег принесли или забрали», и считать разницу в уме
+                    оператор не должен. Складывает сервер — рядом показан рабочий
+                    бюджет, а он у бота с реинвестированием включает прибыль.
+                  -->
+                  <div class="row items-center q-gutter-sm">
+                    <q-input
+                      v-model.number="budgetDelta"
+                      type="number"
+                      outlined
+                      dense
+                      style="max-width: 160px"
+                      label="Сумма"
+                      :disable="budgetLoading"
+                      @keyup.enter="changeBudget(1)"
+                    />
+                    <q-btn
+                      dense
+                      unelevated
+                      no-caps
+                      size="sm"
+                      color="primary"
+                      icon="add"
+                      label="Добавить к бюджету"
+                      :loading="budgetLoading"
+                      :disable="!budgetDelta"
+                      @click="changeBudget(1)"
+                    />
+                    <q-btn
+                      dense
+                      outline
+                      no-caps
+                      size="sm"
+                      color="primary"
+                      icon="remove"
+                      label="Вывести"
+                      :disable="budgetLoading || !budgetDelta"
+                      @click="changeBudget(-1)"
+                    />
+                    <div v-if="budgetResult" class="text-caption text-grey-7">
+                      свободно {{ formatMoney(budgetResult.free) }} ·
+                      занято {{ formatMoney(budgetResult.committed) }},
+                      из них позиция {{ formatMoney(budgetResult.positionCost) }}
+                    </div>
+                  </div>
                 </q-card-section>
               </template>
 
@@ -872,6 +922,9 @@ const forceDialog = ref(false)
 const forceLoading = ref(false)
 const scheduleStopDialog = ref(false)
 const scheduleStopLoading = ref(false)
+const budgetLoading = ref(false)
+const budgetDelta = ref(null)
+const budgetResult = ref(null)
 
 const stopScheduled = computed(() => !!state.value.strategySnapshot?.stopScheduled)
 const createForm = reactive({ name: '', strategyType: null, exchangeConnectionId: null })
@@ -1112,6 +1165,36 @@ const currentRange = computed(() => {
   if (!s) return null
   return `${formatMoney(s.lowerPrice)} — ${formatMoney(s.upperPrice)}`
 })
+
+/**
+ * Отправляем ПРИБАВКУ (со знаком), а не итоговую сумму: складывает сервер, потому что
+ * рядом на экране показан рабочий бюджет — у бота с реинвестированием это «бюджет плюс
+ * прибыль», и сложение на клиенте вшило бы заработанное в базовый бюджет.
+ *
+ * @param sign 1 — добавить, -1 — вывести
+ */
+async function changeBudget (sign) {
+  const id = detail.value?.id
+  const amount = Number(budgetDelta.value)
+  if (!id || !amount) return
+
+  budgetLoading.value = true
+  try {
+    const { data } = await apiClient.post(`/api/v1/bots/${id}/budget`, {
+      addToBudget: sign * Math.abs(amount)
+    })
+    budgetResult.value = data
+    budgetDelta.value = null
+    toast?.ok(`${sign > 0 ? 'Бюджет пополнен' : 'Бюджет уменьшен'}: `
+      + `${formatMoney(data.previousBudget)} → ${formatMoney(data.budget)}`
+      + (data.appliedLive ? '' : ' (подействует при следующем запуске)'))
+    await loadState(id)
+  } catch (e) {
+    toast?.err(getErrorMessage(e, 'Не удалось изменить бюджет'), { timeout: 8000 })
+  } finally {
+    budgetLoading.value = false
+  }
+}
 
 async function doScheduleStop () {
   await sendStopCommand('schedule-stop', 'Остановка запланирована — жду распродажи позиции')

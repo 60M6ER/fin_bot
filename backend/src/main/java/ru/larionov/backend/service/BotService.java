@@ -18,7 +18,12 @@ import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 import ru.larionov.backend.execution.BotOrderView;
 import ru.larionov.backend.model.RuntimeInfo;
+import ru.larionov.backend.strategy.BotRuntimeConfig;
+import ru.larionov.backend.strategy.CommandRequest;
+import ru.larionov.backend.strategy.StrategyCommand;
+import ru.larionov.backend.strategy.grid.GridConfig;
 import ru.larionov.backend.repository.BotOrderRepository;
+import ru.larionov.backend.execution.RiskGuard;
 import ru.larionov.backend.repository.BotRepository;
 import ru.larionov.backend.repository.ExchangeConnectionRepository;
 import tools.jackson.databind.ObjectMapper;
@@ -49,6 +54,7 @@ public class BotService {
     private final AccountingService accountingService;
     private final GridGenerationService gridGenerationService;
     private final BotValuationService valuationService;
+    private final RiskGuard riskGuard;
     private final ObjectMapper objectMapper;
 
     public List<BotListItemDto> list() {
@@ -167,6 +173,149 @@ public class BotService {
         b.setStrategyConfig(normalizeJson(req.strategyConfig()));
 
         botRepo.save(b);
+    }
+
+    /**
+     * Бюджет на лету — единственная настройка, которую можно менять под работающим ботом.
+     *
+     * Общая форма настроек требует остановки, а остановка снимает ВСЕ заявки, включая
+     * встречные продажи незакрытых циклов. Для доливки денег или их вывода это слишком
+     * дорого: диапазон, поколение и открытые циклы менять не нужно — нужен только другой
+     * размер будущих покупок.
+     *
+     * Порядок намеренный: сначала проверки, потом запись в конфигурацию, и только потом
+     * команда живому боту. Запись обязательна — без неё первый же рестарт вернул бы
+     * прежний бюджет, и бот бы тихо торговал не тем размером, который показан оператору.
+     *
+     * Здесь проверяется только то, что видно снаружи торгового цикла. Хватает ли бюджета
+     * на шаг количества на каждом уровне и окупает ли шаг комиссию, знает лишь сама
+     * стратегия — у неё действующая лесенка. Её отказ придёт событием бота.
+     */
+    @Transactional
+    public BotBudgetChangeDto updateBudget(UUID id, BotBudgetUpdateRequest req) {
+        BotEntity b = requireBot(id);
+        if (b.getStrategyType() != StrategyType.GRID) {
+            throw new IllegalStateException("Бюджет есть только у GRID-бота.");
+        }
+        GridConfig cfg = readConfig(b, GridConfig.class);
+        BigDecimal budget = resolveBudget(cfg, req);
+        if (!cfg.budgetSized()) {
+            throw new IllegalStateException(
+                    "У бота фиксированный размер заявки — бюджет в расчёте размеров не участвует. "
+                            + "Смените режим размера заявки в настройках остановленного бота.");
+        }
+        BotRuntimeConfig runtime = readConfig(b, BotRuntimeConfig.class);
+        BigDecimal maxCapital = req.maxCapital() != null ? req.maxCapital() : runtime.maxCapital();
+
+        BigDecimal realizedPnl = nvl(accountingService.summary(id, runtime.dryRun()).realizedPnl());
+        BigDecimal working = cfg.withBudget(budget).workingBudget(() -> realizedPnl);
+
+        RiskGuard.CapitalUsage usage = riskGuard.capitalUsage(id, runtime.dryRun());
+        BigDecimal positionCost = nvl(usage.inventory().costBasisOpen());
+
+        // Пол — себестоимость уже открытой позиции: снятые покупки деньги вернут,
+        // а купленное обратно не раскупить. Бюджет ниже нельзя не из осторожности —
+        // при нём сетка не сможет обслуживать собственную позицию.
+        if (working.compareTo(positionCost) < 0) {
+            throw new IllegalStateException(
+                    ("Бюджет %s меньше стоимости уже открытой позиции (%s). Вывести можно только "
+                            + "то, что ещё не вложено; чтобы освободить остальное, позицию надо "
+                            + "сначала продать — плановой остановкой или перестройкой с фиксацией "
+                            + "убытка.").formatted(plain(working), plain(positionCost)));
+        }
+        if (maxCapital != null && maxCapital.signum() > 0 && working.compareTo(maxCapital) > 0) {
+            throw new IllegalStateException(
+                    ("Бюджет %s выше потолка задействованного капитала (%s): сетка не смогла бы "
+                            + "выкупить собственные уровни. Поднимите потолок вместе с бюджетом.")
+                            .formatted(plain(working), plain(maxCapital)));
+        }
+
+        b.setStrategyConfig(writeBudget(b.getStrategyConfig(), budget, req.maxCapital()));
+        botRepo.save(b);
+
+        boolean running = botRuntimeService.isRunning(id);
+        if (running) {
+            botRuntimeService.command(id,
+                    new CommandRequest(StrategyCommand.SET_BUDGET, budget));
+        }
+
+        BigDecimal committed = nvl(usage.amount());
+        return new BotBudgetChangeDto(cfg.budget(), budget, working, committed,
+                working.subtract(committed), positionCost, running);
+    }
+
+    /**
+     * Во что превращается запрос: целевой бюджет.
+     *
+     * Прибавку складываем ЗДЕСЬ, а не в интерфейсе. Снаружи виден рабочий бюджет —
+     * «бюджет плюс реализованная прибыль» у ботов с реинвестированием, — и прибавка
+     * к нему тихо превратила бы уже заработанное в базовый бюджет: прибыль перестала
+     * бы отделяться от вложенного, а при выводе прибыли ещё и вывелась бы дважды.
+     * Складывать можно только с той суммой, которая записана в конфигурации.
+     */
+    private BigDecimal resolveBudget(GridConfig cfg, BotBudgetUpdateRequest req) {
+        if (req.budget() != null && req.addToBudget() != null) {
+            throw new IllegalArgumentException(
+                    "Укажите либо новый бюджет целиком, либо прибавку к нему, но не оба сразу");
+        }
+
+        BigDecimal target;
+        if (req.addToBudget() != null) {
+            if (req.addToBudget().signum() == 0) {
+                throw new IllegalArgumentException("Прибавка к бюджету не может быть нулевой");
+            }
+            target = nvl(cfg.budget()).add(req.addToBudget());
+            if (target.signum() <= 0) {
+                throw new IllegalStateException(
+                        ("Вывести %s нельзя: в бюджете всего %s.")
+                                .formatted(plain(req.addToBudget().negate()), plain(cfg.budget())));
+            }
+        } else {
+            target = req.budget();
+        }
+
+        if (target == null || target.signum() <= 0) {
+            throw new IllegalArgumentException("Бюджет должен быть больше нуля");
+        }
+        return target;
+    }
+
+    /**
+     * Правим ДЕРЕВО, а не пересобираем конфигурацию из разобранного объекта: в том же
+     * JSON живут поля движка и всё, о чём эта версия кода ещё не знает. Пересборка
+     * молча стёрла бы их.
+     */
+    private String writeBudget(String json, BigDecimal budget, BigDecimal maxCapital) {
+        try {
+            var node = (tools.jackson.databind.node.ObjectNode) objectMapper.readTree(
+                    json == null || json.isBlank() ? "{}" : json);
+            node.put("budget", budget);
+            if (maxCapital != null) {
+                node.put("maxCapital", maxCapital);
+            }
+            return objectMapper.writeValueAsString(node);
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Не удалось записать бюджет в конфигурацию бота: " + e.getMessage(), e);
+        }
+    }
+
+    private <T> T readConfig(BotEntity bot, Class<T> type) {
+        try {
+            String json = bot.getStrategyConfig();
+            return objectMapper.readValue(json == null || json.isBlank() ? "{}" : json, type);
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Не удалось прочитать конфигурацию бота: " + e.getMessage(), e);
+        }
+    }
+
+    private static BigDecimal nvl(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value;
+    }
+
+    private static String plain(BigDecimal value) {
+        return value == null ? "—" : value.stripTrailingZeros().toPlainString();
     }
 
     @Transactional
