@@ -24,9 +24,11 @@ import ru.larionov.backend.service.StrategyStateService;
 import ru.larionov.backend.strategy.*;
 
 import java.time.Clock;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -59,6 +61,14 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
     private final BotEventLoop loop;
     private final AtomicBoolean active = new AtomicBoolean(false);
     private volatile ScheduledFuture<?> tickTask;
+
+    /**
+     * Отписки ЭТОГО запуска бота. Подписку у брокера они не трогают — она общая на
+     * подключение, — но снимают наши обработчики, замкнутые на цикл событий, который
+     * при остановке закрывается. Без этого перезапуск оставлял бы мёртвый обработчик
+     * получать данные вместо живого.
+     */
+    private final List<Runnable> streamUnsubscribes = new CopyOnWriteArrayList<>();
 
     StrategyBotHandler(BotEntity bot,
                        BotRuntimeConfig runtimeConfig,
@@ -162,6 +172,17 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
         // Очередь при этом дорабатывается: close() даёт текущему событию досчитаться.
         loop.close();
 
+        // Снимаем СВОИ обработчики: подписка у брокера остаётся жить для соседей,
+        // а наш замкнут на только что закрытый цикл и данные всё равно выбросит.
+        for (Runnable unsubscribe : streamUnsubscribes) {
+            try {
+                unsubscribe.run();
+            } catch (Exception e) {
+                log.warn("Bot {}: не удалось снять обработчик стрима: {}", botId, e.getMessage());
+            }
+        }
+        streamUnsubscribes.clear();
+
         try {
             strategy.onStop();
         } catch (Exception e) {
@@ -220,7 +241,7 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
 
         client.marketDataStream().ifPresent(md -> {
             if (priceSource == BotRuntimeConfig.PriceSource.ORDER_BOOK) {
-                md.subscribeOrderBook(instruments, 1, book -> {
+                streamUnsubscribes.add(md.subscribeOrderBook(instruments, 1, book -> {
                     if (!isOurs(book.instrumentId())) return;
                     // Из стакана берём середину: для решений сетки этого достаточно.
                     if (book.bids().isEmpty() || book.asks().isEmpty()) return;
@@ -233,20 +254,20 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
                     lastPriceCache.put(botId, instrument.primary(), mid, book.ts());
                     loop.submitPrice(new LastPrice(book.instrumentId(),
                             new ru.larionov.backend.exchange.api.model.market.Price(mid, null), book.ts()));
-                });
+                }));
             } else {
-                md.subscribeLastPrice(instruments, p -> {
+                streamUnsubscribes.add(md.subscribeLastPrice(instruments, p -> {
                     if (!isOurs(p.instrumentId())) return;
                     if (p.price() != null) {
                         lastPriceCache.put(botId, instrument.primary(), p.price().value(), p.ts());
                     }
                     loop.submitPrice(p);
-                });
+                }));
             }
 
-            md.subscribeTradingStatus(instruments, s -> {
+            streamUnsubscribes.add(md.subscribeTradingStatus(instruments, s -> {
                 if (isOurs(s.instrumentId())) loop.submitTradingStatus(s);
-            });
+            }));
 
             md.onReconnect(loop::submitReconnect);
         });

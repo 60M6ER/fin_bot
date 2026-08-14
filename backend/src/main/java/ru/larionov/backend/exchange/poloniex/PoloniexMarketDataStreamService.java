@@ -82,14 +82,22 @@ public class PoloniexMarketDataStreamService implements MarketDataStreamService 
     }
 
     @Override
-    public void subscribeLastPrice(Set<InstrumentId> instruments, Consumer<LastPrice> handler) {
+    public Runnable subscribeLastPrice(Set<InstrumentId> instruments, Consumer<LastPrice> handler) {
         List<String> symbols = symbols(instruments);
         if (symbols.isEmpty()) {
-            return;
+            return () -> { };
         }
         Subscription subscription = new Subscription(symbols, handler);
         subscriptions.add(subscription);
         open(subscription, false);
+        // Здесь сокет свой на подписку, поэтому её отмена — это и есть закрытие сокета.
+        // Без неё каждый перезапуск бота оставлял бы висеть лишний вебсокет с
+        // обработчиком, который пишет в остановленный цикл событий.
+        return () -> {
+            subscription.cancelled = true;
+            subscriptions.remove(subscription);
+            closeQuietly(subscription.socket);
+        };
     }
 
     /**
@@ -194,8 +202,9 @@ public class PoloniexMarketDataStreamService implements MarketDataStreamService 
      * тикер под видом стакана.
      */
     @Override
-    public void subscribeOrderBook(Set<InstrumentId> instruments, int depth, Consumer<OrderBook> handler) {
+    public Runnable subscribeOrderBook(Set<InstrumentId> instruments, int depth, Consumer<OrderBook> handler) {
         log.info("Poloniex: поток стакана не поддержан адаптером, используйте priceSource=LAST_PRICE");
+        return () -> { };
     }
 
     /**
@@ -203,8 +212,9 @@ public class PoloniexMarketDataStreamService implements MarketDataStreamService 
      * Состояние пары читается запросом справочника в {@code getTradingStatus}.
      */
     @Override
-    public void subscribeTradingStatus(Set<InstrumentId> instruments, Consumer<TradingStatusEvent> handler) {
+    public Runnable subscribeTradingStatus(Set<InstrumentId> instruments, Consumer<TradingStatusEvent> handler) {
         // Намеренно пусто.
+        return () -> { };
     }
 
     @Override

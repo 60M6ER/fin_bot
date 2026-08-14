@@ -9,6 +9,7 @@ import ru.larionov.backend.exchange.api.model.market.OrderBookLevel;
 import ru.larionov.backend.exchange.api.model.market.Price;
 import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.larionov.backend.exchange.api.model.stream.StreamHealth;
+import ru.larionov.backend.exchange.common.StreamFanOut;
 import ru.larionov.backend.exchange.common.StreamHealthTracker;
 import ru.tinkoff.piapi.contract.v1.OrderBookType;
 import ru.tinkoff.piapi.contract.v1.SecurityTradingStatus;
@@ -102,58 +103,107 @@ public final class TInvestMarketDataStreamService implements MarketDataStreamSer
         }
     }
 
-    @Override
-    public void subscribeLastPrice(Set<InstrumentId> instruments, Consumer<LastPrice> handler) {
-        ensureStarted();
-        Set<Instrument> subs = toInstruments(instruments);
-        if (subs.isEmpty()) {
-            return;
-        }
+    /*
+     * ПОЧЕМУ РАЗДАЧУ СОБЫТИЙ МЫ ДЕРЖИМ У СЕБЯ, А НЕ ОТДАЁМ SDK
+     *
+     * MarketDataStreamManager.subscribeLastPrices сначала выбрасывает из набора всё,
+     * на что уже подписан, а затем зовёт subscribe(). Если после фильтра не осталось
+     * ничего, subscribe возвращает CompletableFuture.failedFuture("Instruments list is
+     * empty"), и слушатель в этой ветке НЕ РЕГИСТРИРУЕТСЯ:
+     *
+     *     subscribe(LAST_PRICE, filtered, fn).whenComplete((result, error) ->
+     *             Optional.ofNullable(result).ifPresent(r -> addWrapperListener(...)));
+     *
+     * Ни исключения, ни строчки в логе. Для нас это значило вот что: подписки живут на
+     * уровне ПОДКЛЮЧЕНИЯ и переживают остановку бота, поэтому второй запуск того же бота
+     * — а это любой рестарт из интерфейса — молча оставался БЕЗ слушателя. Прежний,
+     * созданный первым запуском, продолжал работать и наполнять кэш цен, отчего в
+     * карточке бота цена выглядела свежей; но отдавал он её в BotEventLoop прошлой
+     * жизни, закрытый при остановке, а тот выбрасывает всё пришедшее после close().
+     *
+     * Итог: перезапущенный бот навсегда переставал видеть цены, оставаясь по всем
+     * внешним признакам живым. Именно так 14.08.2026 сетка MAGN простояла под нижней
+     * границей, не заметив пробоя.
+     *
+     * Поэтому у SDK подписка ровно одна на инструмент, а список получателей ведём сами.
+     */
+    private final StreamFanOut<LastPrice> lastPriceHandlers = new StreamFanOut<>();
+    private final StreamFanOut<OrderBook> orderBookHandlers = new StreamFanOut<>();
+    private final StreamFanOut<TradingStatusEvent> statusHandlers = new StreamFanOut<>();
 
-        manager.subscribeLastPrices(subs, wrapper -> {
-            healthTracker.markEvent();
-            deliver(handler, toLastPrice(wrapper), "lastPrice");
+    @Override
+    public Runnable subscribeLastPrice(Set<InstrumentId> instruments, Consumer<LastPrice> handler) {
+        ensureStarted();
+        return fanOut(instruments, handler, lastPriceHandlers, uids -> {
+            Set<Instrument> subs = uids.stream().map(Instrument::new).collect(Collectors.toSet());
+            manager.subscribeLastPrices(subs, wrapper -> {
+                healthTracker.markEvent();
+                LastPrice price = toLastPrice(wrapper);
+                dispatch(lastPriceHandlers, price == null ? null : price.instrumentId(),
+                        price, "lastPrice");
+            });
+            unsubscribeActions.add(() -> manager.unsubscribeLastPrices(subs));
         });
-        unsubscribeActions.add(() -> manager.unsubscribeLastPrices(subs));
     }
 
     @Override
-    public void subscribeOrderBook(Set<InstrumentId> instruments, int depth, Consumer<OrderBook> handler) {
+    public Runnable subscribeOrderBook(Set<InstrumentId> instruments, int depth,
+                                       Consumer<OrderBook> handler) {
         ensureStarted();
-        Set<Instrument> subs = instruments.stream()
+        return fanOut(instruments, handler, orderBookHandlers, uids -> {
+            Set<Instrument> subs = uids.stream()
+                    .map(uid -> new Instrument(uid, depth, OrderBookType.ORDERBOOK_TYPE_ALL))
+                    .collect(Collectors.toSet());
+            manager.subscribeOrderBooks(subs, wrapper -> {
+                healthTracker.markEvent();
+                OrderBook book = toOrderBook(wrapper, depth);
+                dispatch(orderBookHandlers, book == null ? null : book.instrumentId(),
+                        book, "orderBook");
+            });
+            unsubscribeActions.add(() -> manager.unsubscribeOrderBooks(subs));
+        });
+    }
+
+    @Override
+    public Runnable subscribeTradingStatus(Set<InstrumentId> instruments,
+                                           Consumer<TradingStatusEvent> handler) {
+        ensureStarted();
+        return fanOut(instruments, handler, statusHandlers, uids -> {
+            Set<Instrument> subs = uids.stream().map(Instrument::new).collect(Collectors.toSet());
+            manager.subscribeTradingStatuses(subs, wrapper -> {
+                healthTracker.markEvent();
+                TradingStatusEvent status = toTradingStatus(wrapper);
+                dispatch(statusHandlers, status == null ? null : status.instrumentId(),
+                        status, "tradingStatus");
+            });
+            unsubscribeActions.add(() -> manager.unsubscribeTradingStatuses(subs));
+        });
+    }
+
+    private <T> Runnable fanOut(Set<InstrumentId> instruments, Consumer<T> handler,
+                                StreamFanOut<T> registry, Consumer<Set<String>> subscribeNew) {
+        Set<String> uids = instruments.stream()
                 .map(InstrumentId::primary)
                 .filter(uid -> uid != null && !uid.isBlank())
-                .map(uid -> new Instrument(uid, depth, OrderBookType.ORDERBOOK_TYPE_ALL))
                 .collect(Collectors.toSet());
-        if (subs.isEmpty()) {
-            return;
-        }
-
-        manager.subscribeOrderBooks(subs, wrapper -> {
-            healthTracker.markEvent();
-            deliver(handler, toOrderBook(wrapper, depth), "orderBook");
-        });
-        unsubscribeActions.add(() -> manager.unsubscribeOrderBooks(subs));
+        return registry.register(uids, handler, subscribeNew);
     }
 
-    @Override
-    public void subscribeTradingStatus(Set<InstrumentId> instruments, Consumer<TradingStatusEvent> handler) {
-        ensureStarted();
-        Set<Instrument> subs = toInstruments(instruments);
-        if (subs.isEmpty()) {
+    /** Событие уходит всем текущим получателям инструмента, а не одному запомненному. */
+    private <T> void dispatch(StreamFanOut<T> registry, InstrumentId id, T event, String kind) {
+        if (event == null || id == null) {
             return;
         }
-
-        manager.subscribeTradingStatuses(subs, wrapper -> {
-            healthTracker.markEvent();
-            deliver(handler, toTradingStatus(wrapper), "tradingStatus");
-        });
-        unsubscribeActions.add(() -> manager.unsubscribeTradingStatuses(subs));
+        for (Consumer<T> handler : registry.listeners(id.uid(), id.figi())) {
+            deliver(handler, event, kind);
+        }
     }
 
     /**
      * Исключение из обработчика не должно рвать стрим: SDK вызывает нас на своём потоке,
-     * и упавший listener способен утащить за собой всю доставку событий.
+     * и упавший listener способен утащить за собой всю доставку событий. Тем более
+     * теперь, когда получателей у события несколько: падение первого не вправе лишить
+     * данных остальных.
      */
     private <T> void deliver(Consumer<T> handler, T event, String kind) {
         if (event == null) {
@@ -176,6 +226,9 @@ public final class TInvestMarketDataStreamService implements MarketDataStreamSer
             }
         }
         unsubscribeActions.clear();
+        lastPriceHandlers.clear();
+        orderBookHandlers.clear();
+        statusHandlers.clear();
     }
 
     @Override
@@ -205,6 +258,9 @@ public final class TInvestMarketDataStreamService implements MarketDataStreamSer
         }
         healthTracker.markClosed();
         reconnectHandlers.clear();
+        lastPriceHandlers.clear();
+        orderBookHandlers.clear();
+        statusHandlers.clear();
     }
 
     // ==============================

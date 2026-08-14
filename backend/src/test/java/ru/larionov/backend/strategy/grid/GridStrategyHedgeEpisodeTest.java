@@ -58,6 +58,8 @@ class GridStrategyHedgeEpisodeTest {
     private UUID botId;
     private StrategyContext ctx;
     private ExecutionGateway gateway;
+    /** Поле, а не локальная переменная: тесты доопределяют цену уже после старта. */
+    private MarketDataApi marketData;
     private AtomicReference<Instant> clockNow;
     private AtomicReference<GridStrategyState> saved;
 
@@ -110,6 +112,10 @@ class GridStrategyHedgeEpisodeTest {
         breakDownAndConfirm(strategy);
         assertThat(saved.get().hedgeEpisode()).isNotNull();
 
+        // Рынок к этому моменту стоит между целью 19.31 и стопом 21.0: ни то, ни другое
+        // не сработало, и закрыть эпизод может ровно одно — истёкший срок. Цену задаём
+        // явно, потому что тик спрашивает её у биржи, когда стрим давно молчал.
+        when(marketData.getLastPrice(instrumentId)).thenReturn(price("20.5"));
         clockNow.set(now.plusSeconds(60L * 60 * 24 * 10));
         strategy.onTick();
 
@@ -241,7 +247,7 @@ class GridStrategyHedgeEpisodeTest {
     private GridStrategy startedWithPosition(boolean margin, boolean shortEnabled, boolean dryRun) {
         ctx = mock(StrategyContext.class);
         ExchangeClient exchange = mock(ExchangeClient.class);
-        MarketDataApi marketData = mock(MarketDataApi.class);
+        marketData = mock(MarketDataApi.class);
         gateway = mock(ExecutionGateway.class);
 
         when(ctx.botId()).thenReturn(botId);

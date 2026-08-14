@@ -60,6 +60,12 @@ import java.util.stream.Collectors;
 public class GridStrategy implements Strategy {
 
     /** Сколько сверок подряд должны показать расхождение, чтобы оно считалось настоящим. */
+    /** Как часто напоминать, что цена стоит вне диапазона и бот ждёт порога. */
+    private static final long APPROACH_REPEAT_SECONDS = 900;
+
+    /** Сколько цена вправе не приходить стримом, прежде чем спросить её у биржи. */
+    private static final long PRICE_STALE_SECONDS = 120;
+
     private static final int MISMATCH_CONFIRMATIONS = 2;
 
     /**
@@ -100,8 +106,14 @@ public class GridStrategy implements Strategy {
     private boolean lowerBreakoutPaused;
     /** О паузе между перестановками сообщаем один раз, а не каждым тиком. */
     private boolean lowerBreakoutPauseReported;
-    /** То же для выхода за границу без достижения порога пробоя. */
-    private boolean lowerBreakoutApproachReported;
+    /** Когда стрим в последний раз принёс цену. Null — не приносил ни разу. */
+    private Instant lastPriceAt;
+    /** О молчащем стриме сообщаем один раз, а не каждым тиком. */
+    private boolean stalePriceReported;
+    /** Когда в последний раз сообщали, что цена вне диапазона, но порога не достигла. */
+    private Instant lowerBreakoutApproachReportedAt;
+    /** С какого момента цена держится вне диапазона. Нужен только для текста сообщения. */
+    private Instant outsideRangeSince;
     private boolean awaitingUpperReplacement;
     private boolean awaitingDownwardReplacement;
     private GridRange pendingDownwardRange;
@@ -430,6 +442,63 @@ public class GridStrategy implements Strategy {
      * Отказ здесь не фатален: цена — не условие корректности, а лишь повод действовать
      * раньше. Не получилось — дождёмся стрима или следующего тика.
      */
+    /**
+     * Сторож цены: спрашивает её у биржи, когда стрим замолчал.
+     *
+     * До этого {@code lastPrice} жила ИСКЛЮЧИТЕЛЬНО стримом последних цен, а тик
+     * перепроверял только сверку и статус торгов. Подписка же умолкает тихо: соединение
+     * остаётся поднятым, ошибок нет, «цены ✓» в интерфейсе горит — просто событий больше
+     * не приходит. Бот с замороженной ценой продолжает выглядеть живым: он отвечает на
+     * исполнения, ведёт сверку, пишет журнал, — но границы диапазона проверяет по цене
+     * получасовой давности и потому не видит ни пробоя, ни повода переставить сетку.
+     *
+     * Инцидент 14.08.2026: цена MAGN стояла на 20.38 при пороге пробоя 20.4669, а бот
+     * держал в памяти 20.475 — последнее, что успел прислать стрим, — и молчал.
+     *
+     * Отличить молчащий стрим от спокойного рынка изнутри нельзя: у неликвида сделок
+     * может не быть минутами, и это не поломка. Поэтому не гадаем, а спрашиваем цену
+     * запросом; тревожим человека только когда оказалось, что цена ДРУГАЯ, — вот это
+     * уже значит, что стрим пропустил сделки.
+     */
+    private void refreshStalePrice() {
+        Instant now = ctx.clock().instant();
+        if (lastPriceAt != null
+                && Duration.between(lastPriceAt, now).getSeconds() < PRICE_STALE_SECONDS) {
+            return;
+        }
+
+        BigDecimal fresh;
+        try {
+            LastPrice price = ctx.exchange().marketData()
+                    .getLastPrice(ctx.execution().instrumentId());
+            fresh = (price == null || price.price() == null) ? null : price.price().value();
+        } catch (Exception e) {
+            log.debug("Не удалось обновить цену запросом для бота {}: {}",
+                    ctx.botId(), e.getMessage());
+            return;
+        }
+        if (fresh == null || fresh.signum() <= 0) {
+            return;
+        }
+
+        BigDecimal previous = lastPrice;
+        lastPriceAt = now;
+        lastPrice = fresh;
+        ctx.observedPrice(fresh, now);
+
+        if (previous == null || previous.compareTo(fresh) == 0) {
+            // Рынок просто стоял. Ни события, ни повода для тревоги.
+            return;
+        }
+        if (!stalePriceReported) {
+            stalePriceReported = true;
+            ctx.event(BotEventLevel.WARN, BotEventType.HOUSEKEEPING,
+                    ("Стрим цен молчал: в памяти была %s, у биржи %s. Взял цену запросом — "
+                            + "решения о границах диапазона считались бы по устаревшей.")
+                            .formatted(previous.toPlainString(), fresh.toPlainString()));
+        }
+    }
+
     private void seedLastPriceOnStart() {
         if (lastPrice != null) {
             return;
@@ -438,6 +507,7 @@ public class GridStrategy implements Strategy {
             LastPrice price = ctx.exchange().marketData().getLastPrice(ctx.execution().instrumentId());
             if (price != null && price.price() != null && price.price().value() != null) {
                 lastPrice = price.price().value();
+                lastPriceAt = ctx.clock().instant();
                 ctx.observedPrice(lastPrice, ctx.clock().instant());
             }
         } catch (Exception e) {
@@ -1015,6 +1085,8 @@ public class GridStrategy implements Strategy {
             return;
         }
         lastPrice = price.price().value();
+        lastPriceAt = ctx.clock().instant();
+        stalePriceReported = false;
 
         // Плечо ведём первым: непокрытая позиция не ждёт своей очереди.
         manageHedgeLeg();
@@ -1066,6 +1138,9 @@ public class GridStrategy implements Strategy {
         // Тот же сторож для торговой сессии: потерянное стримом открытие иначе
         // означало бы, что бот молчит весь день.
         refreshTradingStatusIfClosed();
+
+        // И тот же сторож для ЦЕНЫ: без неё все проверки границ считают по вчерашнему.
+        refreshStalePrice();
 
         checkMarginHealth();
         manageHedgeLeg();
@@ -1727,11 +1802,35 @@ public class GridStrategy implements Strategy {
             return false;
         }
 
+        // Против нас работает та граница, которую задаёт направление: лонгу вредит
+        // падение под нижнюю, шорту — рост над верхней. Пока это было зашито как
+        // «нижняя», шортовая сетка в беде запускала бы машинерию, написанную для
+        // противоположного случая.
         BigDecimal adverseBound = direction.adverseBound(activeRange);
+        BigDecimal margin = adverseBound.multiply(cfg.breakoutMarginPct())
+                .max(ladder.effectiveStep().divide(BigDecimal.valueOf(2)));
+        BigDecimal threshold = direction.adverseThreshold(adverseBound, margin);
+        // Цена уверенного возврата: та же величина запаса, но ВНУТРЬ диапазона.
+        BigDecimal recovery = direction.favourableThreshold(adverseBound, margin);
+
         Instant now = ctx.clock().instant();
         if (!direction.beyondAdverse(lastPrice, adverseBound)) {
-            lowerBreakoutCandidateAt = null;
-            lowerBreakoutApproachReported = false;
+            /*
+             * Внутри диапазона покупки снова разрешены — но отсчёт подтверждения при этом
+             * НЕ обнуляется, пока цена не вернулась уверенно, на величину запаса вглубь.
+             *
+             * Инцидент 14.08.2026: цена колебалась вокруг границы 20.5079, и каждый тик
+             * обратно внутрь стирал отсчёт. Подтверждение начиналось заново по десять раз
+             * («начато подтверждение» в 15:07:12 и снова в 15:11:39), пятиминутный порог
+             * не набирался НИ РАЗУ, и сетка не переставлялась часами, пока цена уже сидела
+             * под нижним уровнем. Запас существует ровно для того, чтобы дрожание у границы
+             * не считалось возвратом, — значит и снимать отсчёт он должен тоже.
+             */
+            if (direction.beyondFavourable(lastPrice, recovery)) {
+                lowerBreakoutCandidateAt = null;
+                lowerBreakoutApproachReportedAt = null;
+                outsideRangeSince = null;
+            }
             if (lowerBreakoutPaused) {
                 lowerBreakoutPaused = false;
                 lowerBreakoutPauseReported = false;
@@ -1740,14 +1839,6 @@ public class GridStrategy implements Strategy {
             }
             return false;
         }
-
-        // Против нас работает та граница, которую задаёт направление: лонгу вредит
-        // падение под нижнюю, шорту — рост над верхней. Пока это было зашито как
-        // «нижняя», шортовая сетка в беде запускала бы машинерию, написанную для
-        // противоположного случая.
-        BigDecimal margin = adverseBound.multiply(cfg.breakoutMarginPct())
-                .max(ladder.effectiveStep().divide(BigDecimal.valueOf(2)));
-        BigDecimal threshold = direction.adverseThreshold(adverseBound, margin);
         if (!direction.beyondAdverse(lastPrice, threshold)) {
             /*
              * Полоса между границей и порогом — самое непонятное снаружи состояние.
@@ -1756,13 +1847,26 @@ public class GridStrategy implements Strategy {
              * не считается — на то и запас. Раньше бот проходил её молча, и выглядело
              * это как «цена под сеткой, а он её не видит».
              */
-            if (!lowerBreakoutApproachReported) {
-                lowerBreakoutApproachReported = true;
+            if (outsideRangeSince == null) {
+                outsideRangeSince = now;
+            }
+            /*
+             * Повторяем, а не сообщаем однажды. Одноразовое сообщение гаснет через минуту
+             * после выхода за границу, и дальше бот может простоять в этой полосе часы,
+             * ничем не отличаясь снаружи от зависшего: заявок на покупку нет — покупать
+             * ниже нижнего уровня нечего, сделок нет, журнал пуст.
+             */
+            if (lowerBreakoutApproachReportedAt == null
+                    || Duration.between(lowerBreakoutApproachReportedAt, now).getSeconds()
+                            >= APPROACH_REPEAT_SECONDS) {
+                lowerBreakoutApproachReportedAt = now;
                 ctx.event(BotEventType.HOUSEKEEPING,
-                        ("GRID: цена %s вышла за границу %s, но запаса до порога пробоя %s "
-                                + "ещё не хватает. Ниже границы покупок нет — жду порога.")
-                                .formatted(lastPrice.toPlainString(), adverseBound.toPlainString(),
-                                        threshold.toPlainString()));
+                        ("GRID: цена %s вне диапазона уже %d мин, но до порога пробоя %s "
+                                + "не дошла (граница %s). Покупок ниже границы нет, сетка "
+                                + "только продаёт — жду порога.")
+                                .formatted(lastPrice.toPlainString(),
+                                        Duration.between(outsideRangeSince, now).toMinutes(),
+                                        threshold.toPlainString(), adverseBound.toPlainString()));
             }
             return false;
         }
@@ -2565,7 +2669,8 @@ public class GridStrategy implements Strategy {
         downwardLossBaseline = null;
         lowerBreakoutPaused = false;
         lowerBreakoutPauseReported = false;
-        lowerBreakoutApproachReported = false;
+        lowerBreakoutApproachReportedAt = null;
+        outsideRangeSince = null;
         buyingStopped = shouldStopBuying();
         halted = false;
         try {

@@ -251,6 +251,104 @@ class GridStrategyDownwardReplacementTest {
         assertThat(saved.get().realizedDownwardLoss()).isEqualByComparingTo("10");
     }
 
+    /*
+     * Диапазон 92..108, 4 уровня: шаг 4, запас = max(92 × 0.002; 4/2) = 2.
+     * Отсюда порог пробоя 90, а цена уверенного возврата — 94.
+     */
+
+    /**
+     * Инцидент 14.08.2026: сетка не переставлялась часами под нижним уровнем.
+     *
+     * Цена дрожала вокруг границы, и КАЖДЫЙ тик обратно внутрь обнулял отсчёт
+     * подтверждения. В боевом журнале «начато подтверждение» появлялось снова и снова
+     * (15:07:12, затем 15:11:39), пятиминутный порог не набрался ни разу, а позиция
+     * всё это время сидела ниже сетки без единой встречной покупки.
+     */
+    @Test
+    void briefBounceIntoRangeDoesNotRestartConfirmation() {
+        GridStrategy strategy = startedWithSavedRange();
+
+        strategy.onPrice(lastPrice("89"));           // ниже порога 90 — отсчёт пошёл
+        currentTime.set(now.plusSeconds(4));
+        strategy.onPrice(lastPrice("93"));           // вернулись внутрь, но неуверенно
+        currentTime.set(now.plusSeconds(11));
+        strategy.onPrice(lastPrice("89"));           // снова ниже порога: 11 с > 10 с
+
+        verify(ctx).requestStop(contains("Исчерпан лимит перестановок вниз"));
+        verify(ctx, times(1)).event(eq(BotEventType.HOUSEKEEPING),
+                contains("начато подтверждение"));
+    }
+
+    /**
+     * Инцидент 14.08.2026, вторая половина: бот не видел цену вовсе.
+     *
+     * Стрим последних цен замолчал, не разорвавшись: соединение поднято, ошибок нет,
+     * событий нет. lastPrice застыла на 20.475 при реальной цене 20.38 и пороге пробоя
+     * 20.4669 — бот честно проверял границы по цене получасовой давности и потому
+     * молчал. Тик обязан спросить цену у биржи, а не ждать стрим вечно.
+     */
+    @Test
+    void tickAsksExchangeForPriceWhenStreamGoesQuiet() {
+        GridStrategy strategy = startedWithSavedRange();
+        // Стрим не присылает ничего, а рынок ушёл под порог 90.
+        when(marketData.getLastPrice(instrumentId)).thenReturn(lastPrice("89"));
+
+        currentTime.set(now.plusSeconds(180));
+        strategy.onTick();
+
+        verify(ctx).event(eq(BotEventType.HOUSEKEEPING), contains("начато подтверждение"));
+        verify(ctx).event(eq(BotEventLevel.WARN), eq(BotEventType.HOUSEKEEPING),
+                contains("Стрим цен молчал"));
+    }
+
+    /** Пока стрим жив, лишних запросов к бирже не делаем. */
+    @Test
+    void tickDoesNotAskExchangeWhilePriceStreamIsAlive() {
+        GridStrategy strategy = startedWithSavedRange();
+        strategy.onPrice(lastPrice("95"));
+        clearInvocations(marketData);
+
+        currentTime.set(now.plusSeconds(30));
+        strategy.onTick();
+
+        verify(marketData, never()).getLastPrice(any());
+    }
+
+    /** Уверенный возврат вглубь диапазона — другое дело: пробой не состоялся. */
+    @Test
+    void confidentReturnIntoRangeCancelsConfirmation() {
+        GridStrategy strategy = startedWithSavedRange();
+
+        strategy.onPrice(lastPrice("89"));
+        currentTime.set(now.plusSeconds(4));
+        strategy.onPrice(lastPrice("95"));           // выше 94 — цена честно вернулась
+        currentTime.set(now.plusSeconds(11));
+        strategy.onPrice(lastPrice("89"));           // отсчёт начинается заново
+
+        verify(ctx, never()).requestStop(any());
+        verify(ctx, times(2)).event(eq(BotEventType.HOUSEKEEPING),
+                contains("начато подтверждение"));
+    }
+
+    /**
+     * Бот с сохранённым диапазоном 92..108 и исчерпанным лимитом перестановок.
+     *
+     * Лимит исчерпан намеренно: подтверждённый пробой упирается в него и просит
+     * остановку вместо ликвидации. Это делает факт «подтверждение ДОСЧИТАЛО» видимым
+     * одним вызовом и не тащит в тест всю машинерию перестановки.
+     */
+    private GridStrategy startedWithSavedRange() {
+        GridRange active = new GridRange(new BigDecimal("92"), new BigDecimal("108"), 4,
+                GridRange.Origin.ATR_REPLACED_DOWN, now);
+        saved.set(new GridStrategyState(active, 2, false, now.minusSeconds(7200),
+                false, null, 1, BigDecimal.ZERO, null));
+        GridStrategy strategy = new GridStrategy(config("50", 1));
+        strategy.onStart(ctx, reconciled(BigDecimal.ZERO));
+        strategy.onReconcile(reconciled(BigDecimal.ZERO));
+        clearInvocations(ctx, gateway);
+        return strategy;
+    }
+
     /**
      * Пауза между перестановками откладывает подтверждение — и обязана сказать об этом.
      *

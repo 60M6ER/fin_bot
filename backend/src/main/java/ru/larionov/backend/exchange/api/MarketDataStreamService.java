@@ -18,11 +18,22 @@ import java.util.function.Consumer;
  */
 public interface MarketDataStreamService extends AutoCloseable {
 
-    void subscribeLastPrice(Set<InstrumentId> instruments, Consumer<LastPrice> handler);
+    /**
+     * Подписка возвращает СВОЮ отписку, и это не удобство.
+     *
+     * Подписки живут на уровне подключения и переживают остановку бота — иначе
+     * остановка одного оборвала бы поток соседям по тому же инструменту. Но обработчик
+     * принадлежит конкретному запуску бота: он замкнут на его цикл событий, и после
+     * остановки обязан уйти. Без этого перезапущенный бот получал бы данные в мёртвый
+     * цикл, а живой — не получал вовсе.
+     *
+     * @return снятие ИМЕННО ЭТОГО обработчика; на подписку у брокера не влияет
+     */
+    Runnable subscribeLastPrice(Set<InstrumentId> instruments, Consumer<LastPrice> handler);
 
-    void subscribeOrderBook(Set<InstrumentId> instruments, int depth, Consumer<OrderBook> handler);
+    Runnable subscribeOrderBook(Set<InstrumentId> instruments, int depth, Consumer<OrderBook> handler);
 
-    void subscribeTradingStatus(Set<InstrumentId> instruments, Consumer<TradingStatusEvent> handler);
+    Runnable subscribeTradingStatus(Set<InstrumentId> instruments, Consumer<TradingStatusEvent> handler);
 
     void unsubscribeAll();
 
