@@ -64,6 +64,17 @@ public interface MoneyLedgerRepository extends JpaRepository<MoneyLedgerEntity, 
     BigDecimal cashFlow(@Param("botId") UUID botId, @Param("dryRun") boolean dryRun);
 
     /**
+     * Начисляли ли уже такую запись после указанного момента.
+     *
+     * Нужна плате за перенос: она списывается раз в сутки, а вызвать проход могут
+     * и повторно — после рестарта, ручным запуском, дважды сработавшим планировщиком.
+     * Уникальный ключ книги здесь не спасает: он построен на orderId, которого у
+     * переноса нет.
+     */
+    boolean existsByBotIdAndDryRunAndEntryTypeAndTsAfter(
+            UUID botId, boolean dryRun, LedgerEntryType entryType, java.time.Instant after);
+
+    /**
      * Верхняя граница книги на сейчас — ею отрезаются поколения сетки друг от друга.
      * Ноль на пустой книге означает «поколение видит её целиком», что для первого
      * поколения и требуется.

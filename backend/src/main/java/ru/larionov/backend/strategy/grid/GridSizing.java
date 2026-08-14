@@ -96,6 +96,22 @@ public record GridSizing(
         if (levels <= 0) {
             throw new IllegalStateException("В сетке нет уровней покупки — размер заявки считать не от чего");
         }
+
+        /*
+         * Какие уровни ОТКРЫВАЮТ позицию — зависит от направления.
+         *
+         * У лонга это 0..N−1: на верхнем уровне покупать бессмысленно, продавать
+         * с него некуда. У шорта зеркально — 1..N: на нижнем уровне продавать
+         * бессмысленно, откупать под ним нечего.
+         *
+         * Пока сетка была только лонговой, диапазон был зашит как 0..N−1, и для
+         * шорта это дало бы сразу две ошибки: нижний уровень получил бы размер,
+         * которым его не закрыть, а верхний остался бы пустым, хотя именно он
+         * ближе всего к рынку и открывается первым.
+         */
+        boolean shortMode = cfg.direction() == GridDirection.SHORT;
+        int firstOpen = shortMode ? 1 : 0;
+        int lastOpen = shortMode ? levels : levels - 1;
         if (workingBudget == null || workingBudget.signum() <= 0) {
             throw new IllegalStateException(
                     ("Рабочий бюджет исчерпан: %s. Реализованный убыток съел выделенные деньги, "
@@ -107,7 +123,7 @@ public record GridSizing(
 
         if (cfg.sizingMode() == GridConfig.SizingMode.UNIFORM) {
             BigDecimal denominator = BigDecimal.ZERO;
-            for (int i = 0; i < levels; i++) {
+            for (int i = firstOpen; i <= lastOpen; i++) {
                 denominator = denominator.add(ladder.priceAt(i));
             }
             BigDecimal perOrder = quantizeDown(
@@ -121,12 +137,12 @@ public record GridSizing(
                                         denominator.multiply(quantityStep)
                                                 .setScale(2, RoundingMode.HALF_UP).toPlainString()));
             }
-            for (int i = 0; i < levels; i++) {
+            for (int i = firstOpen; i <= lastOpen; i++) {
                 quantities.add(perOrder);
             }
         } else {
             BigDecimal perLevel = workingBudget.divide(BigDecimal.valueOf(levels), 18, RoundingMode.DOWN);
-            for (int i = 0; i < levels; i++) {
+            for (int i = firstOpen; i <= lastOpen; i++) {
                 BigDecimal price = ladder.priceAt(i);
                 BigDecimal atLevel = quantizeDown(
                         perLevel.divide(price, 18, RoundingMode.DOWN), quantityStep);
@@ -152,10 +168,27 @@ public record GridSizing(
         }
 
         BigDecimal worstCase = BigDecimal.ZERO;
-        for (int i = 0; i < levels; i++) {
-            worstCase = worstCase.add(ladder.priceAt(i).multiply(quantities.get(i)));
+        for (int i = 0; i < quantities.size(); i++) {
+            worstCase = worstCase.add(ladder.priceAt(firstOpen + i).multiply(quantities.get(i)));
         }
-        return new GridSizing(quantities, worstCase, workingBudget.subtract(worstCase),
+
+        /*
+         * Список индексируется УРОВНЕМ, поэтому шорту он сдвинут на единицу вперёд:
+         * его открывающие уровни 1..N, а нулевой не открывается вовсе.
+         *
+         * Лонговое представление при этом не меняется ни на элемент — список 0..N−1,
+         * как был. Так проверка «размер одинаков на всех уровнях» и остальные
+         * потребители продолжают видеть ровно то, что видели всегда.
+         */
+        List<BigDecimal> byLevel = quantities;
+        if (firstOpen > 0) {
+            byLevel = new ArrayList<>(quantities.size() + firstOpen);
+            for (int i = 0; i < firstOpen; i++) {
+                byLevel.add(BigDecimal.ZERO);
+            }
+            byLevel.addAll(quantities);
+        }
+        return new GridSizing(byLevel, worstCase, workingBudget.subtract(worstCase),
                 workingBudget, cfg.sizingMode());
     }
 

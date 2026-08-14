@@ -90,6 +90,7 @@ public class LiveExecutionGateway implements ExecutionGateway {
                 .status(OrderStatus.PENDING)
                 .gridLevel(tradable.gridLevel())
                 .purpose(tradable.purpose())
+                .gridRole(tradable.role())
                 .requestedQuantity(tradable.quantity())
                 .executedQuantity(BigDecimal.ZERO)
                 .limitPrice(tradable.limitPrice())
@@ -157,13 +158,14 @@ public class LiveExecutionGateway implements ExecutionGateway {
                             .formatted(plain(intent.quantity()), plain(ctx.quantityStep())));
         }
 
-        // Назначение переносим явно: без него округлённая до шага заявка на пыль
+        // Назначение и роль переносим явно: без них округлённая до шага заявка на пыль
         // или ликвидацию молча превращалась бы в сеточную и попадала под все проверки,
-        // из которых её только что вывели.
+        // из которых её только что вывели, а открывающая продажа шорта — в закрывающую,
+        // то есть партия открылась бы не с той стороны.
         PlaceIntent tradable = quantity.compareTo(intent.quantity()) == 0
                 ? intent
                 : new PlaceIntent(intent.side(), quantity, intent.limitPrice(),
-                        intent.gridLevel(), intent.purpose());
+                        intent.gridLevel(), intent.purpose(), intent.role());
 
         BigDecimal minNotional = ctx.minNotional();
         if (minNotional != null && tradable.notional().compareTo(minNotional) < 0) {

@@ -2,6 +2,7 @@ package ru.larionov.backend.entity;
 
 import jakarta.persistence.*;
 import lombok.*;
+import ru.larionov.backend.enums.GridRole;
 import ru.larionov.backend.enums.LedgerEntryType;
 import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
@@ -66,6 +67,20 @@ public class MoneyLedgerEntity {
     @Builder.Default
     private OrderPurpose purpose = OrderPurpose.GRID;
 
+    /**
+     * Открыла запись партию или закрыла.
+     *
+     * Именно по этому признаку восстанавливаются партии: в лонге партию открывает
+     * покупка, в шорте — продажа, и вывести одно из другого без направления нельзя.
+     * Направление же принадлежит поколению, а книга живёт через поколения, поэтому
+     * роль записывается в момент сделки и больше не пересчитывается.
+     *
+     * Неторговые отметки (перестановка сетки, изменение бюджета) роли не имеют.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "grid_role", length = 8)
+    private GridRole gridRole;
+
     /** Количество в ЕДИНИЦАХ БАЗОВОГО АКТИВА. Деньги строки = price × quantity. */
     @Column(name = "quantity", precision = 28, scale = 10)
     private BigDecimal quantity;
@@ -118,6 +133,11 @@ public class MoneyLedgerEntity {
     void prePersist() {
         if (ts == null) {
             ts = Instant.now();
+        }
+        // Роль по стороне для тех, кто её не указал, — то же лонговое правило,
+        // которым миграция заполняет накопленную историю. См. BotOrderEntity.roleFromSide.
+        if (gridRole == null && side != null) {
+            gridRole = BotOrderEntity.roleFromSide(side);
         }
         if (exchangeLotSize == null || exchangeLotSize.signum() <= 0) {
             exchangeLotSize = BigDecimal.ONE;

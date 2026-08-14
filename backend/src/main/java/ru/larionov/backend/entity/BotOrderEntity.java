@@ -2,6 +2,7 @@ package ru.larionov.backend.entity;
 
 import jakarta.persistence.*;
 import lombok.*;
+import ru.larionov.backend.enums.GridRole;
 import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
@@ -69,6 +70,19 @@ public class BotOrderEntity {
     private OrderPurpose purpose = OrderPurpose.GRID;
 
     /**
+     * Набирает заявка позицию или закрывает набранное.
+     *
+     * Хранится, а не выводится из стороны: в шортовой сетке позицию набирает ПРОДАЖА,
+     * и «покупка значит открытие» перестаёт быть правдой. Читателю роль нужна там,
+     * где направления под рукой нет — риск-контроль сравнивает намерение с уже
+     * лежащими здесь строками, а денежная книга разбирает записи разных поколений
+     * с разным направлением.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "grid_role", nullable = false, length = 8)
+    private GridRole gridRole;
+
+    /**
      * Количество в ЕДИНИЦАХ БАЗОВОГО АКТИВА (штуки бумаг, монеты), а не в лотах биржи.
      * Пересчёт в заявочные единицы биржи — дело гейтвея, он знает {@code exchangeLotSize}.
      */
@@ -124,10 +138,25 @@ public class BotOrderEntity {
     @PrePersist
     void prePersist() {
         if (id == null) id = UUID.randomUUID();
+        if (gridRole == null) gridRole = roleFromSide(side);
         normalizeQuantities();
         Instant now = Instant.now();
         if (createdAt == null) createdAt = now;
         updatedAt = now;
+    }
+
+    /**
+     * Роль по стороне для тех, кто её не указал: покупка набирает, продажа закрывает.
+     *
+     * Это лонговое правило, и оно верно ровно для истории, накопленной до появления
+     * направления, — вся она лонговая. Тем же правилом миграция заполняет старые
+     * строки, и держать эти два места в согласии важнее, чем сэкономить метод:
+     * разойдись они, партии перестроились бы по-разному до и после перезапуска.
+     *
+     * Заявки шортовой сетки роль проставляют явно и сюда не попадают.
+     */
+    public static GridRole roleFromSide(OrderSide side) {
+        return side == OrderSide.SELL ? GridRole.CLOSE : GridRole.OPEN;
     }
 
     @PreUpdate

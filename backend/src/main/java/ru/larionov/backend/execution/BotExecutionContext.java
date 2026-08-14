@@ -54,7 +54,45 @@ public record BotExecutionContext(
          * Портя не только подпись: по этой валюте портфель решает, складывать ли P/L
          * ботов между собой, и два бота одного подключения переставали суммироваться.
          */
-        String quoteCurrency
+        String quoteCurrency,
+
+        /**
+         * Разрешена ли боту короткая позиция.
+         *
+         * Второй уровень рубильника: первый — галка на подключении. Пока здесь false,
+         * риск-контроль работает ровно так же, как работал всегда, — продать больше
+         * купленного нельзя ни при каких обстоятельствах.
+         */
+        boolean marginEnabled,
+
+        /** Разрешает ли шорт по этой бумаге сам брокер. Спрошено у биржи при старте бота. */
+        boolean shortEnabledByInstrument,
+
+        /**
+         * Потолок короткой позиции в единицах актива.
+         *
+         * Отдельный от {@code maxPositionQuantity} намеренно: у длинной позиции потолок
+         * задаётся бюджетом и убыток по ней ограничен снизу нулём цены, а у короткой
+         * убыток сверху не ограничен ничем. Одно число на оба случая означало бы, что
+         * осторожность в одну сторону молча ослабляет другую.
+         */
+        BigDecimal maxShortQuantity,
+
+        /**
+         * Потолок короткой позиции в ДЕНЬГАХ.
+         *
+         * Штуки между инструментами несравнимы, а деньги сравнимы — и кончаются
+         * именно они. Обязателен при включённой марже: без него потолка нет вовсе.
+         */
+        BigDecimal maxShortNotional,
+
+        /**
+         * Разрешены ли маржинальные операции живьём.
+         *
+         * Второй рубильник поверх {@code marginEnabled}: тот открывает саму
+         * возможность, этот — право пользоваться ею на настоящие деньги.
+         */
+        boolean allowLiveMargin
 ) {
 
     /** Прежняя форма — только для тестов, которым валюта книги безразлична. */
@@ -66,6 +104,35 @@ public record BotExecutionContext(
                                Integer maxOrdersPerDay, Integer maxOrdersPerMinute) {
         this(botId, connectionId, accountId, instrumentId, dryRun, exchangeLotSize, quantityStep,
                 minNotional, maxCapital, maxPositionQuantity, maxOrdersPerDay, maxOrdersPerMinute, null);
+    }
+
+    /** Форма без маржинальных полей: бот, которому шорт не разрешён. */
+    public BotExecutionContext(UUID botId, UUID connectionId, AccountId accountId,
+                               InstrumentId instrumentId, boolean dryRun,
+                               BigDecimal exchangeLotSize, BigDecimal quantityStep,
+                               BigDecimal minNotional, BigDecimal maxCapital,
+                               BigDecimal maxPositionQuantity,
+                               Integer maxOrdersPerDay, Integer maxOrdersPerMinute,
+                               String quoteCurrency) {
+        this(botId, connectionId, accountId, instrumentId, dryRun, exchangeLotSize, quantityStep,
+                minNotional, maxCapital, maxPositionQuantity, maxOrdersPerDay, maxOrdersPerMinute,
+                quoteCurrency, false, false, null, null, false);
+    }
+
+    /** Форма без признака живой маржи: бот, которому она разрешена только на бумаге. */
+    public BotExecutionContext(UUID botId, UUID connectionId, AccountId accountId,
+                               InstrumentId instrumentId, boolean dryRun,
+                               BigDecimal exchangeLotSize, BigDecimal quantityStep,
+                               BigDecimal minNotional, BigDecimal maxCapital,
+                               BigDecimal maxPositionQuantity,
+                               Integer maxOrdersPerDay, Integer maxOrdersPerMinute,
+                               String quoteCurrency, boolean marginEnabled,
+                               boolean shortEnabledByInstrument,
+                               BigDecimal maxShortQuantity, BigDecimal maxShortNotional) {
+        this(botId, connectionId, accountId, instrumentId, dryRun, exchangeLotSize, quantityStep,
+                minNotional, maxCapital, maxPositionQuantity, maxOrdersPerDay, maxOrdersPerMinute,
+                quoteCurrency, marginEnabled, shortEnabledByInstrument,
+                maxShortQuantity, maxShortNotional, false);
     }
 
     public BotExecutionContext {

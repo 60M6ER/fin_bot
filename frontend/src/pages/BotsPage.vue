@@ -344,6 +344,30 @@
                       </template>
                     </div>
                   </div>
+                  <!--
+                    Обеспечение стоит рядом с балансом, но НЕ входит в него: заёмные
+                    деньги боту не принадлежат. Плитка появляется только когда есть
+                    короткая позиция — лонговому боту показывать здесь нечего.
+                  -->
+                  <div v-if="Number(accounting.shortQuantity) > 0" class="metric-tile">
+                    <div class="metric-label">Занято обеспечения</div>
+                    <div class="metric-value mono">
+                      <template v-if="accounting.usedMargin === null || accounting.usedMargin === undefined">
+                        —
+                      </template>
+                      <template v-else>
+                        {{ formatMoneyWithCurrency(accounting.usedMargin, accounting.currency) }}
+                      </template>
+                    </div>
+                    <div class="metric-hint">
+                      <template v-if="accounting.usedMargin === null || accounting.usedMargin === undefined">
+                        ставка риска брокера неизвестна
+                      </template>
+                      <template v-else>
+                        шорт {{ formatQuantity(accounting.shortQuantity) }} · в баланс не входит
+                      </template>
+                    </div>
+                  </div>
                   <div class="metric-tile">
                     <div class="metric-label">Общий P/L</div>
                     <div class="metric-value" :class="moneyTone(accounting.totalPnl)">
@@ -488,6 +512,7 @@
                 <thead>
                   <tr>
                     <th class="text-left">Поколение</th>
+                    <th class="text-left">Режим</th>
                     <th class="text-left">Диапазон</th>
                     <th class="text-right">Циклов</th>
                     <th class="text-right">Стоимость перехода</th>
@@ -508,9 +533,25 @@
                         class="q-ml-xs"
                       />
                     </td>
+                    <td>
+                      <q-badge
+                        :color="g.direction === 'SHORT' ? 'deep-orange' : 'teal'"
+                        :label="modeLabel(g)"
+                        outline
+                      />
+                      <div class="text-caption text-grey">
+                        {{ g.margin ? 'маржинальное' : 'без плеча' }}
+                      </div>
+                    </td>
                     <td class="mono">
-                      {{ formatMoney(g.lowerPrice) }} — {{ formatMoney(g.upperPrice) }}
-                      <div class="text-caption text-grey">{{ rangeOriginLabel(g.origin) }}</div>
+                      <template v-if="g.kind === 'RECOVERY'">
+                        {{ formatMoney(g.entryPrice) }} → {{ formatMoney(g.targetPrice) }}
+                        <div class="text-caption text-grey">вход → цель безубытка</div>
+                      </template>
+                      <template v-else>
+                        {{ formatMoney(g.lowerPrice) }} — {{ formatMoney(g.upperPrice) }}
+                        <div class="text-caption text-grey">{{ rangeOriginLabel(g.origin) }}</div>
+                      </template>
                     </td>
                     <td class="text-right mono">{{ g.cycles }}</td>
                     <td class="text-right mono" :class="moneyTone(g.transitionCost)">
@@ -534,7 +575,7 @@
                     </td>
                   </tr>
                   <tr v-if="generations.length === 0">
-                    <td colspan="7" class="text-grey">
+                    <td colspan="8" class="text-grey">
                       Поколений пока нет — бот ещё не строил сетку
                     </td>
                   </tr>
@@ -582,6 +623,29 @@
                   </div>
                 </div>
               </q-card-section>
+
+              <template v-if="state.margin">
+                <q-separator />
+                <q-card-section>
+                  <div class="row items-center q-gutter-sm">
+                    <span class="text-caption text-grey-7">Обеспечение счёта</span>
+                    <q-badge :color="marginTone(state.margin)" :label="marginLabel(state.margin)" outline />
+                    <q-tooltip>
+                      Показатели всего счёта, а не одного бота: обеспечение общее,
+                      и соседние боты расходуют его наравне.
+                    </q-tooltip>
+                  </div>
+                  <div class="text-caption text-grey-7 q-mt-xs">
+                    Ликвидный портфель {{ formatMoney(state.margin.liquidPortfolio) }}
+                    · начальная маржа {{ formatMoney(state.margin.startingMargin) }}
+                    · минимальная {{ formatMoney(state.margin.minimalMargin) }}
+                    <template v-if="Number(state.margin.amountOfMissingFunds) > 0">
+                      · <span class="text-negative">не хватает
+                        {{ formatMoney(state.margin.amountOfMissingFunds) }}</span>
+                    </template>
+                  </div>
+                </q-card-section>
+              </template>
 
               <template v-if="state.strategySnapshot">
                 <q-separator />
@@ -1076,6 +1140,31 @@ function rangeOriginLabel (origin) {
     case 'ATR_REPLACED_DOWN': return 'ATR · ниже'
     default: return origin || '—'
   }
+}
+
+// Достаточность средств: меньше единицы — маржин-колл уже наступил, до 1.5 — край.
+// Неизвестный уровень тревогой не считается: брокер мог просто не ответить.
+function marginTone (margin) {
+  const level = Number(margin?.fundsSufficiencyLevel)
+  if (!Number.isFinite(level)) return 'grey-6'
+  if (level < 1) return 'negative'
+  if (level < 1.5) return 'orange-9'
+  return 'positive'
+}
+
+function marginLabel (margin) {
+  const level = Number(margin?.fundsSufficiencyLevel)
+  if (!Number.isFinite(level)) return 'достаточность неизвестна'
+  return `достаточность ${level.toFixed(2)}`
+}
+
+// Поколения, записанные до появления режима, лонговые по построению: шорт до тех пор
+// был запрещён структурно. Поэтому отсутствующее направление — это «лонг», а не «—».
+function modeLabel (g) {
+  if (g.kind === 'RECOVERY') {
+    return g.multiplier ? `восстановление ×${g.multiplier}` : 'восстановление'
+  }
+  return g.direction === 'SHORT' ? 'шорт' : 'лонг'
 }
 
 async function loadState (id) {

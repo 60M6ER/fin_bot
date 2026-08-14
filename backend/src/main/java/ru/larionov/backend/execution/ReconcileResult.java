@@ -47,7 +47,23 @@ public record ReconcileResult(
      * и не пережить ни одной неторгуемой пылинки от прошлого цикла.
      */
     public boolean positionShortfall() {
-        return positionMismatch != null && positionMismatch.signum() < 0;
+        if (positionMismatch == null || position == null || exchangePosition == null) {
+            return positionMismatch != null && positionMismatch.signum() < 0;
+        }
+
+        // Знаки разошлись — бот и биржа держат позицию в РАЗНЫЕ стороны. Хуже любой
+        // недостачи: тут не «чего-то не хватает», а «мы не понимаем, чем владеем».
+        if (position.signum() != 0 && exchangePosition.signum() != 0
+                && position.signum() != exchangePosition.signum()) {
+            return true;
+        }
+
+        // Дальше сравниваем ПО МОДУЛЮ. Прежнее правило «разница отрицательна» верно
+        // только для длинной позиции: у короткой всё зеркально, и недостача выглядит
+        // положительной разницей. Журнал −10 при биржевых −9 давал mismatch +1, что
+        // читалось как «на счёте есть чужое, норма», хотя означало ровно обратное —
+        // бот должен больше, чем должен на самом деле, и откуп окажется не тем.
+        return exchangePosition.abs().compareTo(position.abs()) < 0;
     }
 
     public boolean hasFindings() {

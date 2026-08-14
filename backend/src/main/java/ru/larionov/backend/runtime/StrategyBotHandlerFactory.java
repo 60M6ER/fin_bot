@@ -43,6 +43,9 @@ public class StrategyBotHandlerFactory {
     private final TradingScheduler scheduler;
     private final StrategyStateService strategyStateService;
     private final LastPriceCache lastPriceCache;
+    private final ru.larionov.backend.service.MarginAttributesService marginAttributes;
+    private final ru.larionov.backend.service.CarryFeeResolver carryFeeResolver;
+    private final ShortMarginRateCache shortMarginRates;
     private final ObjectMapper objectMapper;
 
     public StrategyBotHandler create(BotEntity bot, Consumer<String> onStopRequested, Runnable onFatal) {
@@ -72,6 +75,10 @@ public class StrategyBotHandlerFactory {
                             + ": " + e.getMessage(), e);
         }
 
+        // Ставку риска запоминаем ровно здесь: это единственная точка, где она приходит
+        // с биржи, а нужна она позже — оценке, которая работает и для остановленного бота.
+        shortMarginRates.put(instrumentId.primary(), constraints.shortInitialMarginRate());
+
         BotExecutionContext execContext = new BotExecutionContext(
                 bot.getId(),
                 bot.getExchangeConnectionId(),
@@ -86,7 +93,18 @@ public class StrategyBotHandlerFactory {
                 config.maxOrdersPerDay(),
                 config.maxOrdersPerMinute(),
                 // Деньги книги — валюта котировки инструмента, а не валюта комиссии.
-                constraints.quoteCurrency()
+                constraints.quoteCurrency(),
+                // Оба уровня рубильника сразу: подключение РАЗРЕШАЕТ, бот ВКЛЮЧАЕТ.
+                // Снятие галки на подключении обязано гасить маржу у всех его ботов
+                // разом, не полагаясь на то, что каждого выключили по отдельности.
+                Boolean.TRUE.equals(config.marginEnabled())
+                        && carryFeeResolver.marginEnabled(bot.getExchangeConnectionId()),
+                // Разрешение брокера по конкретной бумаге — спрошено у биржи только что,
+                // вместе с лотностью, а не взято из медленного справочника.
+                constraints.shortEnabled(),
+                config.maxShortQuantity(),
+                config.maxShortNotional(),
+                Boolean.TRUE.equals(config.allowLiveMargin())
         );
 
         ExecutionGateway gateway = config.dryRun()
@@ -101,7 +119,9 @@ public class StrategyBotHandlerFactory {
         return new StrategyBotHandler(
                 bot, config, strategy, exchangeHandler, gateway, execContext,
                 constraints, events, scheduler, strategyStateService, accounting,
-                gridGenerations, lastPriceCache, onStopRequested, onFatal);
+                gridGenerations, lastPriceCache, marginAttributes,
+                () -> carryFeeResolver.dailyRate(bot.getExchangeConnectionId()),
+                onStopRequested, onFatal);
     }
 
     private BotRuntimeConfig parseConfig(BotEntity bot) {

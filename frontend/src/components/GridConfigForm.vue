@@ -248,6 +248,127 @@
 
     <q-separator />
 
+    <div class="text-subtitle2">Маржа</div>
+    <div class="text-caption text-grey">
+      Шорт — продажа того, чего нет. Убыток по нему сверху ничем не ограничен,
+      поэтому потолки обязательны: пустое поле здесь означает запрет, а не свободу.
+    </div>
+
+    <q-toggle
+      v-model="model.marginEnabled"
+      label="Маржинальный режим"
+      :disable="disable"
+    />
+    <field-hint :text="hints.marginEnabled" />
+
+    <template v-if="model.marginEnabled">
+      <q-banner dense class="bg-red-1 text-red-9">
+        <template #avatar><q-icon name="warning" /></template>
+        Маржу должно разрешать и подключение, и сам брокер по этой бумаге. Пока
+        шортовая сетка допускается только в бумажном режиме — прогоните её без денег,
+        прежде чем ставить на неё деньги.
+      </q-banner>
+
+      <q-toggle
+        v-model="model.allowLiveMargin"
+        label="Разрешить маржу на реальные деньги"
+        :disable="disable"
+      />
+      <field-hint :text="hints.allowLiveMargin" />
+      <q-banner v-if="model.allowLiveMargin && !model.dryRun" dense class="bg-red-2 text-red-10">
+        <template #avatar><q-icon name="report" /></template>
+        Шорт и переворот ни разу не работали на настоящем рынке. Начните с потолков,
+        которые не жаль потерять целиком.
+      </q-banner>
+
+      <div class="row q-col-gutter-md">
+        <div class="col-6 col-md-3">
+          <q-select
+            v-model="model.direction"
+            :options="directionOptions"
+            option-value="value" option-label="label"
+            emit-value map-options
+            label="Направление сетки"
+            outlined dense :disable="disable"
+          />
+          <field-hint :text="hints.direction" />
+        </div>
+        <div class="col-6 col-md-3">
+          <q-input
+            v-model="model.maxShortQuantity"
+            label="Шорт, макс. штук"
+            inputmode="decimal" outlined dense :disable="disable"
+          />
+          <field-hint :text="hints.maxShortQuantity" />
+        </div>
+        <div class="col-6 col-md-3">
+          <q-input
+            v-model.number="model.maxShortNotional"
+            label="Шорт, макс. денег"
+            type="number" outlined dense :disable="disable"
+          />
+          <field-hint :text="hints.maxShortNotional" />
+        </div>
+        <div class="col-6 col-md-3">
+          <q-input
+            v-model.number="model.expectedCycleDays"
+            label="Суток на цикл"
+            type="number" outlined dense :disable="disable"
+          />
+          <field-hint :text="hints.expectedCycleDays" />
+        </div>
+      </div>
+
+      <div class="text-subtitle2 q-mt-sm">Восстановительное плечо</div>
+      <div class="text-caption text-grey">
+        При пробое против позиции бот может не фиксировать убыток, а перевернуть позицию
+        с множителем и отбивать его плечом. Каждый следующий переворот умножает экспозицию,
+        поэтому лимит эпизодов — главный предохранитель.
+      </div>
+
+      <div class="row q-col-gutter-md">
+        <div class="col-6 col-md-3">
+          <q-select
+            v-model="model.onAdverseBreakout"
+            :options="adverseBreakoutOptions"
+            option-value="value" option-label="label"
+            emit-value map-options
+            label="Пробой против позиции"
+            outlined dense :disable="disable"
+          />
+          <field-hint :text="hints.onAdverseBreakout" />
+        </div>
+        <template v-if="model.onAdverseBreakout === 'HEDGE_AND_RECOVER'">
+          <div class="col-6 col-md-3">
+            <q-input v-model.number="model.hedgeMultiplier" label="Множитель" type="number"
+                     step="0.5" min="1.5" outlined dense :disable="disable" />
+            <field-hint :text="hints.hedgeMultiplier" />
+          </div>
+          <div class="col-6 col-md-3">
+            <q-input v-model.number="model.maxHedgeEpisodes" label="Эпизодов на поколение"
+                     type="number" min="0" outlined dense :disable="disable" />
+            <field-hint :text="hints.maxHedgeEpisodes" />
+          </div>
+          <div class="col-6 col-md-3">
+            <q-input v-model.number="model.maxHedgeHoldDays" label="Суток удержания, макс."
+                     type="number" min="1" outlined dense :disable="disable" />
+            <field-hint :text="hints.maxHedgeHoldDays" />
+          </div>
+          <div class="col-6 col-md-3">
+            <q-input v-model.number="hedgeStopLossPercent" label="Стоп по плечу" type="number"
+                     min="0" step="0.5" suffix="%" outlined dense :disable="disable" />
+            <field-hint :text="hints.hedgeStopLossPct" />
+          </div>
+          <div class="col-6 col-md-3 flex items-center">
+            <q-toggle v-model="model.hedgeAndGridConcurrent"
+                      label="Сетка работает одновременно с плечом" :disable="disable" />
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <q-separator />
+
     <div class="text-subtitle2">Лимиты</div>
     <div class="text-caption text-grey">
       Проверяются перед каждой заявкой и считаются по журналу, поэтому переживают перезапуск.
@@ -489,6 +610,60 @@ const hints = {
     + 'реализованный P/L, заявки постепенно растут. Пересчёт идёт только в моменты '
     + 'перестройки сетки, поэтому объём не «плывёт» между покупкой и её встречной продажей.',
 
+  marginEnabled:
+    'Разрешает боту короткую позицию. Работает только вместе с галкой на подключении: '
+    + 'подключение разрешает, бот включает. Снятие галки на подключении гасит маржу '
+    + 'у всех его ботов разом.',
+
+  direction:
+    'Лонг покупает ниже и продаёт выше, шорт — зеркально: продаёт выше и откупает ниже. '
+    + 'Направление принадлежит поколению и внутри него не меняется — иначе уже '
+    + 'выставленные встречные заявки закрывали бы не то, что открывали.',
+
+  maxShortQuantity:
+    'Потолок короткой позиции в единицах актива. Отдельный от «Позиция, макс.» намеренно: '
+    + 'у длинной позиции убыток ограничен снизу нулём цены, у короткой сверху не ограничен '
+    + 'ничем. Пусто — шорт запрещён.',
+
+  maxShortNotional:
+    'Потолок короткой позиции в деньгах. Штуки между инструментами несравнимы, а кончаются '
+    + 'именно деньги. Пусто — шорт запрещён: здесь «забыл задать» не должно означать '
+    + '«разрешено сколько угодно».',
+
+  expectedCycleDays:
+    'Сколько суток, по ожиданию, живёт один цикл шортовой сетки. Участвует в проверке, '
+    + 'окупает ли шаг плату за перенос непокрытой позиции. Прогнозом не является: '
+    + 'сетка с двухсуточным циклом обязана окупать двое суток удержания.',
+
+  allowLiveMargin:
+    'Разрешает маржинальные операции на реальные деньги, а не только на бумаге. '
+    + 'Отдельно от «Маржинальный режим» намеренно: шорт и переворот ни разу не работали '
+    + 'на настоящем рынке — проверена арифметика, но не поведение брокера.',
+
+  onAdverseBreakout:
+    'Что делать при пробое против позиции. «Закрыть» — прежнее поведение: фиксируем '
+    + 'убыток и переставляем сетку. «Перевернуть» — продаём (откупаем) с множителем: '
+    + 'часть закрывает позицию, остаток становится плечом, которое отбивает убыток.',
+
+  hedgeMultiplier:
+    'Во сколько раз больше закрываемой позиции продаём. При ×4 для возврата в ноль цене '
+    + 'надо пройти втрое меньше, чем она уже прошла. Множитель определяет цену безубытка, '
+    + 'поэтому если плечо не влезает в потолки, бот отказывается от переворота целиком, '
+    + 'а не уменьшает множитель молча.',
+
+  maxHedgeEpisodes:
+    'Сколько переворотов разрешено на одно поколение. Главный предохранитель: каждый '
+    + 'следующий умножает экспозицию — два подряд дают девятикратную от исходной, '
+    + 'три двадцатисемикратную. Ноль запрещает переворот вовсе.',
+
+  maxHedgeHoldDays:
+    'Сколько суток держим плечо, прежде чем закрыть по рынку и признать результат. '
+    + 'Срок — крайний рубеж, а не план: чем он длиннее, тем больше плата за перенос.',
+
+  hedgeStopLossPct:
+    'Насколько цена вправе уйти против плеча, прежде чем эпизод закроется с убытком. '
+    + 'Пусто — стоп не задан, и эпизод держится до цели или до срока.',
+
   maxCapital:
     'Потолок денег, одновременно занятых заявками и позицией. Проверяется перед каждой '
     + 'заявкой и считается по журналу, поэтому переживает перезапуск. Пусто — без '
@@ -556,6 +731,16 @@ const profitPolicyOptions = [
   { value: 'COMPOUND', label: 'Реинвестируется' }
 ]
 
+const adverseBreakoutOptions = [
+  { value: 'LIQUIDATE', label: 'Закрыть позицию и зафиксировать убыток' },
+  { value: 'HEDGE_AND_RECOVER', label: 'Перевернуть с множителем и отбивать плечом' }
+]
+
+const directionOptions = [
+  { value: 'LONG', label: 'Лонг — покупаем ниже, продаём выше' },
+  { value: 'SHORT', label: 'Шорт — продаём выше, откупаем ниже' }
+]
+
 const defaults = {
   instrumentUid: '',
   autoRange: false,
@@ -586,6 +771,19 @@ const defaults = {
   maxPositionQuantity: null,
   maxOrdersPerDay: null,
   maxOrdersPerMinute: 10,
+  // Маржа выключена по умолчанию: право рисковать даётся явно.
+  marginEnabled: false,
+  direction: 'LONG',
+  maxShortQuantity: null,
+  maxShortNotional: null,
+  expectedCycleDays: 1,
+  allowLiveMargin: false,
+  onAdverseBreakout: 'LIQUIDATE',
+  hedgeMultiplier: 4,
+  maxHedgeEpisodes: 1,
+  maxHedgeHoldDays: 3,
+  hedgeStopLossPct: null,
+  hedgeAndGridConcurrent: true,
   dryRun: false,
   enabled: true
 }
@@ -687,6 +885,29 @@ watch(() => model.autoRange, (enabled, previous) => {
   if (!enabled) {
     model.onUpperBreakout = 'NOTHING'
     if (model.onRangeExit === 'REPLACE_LOWER') model.onRangeExit = 'STOP_BUYING'
+  }
+})
+
+// Процент живёт только в форме: на backend уходит доля.
+const hedgeStopLossPercent = computed({
+  get: () => model.hedgeStopLossPct == null ? null : Number(model.hedgeStopLossPct) * 100,
+  set: v => { model.hedgeStopLossPct = (v == null || v === '') ? null : Number(v) / 100 }
+})
+
+watch(() => model.marginEnabled, enabled => {
+  if (!enabled) {
+    model.allowLiveMargin = false
+    model.onAdverseBreakout = 'LIQUIDATE'
+  }
+  if (!enabled) {
+    // Шорт без маржи не собирается на бэкенде вовсе — возвращаем лонг сами,
+    // чтобы человек не получил отказ при сохранении вместо понятной формы.
+    model.direction = 'LONG'
+    model.maxShortQuantity = null
+    model.maxShortNotional = null
+  } else if (model.dryRun !== true) {
+    // Живой шорт пока запрещён на старте. Подсказываем это формой, а не отказом.
+    model.dryRun = true
   }
 })
 

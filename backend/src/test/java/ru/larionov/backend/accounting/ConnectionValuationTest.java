@@ -54,7 +54,8 @@ class ConnectionValuationTest {
         });
         var appSettings = mock(ru.larionov.backend.service.AppSettingService.class);
         when(appSettings.get(any(), any())).thenAnswer(i -> i.getArgument(1));
-        service = new BotValuationService(accounting, prices, exchangeBalance,
+        service = new BotValuationService(accounting, prices,
+                new ru.larionov.backend.runtime.ShortMarginRateCache(), exchangeBalance,
                 mock(ru.larionov.backend.repository.ExchangeConnectionRepository.class),
                 mock(ru.larionov.backend.service.ExchangeConnectionContextResolver.class),
                 mock(ru.larionov.backend.repository.InstrumentRepository.class), new ObjectMapper(),

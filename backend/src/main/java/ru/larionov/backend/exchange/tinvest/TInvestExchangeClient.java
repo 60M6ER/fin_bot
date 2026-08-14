@@ -15,6 +15,7 @@ import ru.ttech.piapi.core.connector.streaming.StreamServiceStubFactory;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -56,6 +57,7 @@ public final class TInvestExchangeClient implements ExchangeClient {
     private final TradingCalendarApi tradingCalendarApi;
     private final AccountsApi accountsApi;
     private final FeesApi feesApi;
+    private final MarginApi marginApi;
 
     private final ExchangeMeta meta;
 
@@ -109,6 +111,7 @@ public final class TInvestExchangeClient implements ExchangeClient {
         this.tradingCalendarApi = new TInvestTradingCalendarApi(this);
         this.accountsApi = new TInvestAccountsApi(this);
         this.feesApi = new TInvestFeesApi(this);
+        this.marginApi = new TInvestMarginApi(this);
     }
 
     public static TInvestExchangeClient create(
@@ -264,6 +267,11 @@ public final class TInvestExchangeClient implements ExchangeClient {
     @Override
     public FeesApi fees() {
         return feesApi;
+    }
+
+    @Override
+    public Optional<MarginApi> margin() {
+        return Optional.of(marginApi);
     }
 
     @Override

@@ -6,6 +6,7 @@ import org.springframework.stereotype.Component;
 import ru.larionov.backend.accounting.AccountingService;
 import ru.larionov.backend.accounting.Inventory;
 import ru.larionov.backend.entity.BotOrderEntity;
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 import ru.larionov.backend.repository.BotOrderRepository;
@@ -61,9 +62,119 @@ public class RiskGuard {
         checkOrdersPerMinute(ctx);
         checkOrdersPerDay(ctx);
         checkLevelNotTaken(ctx, intent);
-        checkNoShort(ctx, intent);
+        checkExposureBounds(ctx, intent);
         checkPosition(ctx, intent);
         checkCapital(ctx, intent);
+    }
+
+    /**
+     * Граница короткой позиции.
+     *
+     * Инвариант «шорта нет» не удалён — он остался ровно там же и работает слово
+     * в слово, пока боту не разрешена маржа. А разрешена она по умолчанию никому:
+     * нужны и галка на подключении, и включение у самого бота.
+     *
+     * Когда маржа разрешена, запрет заменяется НАБОРОМ ограничений, а не снимается.
+     * Разница принципиальная: у длинной позиции убыток ограничен снизу нулём цены,
+     * у короткой сверху не ограничен ничем, и оставить её вовсе без потолка значит
+     * поменять ограниченный риск на неограниченный — ровно то, о чём предупреждает
+     * javadoc {@link #checkNoShort}.
+     */
+    private void checkExposureBounds(BotExecutionContext ctx, PlaceIntent intent) {
+        if (!ctx.marginEnabled()) {
+            checkNoShort(ctx, intent);
+            return;
+        }
+        if (intent.side() != OrderSide.SELL) {
+            return;
+        }
+
+        BigDecimal position = nvl(orderRepo.sumPositionQuantity(ctx.botId(), ctx.dryRun()));
+        BigDecimal alreadyOffered = openQuantity(ctx, OrderSide.SELL);
+        BigDecimal projected = position.subtract(alreadyOffered).subtract(intent.quantity());
+        if (projected.signum() >= 0) {
+            // Продаём в пределах купленного — это обычная сетка, а не шорт.
+            return;
+        }
+        BigDecimal shortSize = projected.abs();
+
+        checkFlipOnlyByHedge(intent, position);
+        checkShortAllowedByInstrument(ctx);
+        checkShortQuantityCeiling(ctx, shortSize);
+        checkShortNotionalCeiling(ctx, intent, shortSize);
+    }
+
+    /**
+     * Провести позицию ЧЕРЕЗ НОЛЬ вправе только переворот.
+     *
+     * Дешёвый инвариант, закрывающий целый класс ошибок. Обычная сетка продаёт то,
+     * что купила: её продажа доводит позицию максимум до нуля. Уйти за ноль она может
+     * только по ошибке — недосчитав уже выставленные продажи, перепутав уровень,
+     * не увидев исполнения. Раньше от таких случаев спасал запрет шорта целиком;
+     * с включённой маржой запрета нет, и вместо него нужен этот.
+     *
+     * Переворот же — операция осознанная: у неё есть множитель, посчитанная цена
+     * безубытка и потолок убытка, и человек на неё соглашался. Отличить одно от
+     * другого можно ровно по назначению заявки.
+     */
+    private void checkFlipOnlyByHedge(PlaceIntent intent, BigDecimal position) {
+        if (intent.purpose() == OrderPurpose.HEDGE) {
+            return;
+        }
+        if (position.signum() <= 0) {
+            // Позиция уже короткая или пустая: продажа её углубляет, но через ноль
+            // не переводит — переворотом это не является.
+            return;
+        }
+        throw new RiskRejectedException(
+                ("Заявка перевела бы длинную позицию %s в короткую, но её назначение — %s. "
+                        + "Через ноль позицию проводит только переворот: у него есть множитель, "
+                        + "расчётная цена безубытка и потолок убытка.")
+                        .formatted(plain(position), intent.purpose()));
+    }
+
+    /**
+     * Шортить можно не всякую бумагу, и решает это брокер, а не мы.
+     *
+     * Признак спрашивается у биржи при старте бота, а не берётся из справочника:
+     * список шортируемых бумаг брокер меняет, и вчерашнее «да» ничего не значит.
+     */
+    private void checkShortAllowedByInstrument(BotExecutionContext ctx) {
+        if (!ctx.shortEnabledByInstrument()) {
+            throw new RiskRejectedException(
+                    "Брокер не разрешает короткую позицию по этому инструменту. "
+                            + "Маржинальный режим бота здесь ничего не меняет.");
+        }
+    }
+
+    private void checkShortQuantityCeiling(BotExecutionContext ctx, BigDecimal shortSize) {
+        BigDecimal limit = ctx.maxShortQuantity();
+        if (limit == null || limit.signum() <= 0) {
+            throw new RiskRejectedException(
+                    "Не задан потолок короткой позиции в единицах актива. Убыток по шорту "
+                            + "сверху ничем не ограничен, поэтому без потолка он запрещён.");
+        }
+        if (shortSize.compareTo(limit) > 0) {
+            throw new RiskRejectedException(
+                    "Короткая позиция вышла бы за потолок: %s при пределе %s."
+                            .formatted(plain(shortSize), plain(limit)));
+        }
+    }
+
+    private void checkShortNotionalCeiling(BotExecutionContext ctx, PlaceIntent intent,
+                                           BigDecimal shortSize) {
+        BigDecimal limit = ctx.maxShortNotional();
+        if (limit == null || limit.signum() <= 0) {
+            throw new RiskRejectedException(
+                    "Не задан потолок короткой позиции в деньгах. Штуки между инструментами "
+                            + "несравнимы, а кончаются именно деньги.");
+        }
+        BigDecimal notional = shortSize.multiply(intent.limitPrice());
+        if (notional.compareTo(limit) > 0) {
+            throw new RiskRejectedException(
+                    "Короткая позиция вышла бы за денежный потолок: %s при пределе %s."
+                            .formatted(plain(notional), plain(limit)));
+        }
     }
 
     /**
@@ -262,7 +373,19 @@ public class RiskGuard {
 
         BigDecimal journalPosition = nvl(orderRepo.sumPositionQuantity(botId, dryRun));
         Inventory inventory = accounting.inventory(botId, dryRun);
-        return new CapitalUsage(reserved.add(inventory.costBasisOpen()), journalPosition, inventory);
+
+        // Себестоимость берём ТОЛЬКО положительную.
+        //
+        // У короткой позиции она отрицательна: это полученные за продажу деньги.
+        // Сложи мы её как есть — задействованный капитал уменьшился бы на величину
+        // шорта и при достаточном его размере ушёл в минус, то есть лимит капитала
+        // снялся бы сам собой ровно тогда, когда он нужнее всего.
+        //
+        // Обеспечение под короткую позицию капитал, конечно, занимает, но считается
+        // оно не здесь: его знает только брокер, и спрашивают его маржинальные
+        // показатели счёта. Здесь достаточно не соврать в опасную сторону.
+        BigDecimal longCost = inventory.costBasisOpen().max(BigDecimal.ZERO);
+        return new CapitalUsage(reserved.add(longCost), journalPosition, inventory);
     }
 
     private static BigDecimal nvl(BigDecimal value) {

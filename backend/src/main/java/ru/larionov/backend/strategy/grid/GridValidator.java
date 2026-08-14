@@ -85,12 +85,29 @@ public final class GridValidator {
                                      BigDecimal quantityStep,
                                      BigDecimal maxCapital,
                                      BigDecimal workingBudget) {
+        return validate(cfg, range, ladder, priceIncrement, fees, quantityStep, maxCapital,
+                workingBudget, null);
+    }
+
+    /**
+     * @param carryDailyRate суточная ставка переноса непокрытой позиции с подключения;
+     *                       null для лонговой сетки, которой переносить нечего
+     */
+    public static Economics validate(GridConfig cfg,
+                                     GridRange range,
+                                     GridLadder ladder,
+                                     BigDecimal priceIncrement,
+                                     FeeInfo fees,
+                                     BigDecimal quantityStep,
+                                     BigDecimal maxCapital,
+                                     BigDecimal workingBudget,
+                                     BigDecimal carryDailyRate) {
 
         GridSizing sizing = cfg.budgetSized()
                 ? GridSizing.fromBudget(cfg, ladder, quantityStep, workingBudget)
                 : GridSizing.fixed(cfg.quantityPerOrder(), ladder, quantityStep);
 
-        return check(cfg, range, ladder, priceIncrement, fees, maxCapital, sizing);
+        return check(cfg, range, ladder, priceIncrement, fees, maxCapital, sizing, carryDailyRate);
     }
 
     /**
@@ -107,7 +124,18 @@ public final class GridValidator {
                                        FeeInfo fees,
                                        BigDecimal maxCapital,
                                        GridSizing frozenSizing) {
-        return check(cfg, range, ladder, priceIncrement, fees, maxCapital, frozenSizing);
+        return revalidate(cfg, range, ladder, priceIncrement, fees, maxCapital, frozenSizing, null);
+    }
+
+    public static Economics revalidate(GridConfig cfg,
+                                       GridRange range,
+                                       GridLadder ladder,
+                                       BigDecimal priceIncrement,
+                                       FeeInfo fees,
+                                       BigDecimal maxCapital,
+                                       GridSizing frozenSizing,
+                                       BigDecimal carryDailyRate) {
+        return check(cfg, range, ladder, priceIncrement, fees, maxCapital, frozenSizing, carryDailyRate);
     }
 
     private static Economics check(GridConfig cfg,
@@ -116,7 +144,8 @@ public final class GridValidator {
                                    BigDecimal priceIncrement,
                                    FeeInfo fees,
                                    BigDecimal maxCapital,
-                                   GridSizing sizing) {
+                                   GridSizing sizing,
+                                   BigDecimal carryDailyRate) {
 
         BigDecimal step = ladder.effectiveStep();
 
@@ -142,21 +171,33 @@ public final class GridValidator {
         BigDecimal buyFeePct = feeInfo.makerBuyRate();
         BigDecimal sellFeePct = feeInfo.makerSellRate();
         BigDecimal roundTripPct = feeInfo.makerRoundTripRate();
-        BigDecimal required = roundTripPct.multiply(cfg.minStepToCommissionRatio());
+
+        // Шортовая сетка платит не только комиссию, но и за само удержание позиции:
+        // каждый её незакрытый цикл — это непокрытая позиция, которую брокер тарифицирует
+        // посуточно. Сетка, чей цикл занимает двое суток, обязана окупать и эти двое суток,
+        // иначе она убыточна по построению — ровно то, ради чего этот валидатор написан.
+        BigDecimal carryPct = carryPerCycleRate(cfg, carryDailyRate);
+        BigDecimal required = roundTripPct.multiply(cfg.minStepToCommissionRatio()).add(carryPct);
 
         if (stepPct.compareTo(required) < 0) {
+            // Формулировка по существу: у лонговой сетки издержка ровно одна — комиссия,
+            // и называть её обобщённо значило бы отвечать расплывчатее, чем знаем.
             throw new IllegalStateException(
-                    ("Шаг сетки не окупает комиссию. Шаг %s (%s%% от цены %s), "
-                            + "комиссия за оборот %s%% (покупка %s%% + продажа %s%%), требуется минимум %s%% "
-                            + "(запас ×%s). Увеличьте диапазон, уменьшите число уровней "
-                            + "или проверьте ставку комиссии в настройках подключения.")
+                    ("Шаг сетки не окупает %s. Шаг %s (%s%% от цены %s), "
+                            + "комиссия за оборот %s%% (покупка %s%% + продажа %s%%)%s, "
+                            + "требуется минимум %s%% (запас ×%s). Увеличьте диапазон, "
+                            + "уменьшите число уровней или проверьте ставки в настройках подключения.")
                             .formatted(
+                                    carryPct.signum() > 0 ? "издержки" : "комиссию",
                                     step.toPlainString(),
                                     pct(stepPct),
                                     referencePrice.toPlainString(),
                                     pct(roundTripPct),
                                     pct(buyFeePct),
                                     pct(sellFeePct),
+                                    carryPct.signum() > 0
+                                            ? ", перенос за цикл %s%%".formatted(pct(carryPct))
+                                            : "",
                                     pct(required),
                                     cfg.minStepToCommissionRatio().toPlainString()));
         }
@@ -183,6 +224,31 @@ public final class GridValidator {
         return new Economics(
                 step, stepPct, buyFeePct, sellFeePct, roundTripPct, required,
                 coverage, stepPct.subtract(roundTripPct), worstCase, sizing);
+    }
+
+    /**
+     * Во сколько обходится удержание позиции за один цикл сетки, долей от цены.
+     *
+     * Ноль для лонга: длинная позиция покрыта, за её удержание брокер не берёт ничего.
+     * Для шорта — суточная ставка подключения, умноженная на ожидаемую длительность цикла.
+     *
+     * Ставка приходит ПАРАМЕТРОМ, а не из конфигурации бота, по той же причине, что и
+     * комиссия: тариф принадлежит подключению, и копия его в настройках каждого бота
+     * означала бы два расходящихся ответа на один вопрос.
+     *
+     * Длительность цикла, наоборот, свойство самой сетки. Сколько он проживёт на деле,
+     * заранее не знает никто, поэтому умолчание в одни сутки намеренно скромное: оно
+     * не притворяется прогнозом, а лишь не даёт забыть про издержку целиком.
+     */
+    private static BigDecimal carryPerCycleRate(GridConfig cfg, BigDecimal carryDailyRate) {
+        if (cfg.direction() != GridDirection.SHORT
+                || carryDailyRate == null || carryDailyRate.signum() <= 0) {
+            return BigDecimal.ZERO;
+        }
+        int days = cfg.expectedCycleDays() == null || cfg.expectedCycleDays() <= 0
+                ? 1
+                : cfg.expectedCycleDays();
+        return carryDailyRate.multiply(BigDecimal.valueOf(days));
     }
 
     private static String pct(BigDecimal fraction) {

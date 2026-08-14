@@ -22,23 +22,72 @@ import java.math.BigDecimal;
  *                     бота» — на подключении, где боты торгуют разные пары. null
  *                     означает «спросить у биржи её основную расчётную валюту»,
  *                     и для обеих поддержанных бирж этот ответ верен.
+ * @param marginEnabled разрешена ли ботам этого подключения торговля с плечом.
+ *                      <p>
+ *                      Первый из двух рубильников: подключение РАЗРЕШАЕТ, бот
+ *                      ВКЛЮЧАЕТ. Разделены намеренно — снятие галки здесь обязано
+ *                      гасить маржинальный режим у всех ботов подключения разом,
+ *                      не полагаясь на то, что каждого выключили по отдельности.
+ *                      <p>
+ *                      Завязка именно на галку, а не на свойства площадки: где
+ *                      маржинальная торговля идёт отдельным рынком, признак биржи
+ *                      ответа не даёт, а человек, заводивший подключение, — даёт.
+ *                      <p>
+ *                      По умолчанию выключена. Умолчание, включающее плечо, было бы
+ *                      худшим из возможных: забытая настройка обязана делать бота
+ *                      осторожнее, а не смелее.
  */
 public record ExchangeConnectionSettings(
         BigDecimal commissionRate,
         Integer streamInactivityTimeoutSec,
         Integer streamPingDelayMs,
         Integer maxMarketDataStreamsCount,
-        String baseCurrency
+        String baseCurrency,
+        Boolean marginEnabled,
+        /*
+         * Тариф переноса непокрытой позиции через ночь. Отдельно от commissionRate
+         * намеренно: та берётся с оборота в момент сделки, эта — с удержания,
+         * посуточно. Сложить их в одно число нельзя, у них разная размерность.
+         */
+        CarryFeeSchedule uncoveredCarryFee
 ) {
 
     /** Тариф «Инвестор» у Т-Инвестиций — самый дорогой из массовых. */
     public static final BigDecimal DEFAULT_COMMISSION_RATE = new BigDecimal("0.003");
 
     public static ExchangeConnectionSettings defaults() {
-        return new ExchangeConnectionSettings(DEFAULT_COMMISSION_RATE, null, null, null, null);
+        return new ExchangeConnectionSettings(
+                DEFAULT_COMMISSION_RATE, null, null, null, null, null, null);
+    }
+
+    /** Настройки без маржинального признака: подключение, заведённое до его появления. */
+    public ExchangeConnectionSettings(BigDecimal commissionRate,
+                                      Integer streamInactivityTimeoutSec,
+                                      Integer streamPingDelayMs,
+                                      Integer maxMarketDataStreamsCount,
+                                      String baseCurrency) {
+        this(commissionRate, streamInactivityTimeoutSec, streamPingDelayMs,
+                maxMarketDataStreamsCount, baseCurrency, null, null);
+    }
+
+    /** Настройки без тарифа переноса: подключение, заведённое до его появления. */
+    public ExchangeConnectionSettings(BigDecimal commissionRate,
+                                      Integer streamInactivityTimeoutSec,
+                                      Integer streamPingDelayMs,
+                                      Integer maxMarketDataStreamsCount,
+                                      String baseCurrency,
+                                      Boolean marginEnabled) {
+        this(commissionRate, streamInactivityTimeoutSec, streamPingDelayMs,
+                maxMarketDataStreamsCount, baseCurrency, marginEnabled, null);
     }
 
     public ExchangeConnectionSettings {
+        if (marginEnabled == null) {
+            marginEnabled = false;
+        }
+        if (uncoveredCarryFee == null) {
+            uncoveredCarryFee = CarryFeeSchedule.defaults();
+        }
         if (commissionRate == null) {
             commissionRate = DEFAULT_COMMISSION_RATE;
         }

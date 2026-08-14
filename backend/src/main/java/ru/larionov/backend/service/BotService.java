@@ -16,6 +16,7 @@ import ru.larionov.backend.enums.StrategyType;
 import ru.larionov.backend.exception.NotFoundException;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
+import ru.larionov.backend.exchange.api.model.account.MarginAttributes;
 import ru.larionov.backend.execution.BotOrderView;
 import ru.larionov.backend.model.RuntimeInfo;
 import ru.larionov.backend.strategy.BotRuntimeConfig;
@@ -50,6 +51,7 @@ public class BotService {
     private final BotOrderRepository orderRepo;
     private final BotRuntimeService botRuntimeService;
     private final ExchangeRuntimeService exchangeRuntimeService;
+    private final MarginAttributesService marginAttributes;
     private final BotEventService eventService;
     private final AccountingService accountingService;
     private final GridGenerationService gridGenerationService;
@@ -113,8 +115,32 @@ public class BotService {
                         .sorted(Comparator.comparing(BotOrderEntity::getCreatedAt,
                                 Comparator.nullsLast(Comparator.naturalOrder())))
                         .map(BotOrderView::of)
-                        .toList()
+                        .toList(),
+                marginOf(bot)
         );
+    }
+
+    /**
+     * Обеспечение счёта, на котором работает бот.
+     *
+     * Спрашивается всегда, а не только у маржинальных ботов: обеспечение — свойство
+     * СЧЁТА, и лонговому боту полезно видеть, что его сосед по счёту подошёл к краю.
+     * Ошибка и отсутствие ответа здесь равнозначны null: карточка состояния не должна
+     * падать оттого, что брокер промолчал про маржу.
+     */
+    private MarginAttributes marginOf(BotEntity bot) {
+        if (bot.getExchangeConnectionId() == null) {
+            return null;
+        }
+        try {
+            return exchangeRuntimeService.get(bot.getExchangeConnectionId())
+                    .flatMap(handler -> marginAttributes.get(
+                            bot.getExchangeConnectionId(), handler.tradingAccountId()))
+                    .orElse(null);
+        } catch (Exception e) {
+            log.debug("Не удалось получить обеспечение для бота {}: {}", bot.getId(), e.getMessage());
+            return null;
+        }
     }
 
     public List<BotEventDto> events(UUID id, int limit) {
@@ -211,7 +237,10 @@ public class BotService {
         BigDecimal working = cfg.withBudget(budget).workingBudget(() -> realizedPnl);
 
         RiskGuard.CapitalUsage usage = riskGuard.capitalUsage(id, runtime.dryRun());
-        BigDecimal positionCost = nvl(usage.inventory().costBasisOpen());
+        // Только положительная часть: у короткой позиции себестоимость отрицательна,
+        // и полом бюджета она стать не может. Взяв её как есть, пол обнулился бы —
+        // и оператор вывел бы деньги, которыми обеспечен открытый шорт.
+        BigDecimal positionCost = nvl(usage.inventory().costBasisOpen()).max(BigDecimal.ZERO);
 
         // Пол — себестоимость уже открытой позиции: снятые покупки деньги вернут,
         // а купленное обратно не раскупить. Бюджет ниже нельзя не из осторожности —

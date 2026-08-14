@@ -1,0 +1,117 @@
+databaseChangeLog:
+  - changeSet:
+      id: 740-grid-role
+      author: boris
+      comment: >
+        Роль заявки в цикле уровня: набирает она позицию или закрывает набранное.
+
+        Пока сетка была только лонговой, роль выводилась из стороны — покупка
+        открывает, продажа закрывает. В шортовой сетке всё ровно наоборот, и от
+        ответа зависят сразу три вещи: занят ли уровень, открывает ли сделка партию
+        в денежной книге и что считать встречной заявкой.
+
+        Роль хранится, а не выводится на лету, потому что нужна там, где направления
+        под рукой нет: риск-контроль сравнивает намерение с уже лежащими в журнале
+        строками, а денежная книга разбирает записи РАЗНЫХ поколений с разным
+        направлением. Вывести роль из текущего направления задним числом означало бы
+        переписать историю при первом же перевороте.
+
+        Бэкфилл лонговый, и это точно: вся накопленная история лонговая — шорт до сих
+        пор был запрещён структурно (RiskGuard.checkNoShort). То же правило живёт в
+        BotOrderEntity.roleFromSide, и держать эти два места в согласии важнее, чем
+        сэкономить строку: разойдись они, партии перестроились бы по-разному до и
+        после перезапуска.
+      changes:
+        - addColumn:
+            tableName: bot_order
+            columns:
+              - column:
+                  name: grid_role
+                  type: varchar(8)
+                  defaultValue: OPEN
+                  constraints: { nullable: false }
+        - update:
+            tableName: bot_order
+            columns:
+              - column: { name: grid_role, value: CLOSE }
+            where: side = 'SELL'
+
+        # В книге роли нет у неторговых отметок (перестановка сетки, изменение
+        # бюджета) — у них нет и стороны. Поэтому колонка nullable.
+        - addColumn:
+            tableName: money_ledger
+            columns:
+              - column: { name: grid_role, type: varchar(8) }
+        - update:
+            tableName: money_ledger
+            columns:
+              - column: { name: grid_role, value: OPEN }
+            where: side = 'BUY'
+        - update:
+            tableName: money_ledger
+            columns:
+              - column: { name: grid_role, value: CLOSE }
+            where: side = 'SELL'
+
+  - changeSet:
+      id: 741-grid-generation-mode
+      author: boris
+      comment: >
+        Таблица поколений перестаёт быть таблицей одних диапазонов: строка теперь
+        описывает ЭПИЗОД жизни бота — либо поколение сетки, либо восстановительный
+        режим со своим фактическим результатом.
+
+        Деньги по-прежнему не хранятся: они считаются из money_ledger по окну seq.
+        Восстановительный эпизод получает собственное окно, и именно поэтому такое
+        расширение стоит дёшево — механизм подсчёта переиспользуется целиком.
+
+        lower_price/upper_price перестают быть обязательными: у восстановительного
+        эпизода диапазона нет вовсе, а перегружать их ценой входа нельзя — это
+        разные величины, и одна молча читалась бы как другая.
+
+        Уникальность расширяется полем kind: у одного поколения теперь законно
+        бывает и сеточная строка, и восстановительная.
+
+        Все существующие строки — лонговая сетка без маржи, других до сих пор
+        не существовало.
+      changes:
+        - addColumn:
+            tableName: grid_generation
+            columns:
+              - column:
+                  name: kind
+                  type: varchar(16)
+                  defaultValue: GRID
+                  constraints: { nullable: false }
+              - column:
+                  name: direction
+                  type: varchar(8)
+                  defaultValue: LONG
+                  constraints: { nullable: false }
+              - column:
+                  name: margin
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints: { nullable: false }
+              # Заполняются только у восстановительного эпизода.
+              - column: { name: entry_price, type: "numeric(24,9)" }
+              - column: { name: target_price, type: "numeric(24,9)" }
+              - column: { name: multiplier, type: "numeric(12,4)" }
+              - column: { name: margin_episode_id, type: uuid }
+
+        - dropNotNullConstraint:
+            tableName: grid_generation
+            columnName: lower_price
+            columnDataType: "numeric(24,9)"
+        - dropNotNullConstraint:
+            tableName: grid_generation
+            columnName: upper_price
+            columnDataType: "numeric(24,9)"
+
+        - dropUniqueConstraint:
+            tableName: grid_generation
+            constraintName: uq_grid_generation_bot_generation
+        - addUniqueConstraint:
+            tableName: grid_generation
+            constraintName: uq_grid_generation_bot_generation
+            columnNames: bot_id, dry_run, generation, kind

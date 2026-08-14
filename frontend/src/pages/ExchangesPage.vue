@@ -363,6 +363,25 @@
                   что перестало быть деньгами.
                 </div>
 
+                <q-separator />
+
+                <q-toggle
+                  v-model="settingsForm.marginEnabled"
+                  label="Разрешить маржинальную торговлю"
+                  :disable="settingsSaving || detail.active"
+                />
+                <q-banner v-if="settingsForm.marginEnabled" dense class="bg-red-1 text-red-9">
+                  <template #avatar><q-icon name="warning" /></template>
+                  Ботам этого подключения станет доступен шорт — продажа того, чего нет.
+                  Убыток по короткой позиции сверху ничем не ограничен, а брокер вправе
+                  закрыть её сам, по своей цене. Само по себе разрешение ничего не
+                  включает: маржинальный режим ещё нужно включить у конкретного бота.
+                  <div class="q-mt-xs">
+                    Маржинальная торговля должна быть подключена и на самом счёте
+                    у брокера — через API это не включается.
+                  </div>
+                </q-banner>
+
                 <template v-if="usesManualFee">
                   <q-input
                     v-model.number="settingsForm.commissionPercent"
@@ -678,7 +697,7 @@ const accounts = ref([])
 const accountsOwnerId = ref(null)
 const accountsLoading = ref(false)
 const settingsSaving = ref(false)
-const settingsForm = reactive({ accountId: null, commissionPercent: 0.3, baseCurrency: '' })
+const settingsForm = reactive({ accountId: null, commissionPercent: 0.3, baseCurrency: '', marginEnabled: false })
 
 const accountOptions = computed(() => {
   const options = accounts.value.map(a => ({
@@ -745,7 +764,8 @@ async function saveSettings () {
         ...(detail.value.settings || {}),
         commissionRate: rate,
         // Пустая строка означает «не задано»: пусть решает биржа, а не пустой код валюты.
-        baseCurrency: (settingsForm.baseCurrency || '').trim().toUpperCase() || null
+        baseCurrency: (settingsForm.baseCurrency || '').trim().toUpperCase() || null,
+        marginEnabled: settingsForm.marginEnabled === true
       }
     })
     toast?.ok('Успешно сохранено')
@@ -1043,6 +1063,7 @@ async function loadDetail (id) {
       ((detail.value?.settings?.commissionRate ?? 0.003) * 100).toFixed(4)
     )
     settingsForm.baseCurrency = detail.value?.settings?.baseCurrency || ''
+    settingsForm.marginEnabled = detail.value?.settings?.marginEnabled === true
 
     if (selectedId.value === id) {
       await loadRuntime(id)

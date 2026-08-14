@@ -96,6 +96,26 @@ public interface StrategyContext {
     BigDecimal realizedPnl();
 
     /**
+     * Обеспечение счёта, на котором работает бот.
+     *
+     * Пусто, если площадка про маржу не отвечает или брокер промолчал. Пустота —
+     * это «не знаем», а не «всё хорошо»: сторож на ней обязан молчать, а всякий,
+     * кто на её основании РАЗРЕШАЕТ действие, обязан, наоборот, запретить.
+     *
+     * Показатели общие для всего счёта: соседние боты расходуют то же обеспечение.
+     */
+    Optional<ru.larionov.backend.exchange.api.model.account.MarginAttributes> marginAttributes();
+
+    /**
+     * Суточная ставка переноса непокрытой позиции с настроек подключения.
+     *
+     * Тариф принадлежит подключению, а не боту: копия его в конфигурации каждого
+     * бота означала бы два расходящихся ответа на один вопрос. Ноль, если тариф
+     * не задан, — лонговой сетке он всё равно не нужен.
+     */
+    BigDecimal carryDailyRate();
+
+    /**
      * Отмечает начало нового поколения сетки и закрывает предыдущее.
      *
      * Вызов идемпотентен: повторный запуск бота в том же поколении ничего не меняет
@@ -105,7 +125,21 @@ public interface StrategyContext {
      */
     Optional<GridGenerationDto> rollGridGeneration(long generation, BigDecimal lowerPrice,
                                                    BigDecimal upperPrice, Integer levels,
-                                                   String origin, Instant startedAt);
+                                                   String origin, Instant startedAt,
+                                                   String direction, boolean margin);
+
+    /**
+     * Открывает строку восстановительного эпизода в отчёте по поколениям.
+     *
+     * Со своим окном книги: деньги эпизода считаются тем же механизмом, что и деньги
+     * поколения. Поколение при этом не закрывается — плечо и сетка живут одновременно.
+     */
+    void openRecoveryEpisode(long generation, UUID episodeId, String direction,
+                             BigDecimal entryPrice, BigDecimal targetPrice,
+                             BigDecimal multiplier, Instant startedAt);
+
+    /** Закрывает строку эпизода: дальше её деньги уже не растут. */
+    void closeRecoveryEpisode(UUID episodeId, Instant endedAt);
 
     /** Асинхронно и навсегда выключить runtime вместе с persisted desired-state. */
     void requestStop(String reason);

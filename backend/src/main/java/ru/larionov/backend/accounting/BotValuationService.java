@@ -56,6 +56,7 @@ public class BotValuationService {
 
     private final AccountingService accounting;
     private final LastPriceCache lastPriceCache;
+    private final ru.larionov.backend.runtime.ShortMarginRateCache shortMarginRates;
     private final ExchangeBalanceService exchangeBalance;
     private final ExchangeConnectionRepository connectionRepo;
     private final ExchangeConnectionContextResolver settingsResolver;
@@ -290,8 +291,16 @@ public class BotValuationService {
         BigDecimal unrealizedPnl = null;
         BigDecimal totalPnl = null;
         if (nvl(s.openQuantity()).signum() == 0) {
-            // Позиции нет — цена не нужна и не может ни на что повлиять. Требовать её
-            // здесь означало бы прятать баланс бота, который просто ещё не купил.
+            // Нетто-ноль: цена ни на что не влияет, потому что умножается на ноль.
+            // Требовать её здесь означало бы прятать баланс бота, который просто
+            // ещё не купил.
+            //
+            // Оговорка про знаковую книгу: нетто-ноль бывает не только у пустого
+            // бота, но и у захеджированного — с равными длинной и короткой ногами.
+            // Числа от этого не меняются (общая ветка при нулевом количестве даёт
+            // ровно то же самое), но «позиции нет» про такого бота сказать нельзя:
+            // обе его ноги живые и обе стоят обеспечения. Кому нужна именно
+            // открытая экспозиция, тот спрашивает Inventory.grossExposure().
             marketValue = BigDecimal.ZERO;
             unrealizedPnl = BigDecimal.ZERO.subtract(nvl(s.costBasisOpen()));
             totalPnl = nvl(s.realizedPnl()).add(unrealizedPnl);
@@ -318,12 +327,35 @@ public class BotValuationService {
                 ? null
                 : workingBudget.add(unrealizedPnl);
 
+        /*
+         * Обеспечение считается ОТДЕЛЬНО и в equity не входит.
+         *
+         * Заёмные деньги боту не принадлежат: выручка от короткой продажи уже погашена
+         * отрицательной рыночной стоимостью позиции, поэтому баланс остаётся «свои
+         * деньги плюс результат». А вот вопрос «сколько бот занял у брокера» этим
+         * балансом не отвечается вовсе — на него и отвечает эта величина.
+         */
+        BigDecimal shortQuantity = nvl(s.shortQuantity());
+        BigDecimal usedMargin = shortQuantity.signum() == 0
+                ? BigDecimal.ZERO
+                : (lastPrice == null
+                        ? null
+                        : shortMarginRates
+                                .requiredMargin(instrumentKey(bot), shortQuantity.multiply(lastPrice))
+                                .orElse(null));
+
         return new BotValuationDto(
                 s.dryRun(), s.cashFlow(), s.costBasisOpen(), s.realizedPnl(), s.paidCommission(),
                 s.openQuantity(), s.averageEntryPrice(), displayCurrency(s, cfg),
                 lastPrice, lastPriceAt, marketValue, unrealizedPnl, totalPnl,
                 cfg.budget(), workingBudget, cfg.withdrawnProfit(s.realizedPnl()), equity,
-                cfg.profitPolicy(), cfg.sizingMode());
+                cfg.profitPolicy(), cfg.sizingMode(),
+                shortQuantity, usedMargin);
+    }
+
+    /** Ключ инструмента бота: тот же, под которым ставку положила фабрика. */
+    private String instrumentKey(ru.larionov.backend.entity.BotEntity bot) {
+        return config(bot).instrumentUid();
     }
 
     // ==============================
@@ -365,7 +397,15 @@ public class BotValuationService {
             log.debug("Бот {}: конфигурация стратегии не разобрана: {}", bot.getId(), e.getMessage());
         }
 
-        return new ParsedConfig(bot.getUpdatedAt(), dryRun, grid, instrumentCurrency(json));
+        String instrumentUid = null;
+        try {
+            instrumentUid = objectMapper.readValue(json, BotRuntimeConfig.class).instrumentUid();
+        } catch (Exception e) {
+            log.debug("Бот {}: инструмент из конфигурации не прочитан: {}", bot.getId(), e.getMessage());
+        }
+
+        return new ParsedConfig(bot.getUpdatedAt(), dryRun, grid,
+                instrumentCurrency(json), instrumentUid);
     }
 
     /**
@@ -389,7 +429,7 @@ public class BotValuationService {
     }
 
     private record ParsedConfig(Instant updatedAt, boolean dryRun, GridConfig grid,
-                                String instrumentCurrency) {
+                                String instrumentCurrency, String instrumentUid) {
 
         boolean matches(Instant botUpdatedAt) {
             return Objects.equals(updatedAt, botUpdatedAt);

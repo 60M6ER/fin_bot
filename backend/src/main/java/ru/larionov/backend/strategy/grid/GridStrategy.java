@@ -1,6 +1,7 @@
 package ru.larionov.backend.strategy.grid;
 
 import lombok.extern.slf4j.Slf4j;
+import ru.larionov.backend.enums.GridRole;
 import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.LedgerEntryType;
@@ -10,6 +11,7 @@ import ru.larionov.backend.accounting.DustBucket;
 import ru.larionov.backend.dto.GridGenerationDto;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
+import ru.larionov.backend.exchange.api.model.account.MarginAttributes;
 import ru.larionov.backend.exchange.api.model.FeeInfo;
 import ru.larionov.backend.exchange.api.model.instrument.TradingConstraints;
 import ru.larionov.backend.exchange.api.model.market.LastPrice;
@@ -35,6 +37,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -65,6 +68,16 @@ public class GridStrategy implements Strategy {
      * конфигурации не бывает.
      */
     private GridConfig cfg;
+
+    /**
+     * Направление поколения: лонг покупает ниже и продаёт выше, шорт — зеркально.
+     *
+     * Берётся из конфигурации и внутри поколения не меняется. Смена направления —
+     * это событие уровня перестановки сетки, а не решение отдельного прохода:
+     * поменяй его посреди жизни поколения, и уже выставленные встречные заявки
+     * стали бы закрывать не то, что открывали.
+     */
+    private GridDirection direction = GridDirection.LONG;
 
     private StrategyContext ctx;
     private GridLadder ladder;
@@ -180,6 +193,29 @@ public class GridStrategy implements Strategy {
     /** Об остановке ликвидации сообщаем один раз за эпизод, а не каждый тик. */
     private boolean liquidationStallReported;
 
+    /**
+     * Идущий эпизод восстановительного плеча, если он есть.
+     *
+     * Пока он не null, на бирже висит непокрытая позиция, и всё знание о том, как из
+     * неё выходить, живёт здесь и в сохранённом состоянии.
+     */
+    private HedgeEpisode hedgeEpisode;
+
+    /** Сколько переворотов уже потрачено в текущем поколении. */
+    private int hedgeEpisodesUsed;
+
+    /**
+     * Порог достаточности средств, ниже которого счёт считается подошедшим к краю.
+     *
+     * Полтора — это запас над единицей, при которой брокер объявляет маржин-колл.
+     * Смысл запаса в том, чтобы человек узнал о приближении заранее, а не в момент,
+     * когда решать уже поздно.
+     */
+    private static final BigDecimal MARGIN_WARNING_LEVEL = new BigDecimal("1.5");
+
+    /** О нехватке обеспечения сообщаем раз за эпизод: тик частый, а событие громкое. */
+    private boolean marginWarningReported;
+
     /** То же для перестановки вверх, застрявшей на незакрываемом остатке позиции. */
     private boolean upperReplacementStallReported;
 
@@ -234,6 +270,8 @@ public class GridStrategy implements Strategy {
             ctx.warn("GRID: стратегия выключена в конфигурации (enabled=false)");
             return;
         }
+        this.direction = cfg.direction();
+        requireShortIsAllowed();
         TradingConstraints constraints = ctx.constraints();
         RangeResolution resolution = resolveActiveRange(initialState, constraints);
         GridStrategyState restored = resolution.state();
@@ -249,6 +287,8 @@ public class GridStrategy implements Strategy {
         this.lastReplacementAt = restored == null ? null : restored.lastReplacementAt();
         this.forcedReplacement = restored != null && restored.forcedReplacement();
         this.stopScheduled = restored != null && restored.stopScheduled();
+        this.hedgeEpisode = restored == null ? null : restored.hedgeEpisode();
+        this.hedgeEpisodesUsed = restored == null ? 0 : restored.hedgeEpisodesUsed();
         boolean restoredStateCleared = false;
         if (awaitingUpperReplacement
                 && cfg.onUpperBreakout() != GridConfig.UpperBreakoutAction.REPLACE_UPPER) {
@@ -292,12 +332,12 @@ public class GridStrategy implements Strategy {
         // Ссылка на метод, а не вызов: при выводе прибыли (режим по умолчанию)
         // реализованный P/L в бюджете не участвует, и загружать ради него всю
         // денежную книгу на старте незачем.
-        this.activeBudget = cfg.workingBudget(ctx::realizedPnl);
+        this.activeBudget = availableBudget();
 
         // Отказ стартовать — осознанное решение: сетка, не окупающая комиссию,
         // будет исправно терять деньги на каждом обороте.
         this.sizing = GridValidator.validate(cfg, activeRange, ladder, constraints.minPriceIncrement(),
-                fees, constraints.quantityStep(), ctx.execution().maxCapital(), activeBudget).sizing();
+                fees, constraints.quantityStep(), ctx.execution().maxCapital(), activeBudget, ctx.carryDailyRate()).sizing();
 
         if (resolution.persist() || restoredStateCleared) {
             persistState();
@@ -320,6 +360,40 @@ public class GridStrategy implements Strategy {
         sweepHistoricalDust();
         seedTradingStatus();
         seedLastPriceOnStart();
+    }
+
+    /**
+     * Шортовая сетка допускается пока только в бумажном режиме.
+     *
+     * Геометрия направления готова и покрыта зеркальным тестом, риск-контроль получил
+     * потолки взамен прежнего запрета, книга научилась знаковым партиям. Чего ещё нет —
+     * проверенного на живом счёте поведения: как ведут себя маржинальные показатели
+     * в течение дня, во что обходится перенос на самом деле, что делает брокер на
+     * открытии после ночи. Бумажный прогон отвечает на всё это, ничем не рискуя.
+     *
+     * Отказ на старте, а не молчаливое понижение до лонга: бот, который просят вести
+     * шорт, а он ведёт лонг, — это худший из возможных ответов. Он выглядит рабочим.
+     */
+    private void requireShortIsAllowed() {
+        if (direction != GridDirection.SHORT) {
+            return;
+        }
+        if (!ctx.execution().marginEnabled()) {
+            throw new IllegalStateException(
+                    "Шортовая сетка требует маржинального режима: включите его у бота "
+                            + "и разрешите маржу на подключении.");
+        }
+        if (!ctx.execution().dryRun() && !ctx.execution().allowLiveMargin()) {
+            throw new IllegalStateException(
+                    "Шортовая сетка живьём требует явного разрешения (allowLiveMargin). "
+                            + "Она ни разу не работала на настоящем рынке: тестами проверена "
+                            + "арифметика, но не поведение брокера. Прогоните её на бумаге, "
+                            + "а включая живьём — начните с потолков, которые не жаль потерять.");
+        }
+        if (!ctx.execution().shortEnabledByInstrument()) {
+            throw new IllegalStateException(
+                    "Брокер не разрешает короткую позицию по этому инструменту.");
+        }
     }
 
     /**
@@ -566,8 +640,8 @@ public class GridStrategy implements Strategy {
             return;
         }
 
-        if (order.side() == OrderSide.BUY) {
-            placeCounterSell(order);
+        if (order.side() == direction.openSide()) {
+            placeCounterClose(order);
         } else {
             // Цикл закрыт — прибыль зафиксирована. Уровень ниже освободился под новую покупку.
             ctx.event(BotEventType.HOUSEKEEPING,
@@ -582,38 +656,40 @@ public class GridStrategy implements Strategy {
     }
 
     /**
-     * Встречная продажа сразу после покупки — именно здесь возникает прибыль сетки.
-     * Ставим на следующий уровень вверх: разница и есть заработок за вычетом комиссии.
+     * Встречная заявка сразу после открытия уровня — именно здесь возникает прибыль сетки.
+     *
+     * Лонг закрывает уровнем выше, шорт — уровнем ниже; в обоих случаях разница и есть
+     * заработок за вычетом комиссии. grid_level встречной заявки — это ОТКРЫТЫЙ уровень,
+     * который она закрывает, а не тот, по чьей цене выставлена. Единое правило для всех
+     * веток: иначе уровень не считается занятым и выкупается снова.
      */
-    private void placeCounterSell(BotOrderView filledBuy) {
-        int buyLevel = filledBuy.gridLevel();
-        // Цена — уровнем выше, а grid_level продажи — это закрываемый уровень ПОКУПКИ.
-        // Единое правило для обеих веток: иначе уровень не считается занятым.
-        BigDecimal price = ladder.priceAt(buyLevel + 1);
+    private void placeCounterClose(BotOrderView filledOpen) {
+        int openLevel = filledOpen.gridLevel();
+        BigDecimal price = ladder.priceAt(direction.closeLevelOf(openLevel));
 
         if (price == null) {
-            // Купили на верхнем уровне — продавать выше некуда.
-            ctx.warn("Покупка на верхнем уровне сетки (%d): встречной продажи нет".formatted(buyLevel));
+            // Открылись на крайнем уровне лесенки — закрывать дальше некуда.
+            ctx.warn("Открытие на крайнем уровне сетки (%d): встречной заявки нет".formatted(openLevel));
             return;
         }
 
-        // Сколько этого уровня уже выставлено на продажу. Считаем именно количество:
-        // проверка «есть ли хоть одна заявка» не давала повторно продать уровень,
+        // Сколько этого уровня уже выставлено на закрытие. Считаем именно количество:
+        // проверка «есть ли хоть одна заявка» не давала повторно закрыть уровень,
         // на котором лежит несколько заявок, а её отсутствие — наоборот, плодило дубли.
         BigDecimal covered = ctx.gateway().openOrders(ctx.botId()).stream()
-                .filter(o -> o.side() == OrderSide.SELL
-                        && o.gridLevel() != null && o.gridLevel() == buyLevel)
+                .filter(o -> o.side() == direction.closeSide()
+                        && o.gridLevel() != null && o.gridLevel() == openLevel)
                 .map(BotOrderView::remainingQuantity)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
         BigDecimal held = computeHeldQuantityByLevel()
-                .getOrDefault(buyLevel, BigDecimal.ZERO);
-        BigDecimal sellable = sellableQuantity(held.subtract(covered), price);
-        if (sellable.signum() <= 0) {
+                .getOrDefault(openLevel, BigDecimal.ZERO);
+        BigDecimal closable = sellableQuantity(held.subtract(covered), price);
+        if (closable.signum() <= 0) {
             return;
         }
 
-        place(OrderSide.SELL, price, buyLevel, sellable);
+        place(direction.closeSide(), price, openLevel, closable);
     }
 
     /**
@@ -757,8 +833,9 @@ public class GridStrategy implements Strategy {
         }
 
         try {
-            ctx.gateway().placeLimit(ctx.execution(),
-                    new PlaceIntent(OrderSide.SELL, quantity, price, null, OrderPurpose.DUST));
+            // Пыль всегда закрывает позицию — своей она не бывает по определению.
+            ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
+                    OrderSide.SELL, quantity, price, null, OrderPurpose.DUST, GridRole.CLOSE));
             ctx.event(BotEventType.HOUSEKEEPING,
                     "Продажа пыли: %s по %s (себестоимость %s)"
                             .formatted(plainQuantity(quantity), price.toPlainString(),
@@ -827,6 +904,18 @@ public class GridStrategy implements Strategy {
         }
     }
 
+    /**
+     * Роль заявки: своя, если известна, иначе выведенная из стороны и направления.
+     *
+     * Запасной путь нужен не для красоты. Роль появилась позже самих заявок, и в
+     * журнале остаются строки, записанные до неё; ровно так же её не заполняют те,
+     * кто собирает представление заявки в обход журнала. Молча считать такую заявку
+     * закрывающей нельзя — её бы перестали снимать перед перестановкой диапазона.
+     */
+    private GridRole roleOf(BotOrderView order) {
+        return order.gridRole() != null ? order.gridRole() : direction.roleOf(order.side());
+    }
+
     /** Наша живая заявка на продажу пыли, если она есть. */
     private BotOrderView openDustOrder() {
         return ctx.gateway().openOrders(ctx.botId()).stream()
@@ -868,13 +957,19 @@ public class GridStrategy implements Strategy {
      * исполняться нечему, событий не пишется. Снаружи это выглядело как «бот молчит».
      */
     private boolean positionIsFlat(BigDecimal position) {
-        if (position == null || position.signum() < 0) {
+        if (position == null) {
             return false;
         }
+        // По МОДУЛЮ: для шортовой сетки отрицательная позиция — это норма, а не авария,
+        // и «закрыта» она ровно тогда же, когда лонговая, — когда из остатка не составить
+        // заявки, которую примет биржа. Проверку знака, которая раньше стояла здесь,
+        // выполняет отдельная сверка направления: она отличает ожидаемый шорт от того,
+        // которого быть не должно.
+        BigDecimal exposure = position.abs();
         // Пыль в позиции журнала есть, но сетке она уже не принадлежит: её продаёт
         // отдельная заявка, живущая своей жизнью. Ждать её здесь значило бы ждать
         // ровно того, чего эта проверка и не должна ждать.
-        BigDecimal tradable = position.subtract(dustQuantity());
+        BigDecimal tradable = exposure.subtract(dustQuantity());
         if (tradable.signum() <= 0) {
             return true;
         }
@@ -898,6 +993,9 @@ public class GridStrategy implements Strategy {
             return;
         }
         lastPrice = price.price().value();
+
+        // Плечо ведём первым: непокрытая позиция не ждёт своей очереди.
+        manageHedgeLeg();
 
         if (awaitingDownwardReplacement) {
             manageDownwardLiquidation();
@@ -947,6 +1045,9 @@ public class GridStrategy implements Strategy {
         // означало бы, что бот молчит весь день.
         refreshTradingStatusIfClosed();
 
+        checkMarginHealth();
+        manageHedgeLeg();
+
         // Отдельно от ensureOrders: та выходит раньше на закрытой бирже и при
         // расхождении позиции, а плановая остановка вполне может завершиться и там —
         // например, если продавать было нечего с самого начала.
@@ -966,6 +1067,67 @@ public class GridStrategy implements Strategy {
             return;
         }
         ensureOrders(reconciled);
+    }
+
+    /**
+     * Сторож обеспечения: сообщает, когда счёт подходит к краю.
+     *
+     * На этой фазе он ТОЛЬКО пишет события и не трогает ни одной заявки. Так и
+     * задумано: прежде чем позволить сторожу закрывать позицию, надо увидеть на
+     * живом счёте, какие числа брокер присылает на самом деле и как они себя ведут
+     * в течение дня. Сторож, который начал бы закрывать позиции по непроверенному
+     * порогу, опаснее того, чего он должен не допустить.
+     *
+     * Смотрит и лонговый бот тоже. Обеспечение — свойство СЧЁТА, а не бота: если
+     * его выбрал сосед по счёту, отвечать за это будут все, включая тех, кто плечом
+     * не пользуется.
+     *
+     * Молчит, когда показателей нет. Пустой ответ означает «не знаем» — ни площадка
+     * не умеет отвечать, ни брокер не ответил, — и тревожиться на нём значило бы
+     * приучить к ложным срабатываниям ровно тот сигнал, который обязан быть редким.
+     */
+    private void checkMarginHealth() {
+        Optional<MarginAttributes> current;
+        try {
+            current = ctx.marginAttributes();
+        } catch (Exception e) {
+            log.debug("Не удалось получить обеспечение счёта: {}", e.getMessage());
+            return;
+        }
+        // null наравне с пустым: контекст — внешняя для стратегии вещь, и падать
+        // на сторожевом тике из-за того, что кто-то вернул null вместо Optional,
+        // значило бы уронить бота ровно тем средством, которое его бережёт.
+        if (current == null || current.isEmpty()) {
+            return;
+        }
+        MarginAttributes margin = current.get();
+
+        boolean call = margin.marginCall();
+        boolean near = margin.nearStopOut(MARGIN_WARNING_LEVEL);
+        if (!call && !near) {
+            // Отпустило — следующее ухудшение снова будет сказано вслух.
+            marginWarningReported = false;
+            return;
+        }
+        // Раз за эпизод: тик частый, а журнал событий читают люди.
+        if (marginWarningReported) {
+            return;
+        }
+        marginWarningReported = true;
+
+        ctx.event(call ? BotEventLevel.ERROR : BotEventLevel.WARN, BotEventType.RISK_BLOCKED,
+                (call
+                        ? "Маржин-колл: обеспечения счёта уже не хватает (достаточность %s, не хватает %s). "
+                        : "Обеспечение счёта на пределе: достаточность %s при пороге %s. ")
+                        .formatted(
+                                plainQuantity(margin.fundsSufficiencyLevel()),
+                                call ? plain(margin.amountOfMissingFunds())
+                                        : plainQuantity(MARGIN_WARNING_LEVEL))
+                        + "Ликвидный портфель %s, начальная маржа %s, минимальная %s. "
+                        .formatted(plain(margin.liquidPortfolio()), plain(margin.startingMargin()),
+                                plain(margin.minimalMargin()))
+                        + "Показатели общие для всего счёта. Бот их только наблюдает "
+                        + "и позицию из-за них не закрывает.");
     }
 
     /**
@@ -1073,7 +1235,7 @@ public class GridStrategy implements Strategy {
                 continue;
             }
             openOrderCount++;
-            if (o.side() == OrderSide.BUY) {
+            if (roleOf(o) == GridRole.OPEN) {
                 openBuys.put(o.gridLevel(), o);
             } else {
                 openSellQuantityByLevel.merge(o.gridLevel(), o.remainingQuantity(), BigDecimal::add);
@@ -1083,7 +1245,14 @@ public class GridStrategy implements Strategy {
         // Сначала убираем с уровней то, что уже никогда не продать: иначе уровень
         // остаётся формально занятым непродаваемым хвостом, и следующая покупка
         // на нём не встанет. Порядок важен — heldByLevel после этого пересчитан.
-        sweepDust(openBuys, openSellQuantityByLevel);
+        // Пыль — понятие лонговое: непродаваемый хвост КУПЛЕННОГО не портится и может
+        // ждать своей цены. У шорта хвост ведёт себя наоборот — он не ждёт, а копит
+        // плату за перенос, и «собрать его в корзину» значило бы спрятать растущее
+        // обязательство. Поэтому в шортовой сетке сборщик молчит, а незакрываемый
+        // остаток остаётся видимым и требует человека.
+        if (direction == GridDirection.LONG) {
+            sweepDust(openBuys, openSellQuantityByLevel);
+        }
         Map<Integer, BigDecimal> heldByLevel = computeHeldQuantityByLevel();
         reportUncoveredPosition(heldByLevel);
 
@@ -1100,7 +1269,9 @@ public class GridStrategy implements Strategy {
 
         // Пыль продаётся последней и независимо от сетки: её заявка не занимает уровня
         // и не участвует в лимите капитала сетки — этот товар уже куплен и оплачен.
-        manageDustSale();
+        if (direction == GridDirection.LONG) {
+            manageDustSale();
+        }
 
         // Продавать могло стать нечего именно сейчас — например, последняя встречная
         // продажа исполнилась на этом же проходе.
@@ -1190,7 +1361,11 @@ public class GridStrategy implements Strategy {
             if (o.gridLevel() == null || executed == null || executed.signum() <= 0) {
                 continue;
             }
-            BigDecimal delta = o.side() == OrderSide.BUY ? executed : executed.negate();
+            // По РОЛИ, а не по стороне: в шорте позицию набирает продажа, и «покупка
+            // значит открытие» перестаёт быть правдой. Остаток уровня при этом
+            // остаётся положительным в обоих направлениях — это модуль незакрытой
+            // экспозиции, а не позиция со знаком.
+            BigDecimal delta = roleOf(o) == GridRole.OPEN ? executed : executed.negate();
             held.merge(o.gridLevel(), delta, BigDecimal::add);
         }
         return held;
@@ -1322,7 +1497,7 @@ public class GridStrategy implements Strategy {
             }
 
             BigDecimal covered = openSellQuantityByLevel.getOrDefault(buyLevel, BigDecimal.ZERO);
-            BigDecimal price = ladder.priceAt(buyLevel + 1);
+            BigDecimal price = ladder.priceAt(direction.closeLevelOf(buyLevel));
 
             BigDecimal sellable = sellableQuantity(held.subtract(covered), price);
             if (sellable.signum() <= 0) {
@@ -1335,10 +1510,11 @@ public class GridStrategy implements Strategy {
             }
 
             if (price == null) {
-                ctx.warn("Куплено на верхнем уровне сетки (%d) — продавать выше некуда".formatted(buyLevel));
+                ctx.warn("Открыто на крайнем уровне сетки (%d) — закрывать дальше некуда"
+                        .formatted(buyLevel));
                 continue;
             }
-            if (!place(OrderSide.SELL, price, buyLevel, sellable)) {
+            if (!place(direction.closeSide(), price, buyLevel, sellable)) {
                 return placed;
             }
             openSellQuantityByLevel.merge(buyLevel, sellable, BigDecimal::add);
@@ -1347,14 +1523,23 @@ public class GridStrategy implements Strategy {
         return placed;
     }
 
-    /** Покупки на свободных уровнях ниже цены, ближайшие к рынку — первыми. */
+    /**
+     * Открывающие заявки на свободных уровнях по ту сторону цены, ближайшие к рынку —
+     * первыми. Лонг идёт вниз от ближайшего уровня под ценой, шорт — вверх от
+     * ближайшего над ней.
+     */
     private void placeMissingBuys(Map<Integer, BotOrderView> openBuys,
                                   Map<Integer, BigDecimal> openSellQuantityByLevel,
                                   Map<Integer, BigDecimal> heldByLevel,
                                   int activeCount) {
-        int startLevel = ladder.highestLevelBelow(lastPrice);
+        int startLevel = direction.firstOpenLevel(ladder, lastPrice);
+        if (startLevel < 0) {
+            return;
+        }
+        int lastLevel = direction.lastOpenLevel(ladder);
+        int step = direction.openScanStep();
 
-        for (int level = startLevel; level >= 0; level--) {
+        for (int level = startLevel; step > 0 ? level <= lastLevel : level >= lastLevel; level += step) {
             if (activeCount >= cfg.maxActiveOrders()) {
                 return;
             }
@@ -1362,10 +1547,11 @@ public class GridStrategy implements Strategy {
                 continue;
             }
             BigDecimal price = ladder.priceAt(level);
-            if (price == null || price.compareTo(activeRange.lower()) < 0) {
+            // За неблагоприятную границу не заходим: там уже не сетка, а пробой.
+            if (price == null || direction.beyondAdverse(price, direction.adverseBound(activeRange))) {
                 continue;
             }
-            if (!place(OrderSide.BUY, price, level)) {
+            if (!place(direction.openSide(), price, level)) {
                 return;
             }
             openBuys.put(level, null);
@@ -1392,7 +1578,10 @@ public class GridStrategy implements Strategy {
             return true;
         }
         try {
-            ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(side, quantity, price, level));
+            // Роль проставляем явно: гейтвей и риск-контроль обязаны знать, набирает
+            // эта заявка позицию или закрывает, а из стороны в шорте это не выводится.
+            ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
+                    side, quantity, price, level, OrderPurpose.GRID, direction.roleOf(side)));
             clearPlacementFailure(side, level);
             return true;
         } catch (RiskRejectedException e) {
@@ -1544,6 +1733,13 @@ public class GridStrategy implements Strategy {
     }
 
     private void beginDownwardReplacement() {
+        // Переворот вместо фиксации убытка — если он разрешён и на него есть право.
+        // Отказ здесь не фатален: бот просто продолжает прежним путём, закрывая
+        // позицию с убытком. Именно так и задумано — плечо это добавочная
+        // возможность, а не замена работающего механизма.
+        if (shouldHedgeInsteadOfLiquidating() && beginHedge()) {
+            return;
+        }
         if (!forcedReplacement && downwardReplacements >= cfg.maxDownwardReplacements()) {
             stopPermanently("Исчерпан лимит перестановок вниз: %d из %d"
                     .formatted(downwardReplacements, cfg.maxDownwardReplacements()));
@@ -1559,7 +1755,7 @@ public class GridStrategy implements Strategy {
 
         try {
             if (reconciledPosition.signum() > 0) {
-                enforceDownwardBudget(bestBid());
+                enforceDownwardBudget(unwindPrice());
                 if (halted) {
                     return;
                 }
@@ -1583,7 +1779,7 @@ public class GridStrategy implements Strategy {
             // нефинансируемый кандидат ДО распродажи позиции, а не после неё.
             GridValidator.validate(cfg, candidate, candidateLadder, ctx.constraints().minPriceIncrement(),
                     activeFees, ctx.constraints().quantityStep(), ctx.execution().maxCapital(),
-                    cfg.workingBudget(ctx::realizedPnl));
+                    availableBudget(), ctx.carryDailyRate());
         } catch (Exception e) {
             failLowerReplacement("Новый нижний диапазон не прошёл проверку: " + e.getMessage());
             return;
@@ -1625,6 +1821,325 @@ public class GridStrategy implements Strategy {
         manageDownwardLiquidation();
     }
 
+    // ==============================
+    // ВОССТАНОВИТЕЛЬНОЕ ПЛЕЧО
+    // ==============================
+
+    /**
+     * Рабочий бюджет за вычетом обеспечения, занятого плечом.
+     *
+     * При одновременной работе плечо и сетка расходуют ОДНО обеспечение. Считай сетка
+     * бюджет как раньше, обе ноги распоряжались бы одними и теми же деньгами: сетка
+     * расставила бы уровни под весь бюджет, не зная, что часть его уже заложена
+     * за переворот. Упёрлись бы они друг в друга не сразу, а в тот момент, когда
+     * обеспечения не хватит на очередную заявку, — то есть под нагрузкой.
+     *
+     * Вычитается именно ОБЕСПЕЧЕНИЕ, а не номинал плеча: заняты у брокера не все
+     * деньги позиции, а доля от неё по ставке риска. Ставка приходит с биржи вместе
+     * с лотностью; если брокер её не сообщил, вычитаем номинал целиком — ошибиться
+     * здесь можно только в сторону осторожности.
+     */
+    private BigDecimal availableBudget() {
+        BigDecimal budget = cfg.workingBudget(ctx::realizedPnl);
+        if (budget == null || hedgeEpisode == null) {
+            return budget;
+        }
+        BigDecimal notional = hedgeEpisode.hedgeQuantity().multiply(hedgeEpisode.entryPrice());
+        BigDecimal rate = ctx.constraints().shortInitialMarginRate();
+        BigDecimal locked = rate == null || rate.signum() <= 0
+                ? notional
+                : notional.multiply(rate);
+
+        BigDecimal left = budget.subtract(locked);
+        if (left.signum() <= 0) {
+            // Плечо съело бюджет целиком. Ноль честнее отрицательной величины:
+            // сетка на него просто не выставит заявок, а отрицательный бюджет
+            // где-нибудь ниже превратился бы в отрицательный размер заявки.
+            return BigDecimal.ZERO;
+        }
+        return left;
+    }
+
+    /**
+     * Есть ли у бота право переворачивать позицию вместо её закрытия.
+     *
+     * Условий много, и каждое отсекает случай, в котором переворот означал бы
+     * непокрытую позицию без надзора. Ни одно из них не «на всякий случай»:
+     * маржа — потому что шорта иначе не бывает; бумажный режим — потому что
+     * живьём этот путь ещё не проверен; лимит эпизодов — потому что рекурсивный
+     * переворот и есть способ проиграть счёт целиком.
+     */
+    private boolean shouldHedgeInsteadOfLiquidating() {
+        if (cfg.onAdverseBreakout() != GridConfig.AdverseBreakoutAction.HEDGE_AND_RECOVER) {
+            return false;
+        }
+        if (hedgeEpisode != null) {
+            // Эпизод уже идёт: второй поверх первого — это и есть рекурсия.
+            return false;
+        }
+        if (hedgeEpisodesUsed >= cfg.maxHedgeEpisodes()) {
+            ctx.event(BotEventType.RISK_BLOCKED,
+                    ("Лимит переворотов поколения исчерпан (%d из %d) — закрываю позицию "
+                            + "с фиксацией убытка. Каждый следующий переворот умножает "
+                            + "экспозицию, и это тот предел, который был задан заранее.")
+                            .formatted(hedgeEpisodesUsed, cfg.maxHedgeEpisodes()));
+            return false;
+        }
+        if (!ctx.execution().marginEnabled()) {
+            return false;
+        }
+        if (!ctx.execution().shortEnabledByInstrument()) {
+            ctx.event(BotEventType.RISK_BLOCKED,
+                    "Брокер не шортит эту бумагу — переворот невозможен, закрываю позицию.");
+            return false;
+        }
+        if (!ctx.execution().dryRun() && !ctx.execution().allowLiveMargin()) {
+            ctx.event(BotEventType.RISK_BLOCKED,
+                    "Переворот живьём не разрешён (allowLiveMargin выключен) — "
+                            + "закрываю позицию с фиксацией убытка.");
+            return false;
+        }
+        if (!ctx.execution().dryRun()) {
+            // Первая живая непокрытая позиция — событие, о котором человек должен
+            // узнать сразу, а не обнаружить его в отчёте через день.
+            ctx.event(BotEventLevel.WARN, BotEventType.RANGE_EXIT,
+                    "Открываю НЕПОКРЫТУЮ позицию на настоящие деньги. Убыток по ней сверху "
+                            + "ничем не ограничен, брокер вправе закрыть её сам, а ночью "
+                            + "защитной заявки в стакане не будет: GTC у T-Invest нет.");
+        }
+        return true;
+    }
+
+    /**
+     * Переворачивает позицию с множителем.
+     *
+     * Считает план ДО единой заявки и отказывается, если он не сходится: цена
+     * безубытка не по ту сторону, убыток неподъёмен, размер не влезает в потолки.
+     * Отказ возвращает false, и вызывающий продолжает обычной ликвидацией —
+     * молча уменьшать множитель нельзя, это изменило бы безубыток, о котором
+     * человек уже думает.
+     *
+     * @return true, если переворот начат
+     */
+    private boolean beginHedge() {
+        ReconcileResult fresh = reconcileAndCheck();
+        if (positionMismatched || fresh.position() == null || fresh.position().signum() == 0) {
+            return false;
+        }
+
+        BigDecimal price;
+        try {
+            price = unwindPrice();
+        } catch (Exception e) {
+            ctx.error("Не удалось получить цену для переворота позиции", e);
+            return false;
+        }
+
+        Inventory inventory = ctx.inventory();
+        HedgeMath.Plan plan = HedgeMath.plan(
+                direction, fresh.position().abs(), inventory.costBasisOpen(), price,
+                activeFees.makerRateFor(direction.closeSide()), cfg.hedgeMultiplier(),
+                ctx.carryDailyRate(), cfg.maxHedgeHoldDays());
+
+        if (!plan.accepted()) {
+            ctx.event(BotEventType.RISK_BLOCKED,
+                    "Переворот невозможен: " + plan.refusal() + " Закрываю позицию как обычно.");
+            return false;
+        }
+        if (!hedgeFitsCeilings(plan)) {
+            return false;
+        }
+
+        UUID episodeId = UUID.randomUUID();
+        try {
+            // Одной заявкой: часть закрывает старую позицию, остаток открывает плечо.
+            // Двумя заявками этого делать нельзя — между ними позиция оказалась бы
+            // закрытой, и рынок успел бы уйти ровно в тот момент, ради которого
+            // переворот и затевался.
+            ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
+                    direction.closeSide(), plan.totalQuantity(), price, null,
+                    OrderPurpose.HEDGE, GridRole.OPEN));
+        } catch (Exception e) {
+            ctx.error("Заявку переворота выставить не удалось", e);
+            return false;
+        }
+
+        Instant now = ctx.clock().instant();
+        hedgeEpisode = new HedgeEpisode(
+                episodeId, direction.opposite(), now, price, plan.hedgeQuantity(),
+                plan.targetPrice(), cfg.hedgeMultiplier(), plan.realizedOnClose(),
+                now.plus(Duration.ofDays(cfg.maxHedgeHoldDays())),
+                stopPriceFor(price));
+        hedgeEpisodesUsed++;
+        persistState();
+        updateSnapshot();
+
+        // Отчёт не должен мешать торговле: сорвавшаяся запись — повод для строки
+        // в журнале, но не для отката переворота, который уже случился на бирже.
+        try {
+            ctx.openRecoveryEpisode(gridGeneration, episodeId, direction.opposite().name(),
+                    price, plan.targetPrice(), cfg.hedgeMultiplier(), now);
+        } catch (Exception e) {
+            ctx.error("Переворот выполнен, но строку эпизода записать не удалось", e);
+        }
+
+        ctx.event(BotEventType.RANGE_EXIT,
+                ("Позиция перевёрнута ×%s по %s: закрыто с убытком %s, открыто плечо %s. "
+                        + "Цель безубытка %s, срок до %s%s. Плечо и сетка %s.")
+                        .formatted(cfg.hedgeMultiplier().toPlainString(), price.toPlainString(),
+                                plain(plan.realizedOnClose()), plainQuantity(plan.hedgeQuantity()),
+                                plan.targetPrice().toPlainString(),
+                                hedgeEpisode.deadline(),
+                                hedgeEpisode.stopPrice() == null ? ""
+                                        : ", стоп " + hedgeEpisode.stopPrice().toPlainString(),
+                                cfg.hedgeAndGridConcurrent() ? "работают одновременно"
+                                        : "работают по очереди"));
+        return true;
+    }
+
+    /** Размер плеча обязан влезать в те же потолки, что и любая короткая позиция. */
+    private boolean hedgeFitsCeilings(HedgeMath.Plan plan) {
+        BigDecimal maxQuantity = ctx.execution().maxShortQuantity();
+        BigDecimal maxNotional = ctx.execution().maxShortNotional();
+
+        if (maxQuantity == null || maxQuantity.signum() <= 0
+                || maxNotional == null || maxNotional.signum() <= 0) {
+            ctx.event(BotEventType.RISK_BLOCKED,
+                    "Переворот отменён: не заданы потолки короткой позиции. "
+                            + "Закрываю позицию с фиксацией убытка.");
+            return false;
+        }
+        if (plan.hedgeQuantity().compareTo(maxQuantity) > 0
+                || plan.hedgeNotional().compareTo(maxNotional) > 0) {
+            // Множитель НЕ уменьшаем: цена безубытка посчитана именно под него,
+            // и тихая подмена дала бы человеку не тот план, который он видел.
+            ctx.event(BotEventType.RISK_BLOCKED,
+                    ("Переворот ×%s не влезает в потолки: плечо %s на %s при пределах %s и %s. "
+                            + "Закрываю позицию с фиксацией убытка — множитель молча "
+                            + "не уменьшаю, он определяет цену безубытка.")
+                            .formatted(cfg.hedgeMultiplier().toPlainString(),
+                                    plainQuantity(plan.hedgeQuantity()), plain(plan.hedgeNotional()),
+                                    plainQuantity(maxQuantity), plain(maxNotional)));
+            return false;
+        }
+        return true;
+    }
+
+    /** Цена, за которой эпизод признаётся неудавшимся. Null — стоп не задан. */
+    private BigDecimal stopPriceFor(BigDecimal entryPrice) {
+        BigDecimal pct = cfg.hedgeStopLossPct();
+        if (pct == null || pct.signum() <= 0) {
+            return null;
+        }
+        // Стоп всегда по ту сторону входа, в которую мы НЕ рассчитывали: плечо
+        // после лонга — это шорт, и губит его рост.
+        return direction == GridDirection.LONG
+                ? entryPrice.multiply(BigDecimal.ONE.add(pct))
+                : entryPrice.multiply(BigDecimal.ONE.subtract(pct));
+    }
+
+    /**
+     * Ведёт открытый эпизод: цель, стоп, срок.
+     *
+     * Порядок проверок намеренный. Сначала цель — если её достигли, закрываемся
+     * в плюс и остальное неважно. Потом стоп: он означает, что расчёт не сбылся,
+     * и признать это лучше раньше. Срок последним: он крайний рубеж, а не план.
+     */
+    private void manageHedgeLeg() {
+        if (hedgeEpisode == null || halted || positionMismatched || lastPrice == null) {
+            return;
+        }
+        if (!limitOrdersAvailable) {
+            return;
+        }
+
+        if (hedgeEpisode.targetReached(lastPrice)) {
+            closeHedge("цель достигнута", lastPrice);
+            return;
+        }
+        if (hedgeEpisode.stopped(lastPrice)) {
+            closeHedge("цена ушла за стоп", lastPrice);
+            return;
+        }
+        if (hedgeEpisode.expired(ctx.clock().instant())) {
+            closeHedge("истёк срок удержания", lastPrice);
+            return;
+        }
+        ensureHedgeExitOrder();
+    }
+
+    /**
+     * Держит выставленной заявку выхода по расчётной цене.
+     *
+     * Заявка стоит в стакане, а не ждёт, пока цена коснётся цели на нашем тике:
+     * между тиками цена вполне успевает сходить туда и обратно, и ожидание
+     * означало бы упустить ровно то движение, ради которого всё затевалось.
+     */
+    private void ensureHedgeExitOrder() {
+        boolean alreadyPlaced = ctx.gateway().openOrders(ctx.botId()).stream()
+                .anyMatch(o -> o.purpose() == OrderPurpose.RECOVERY);
+        if (alreadyPlaced) {
+            return;
+        }
+        try {
+            ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
+                    hedgeEpisode.direction().closeSide(), hedgeEpisode.hedgeQuantity(),
+                    hedgeEpisode.targetPrice(), null, OrderPurpose.RECOVERY, GridRole.CLOSE));
+            ctx.event(BotEventType.HOUSEKEEPING,
+                    "Выставлен выход из плеча: %s по %s"
+                            .formatted(plainQuantity(hedgeEpisode.hedgeQuantity()),
+                                    hedgeEpisode.targetPrice().toPlainString()));
+        } catch (RiskRejectedException e) {
+            ctx.event(BotEventType.RISK_BLOCKED, "Выход из плеча пока запрещён: " + e.getMessage());
+        } catch (Exception e) {
+            ctx.error("Не удалось выставить выход из плеча", e);
+        }
+    }
+
+    /** Закрывает эпизод по рынку и признаёт результат, каким бы он ни был. */
+    private void closeHedge(String reason, BigDecimal price) {
+        HedgeEpisode episode = hedgeEpisode;
+        for (BotOrderView order : ctx.gateway().openOrders(ctx.botId())) {
+            if (order.purpose() != OrderPurpose.RECOVERY) {
+                continue;
+            }
+            try {
+                ctx.gateway().cancel(ctx.execution(), order.id());
+            } catch (Exception e) {
+                ctx.error("Не удалось снять прежний выход из плеча", e);
+                return;
+            }
+        }
+
+        BigDecimal exitPrice;
+        try {
+            exitPrice = unwindPrice();
+        } catch (Exception e) {
+            exitPrice = price;
+        }
+        try {
+            ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
+                    episode.direction().closeSide(), episode.hedgeQuantity(), exitPrice, null,
+                    OrderPurpose.RECOVERY, GridRole.CLOSE));
+        } catch (Exception e) {
+            ctx.error("Не удалось закрыть плечо по рынку", e);
+            return;
+        }
+
+        hedgeEpisode = null;
+        persistState();
+        updateSnapshot();
+        try {
+            ctx.closeRecoveryEpisode(episode.episodeId(), ctx.clock().instant());
+        } catch (Exception e) {
+            ctx.error("Плечо закрыто, но строку эпизода закрыть не удалось", e);
+        }
+        ctx.event(BotEventType.RANGE_EXIT,
+                ("Плечо закрывается по %s: %s. Убыток входа был %s — окупился он или нет, "
+                        + "видно по результату эпизода в таблице поколений.")
+                        .formatted(exitPrice.toPlainString(), reason, plain(episode.lossAtEntry())));
+    }
+
     /** Поддерживает одну агрессивную SELL на фактический остаток позиции. */
     private void manageDownwardLiquidation() {
         if (!awaitingDownwardReplacement || halted || positionMismatched
@@ -1657,7 +2172,7 @@ public class GridStrategy implements Strategy {
 
         BigDecimal bid;
         try {
-            bid = bestBid();
+            bid = unwindPrice();
             enforceDownwardBudget(bid);
         } catch (Exception e) {
             ctx.error("Не удалось обновить лучший бид для ликвидации", e);
@@ -1721,7 +2236,7 @@ public class GridStrategy implements Strategy {
 
         BigDecimal freshBid;
         try {
-            freshBid = bestBid();
+            freshBid = unwindPrice();
             enforceDownwardBudget(freshBid);
         } catch (Exception e) {
             ctx.error("Не удалось обновить лучший бид после снятия ликвидационной заявки", e);
@@ -1731,12 +2246,16 @@ public class GridStrategy implements Strategy {
             return;
         }
         try {
-            BigDecimal quantity = afterCancel.position();
-            ctx.gateway().placeLimit(ctx.execution(),
-                    new PlaceIntent(OrderSide.SELL, quantity, freshBid, null, OrderPurpose.LIQUIDATION));
+            // Модуль: у шортовой сетки позиция отрицательна, а размер заявки — всегда
+            // положительное количество. Сторону задаёт направление, а не знак позиции.
+            BigDecimal quantity = afterCancel.position().abs();
+            ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
+                    direction.closeSide(), quantity, freshBid, null,
+                    OrderPurpose.LIQUIDATION, GridRole.CLOSE));
             ctx.event(BotEventType.HOUSEKEEPING,
-                    "Ликвидационная SELL: %s по лучшему биду %s"
-                            .formatted(plainQuantity(quantity), freshBid.toPlainString()));
+                    "Ликвидационная %s: %s по %s"
+                            .formatted(direction.closeSide(), plainQuantity(quantity),
+                                    freshBid.toPlainString()));
         } catch (RiskRejectedException e) {
             ctx.event(BotEventType.RISK_BLOCKED,
                     "Ликвидационная заявка пока запрещена лимитом: " + e.getMessage());
@@ -1781,16 +2300,19 @@ public class GridStrategy implements Strategy {
         return realizedDownwardLoss.add(currentLoss).add(remainingLoss);
     }
 
-    private BigDecimal bestBid() {
+    /**
+     * Цена, по которой позиция закроется прямо сейчас: лучший бид для лонга,
+     * лучший аск для шорта. Сторону выбирает направление — здесь её знать неоткуда.
+     */
+    private BigDecimal unwindPrice() {
         OrderBook book = ctx.exchange().marketData()
                 .getOrderBook(ctx.execution().instrumentId(), 1);
-        BigDecimal bid = book == null || book.bids() == null || book.bids().isEmpty()
-                || book.bids().get(0).price() == null
-                ? null : book.bids().get(0).price().value();
-        if (bid == null || bid.signum() <= 0) {
-            throw new IllegalStateException("Биржа не вернула лучший бид для закрытия позиции");
+        BigDecimal price = direction.unwindPrice(book);
+        if (price == null) {
+            throw new IllegalStateException(
+                    "Биржа не вернула цену для закрытия позиции (" + direction + ")");
         }
-        return bid;
+        return price;
     }
 
     private void tryCompleteDownwardReplacement() {
@@ -1831,10 +2353,10 @@ public class GridStrategy implements Strategy {
             // Пересчёт обязателен именно здесь: принудительная ликвидация только что
             // зафиксировала убыток, и при реинвестировании прибыли рабочий бюджет стал
             // меньше. Переиспользование старого размера означало бы перерасход бюджета.
-            candidateBudget = cfg.workingBudget(ctx::realizedPnl);
+            candidateBudget = availableBudget();
             candidateSizing = GridValidator.validate(cfg, candidate, candidateLadder,
                     ctx.constraints().minPriceIncrement(), activeFees, ctx.constraints().quantityStep(),
-                    ctx.execution().maxCapital(), candidateBudget).sizing();
+                    ctx.execution().maxCapital(), candidateBudget, ctx.carryDailyRate()).sizing();
         } catch (Exception e) {
             failLowerReplacement("Новый нижний диапазон не прошёл проверку: " + e.getMessage());
             return;
@@ -1845,6 +2367,9 @@ public class GridStrategy implements Strategy {
         sizing = candidateSizing;
         activeBudget = candidateBudget;
         gridGeneration++;
+        // Лимит переворотов принадлежит ПОКОЛЕНИЮ: новая сетка начинает с чистого
+        // счётчика, иначе он был бы одноразовым на всю жизнь бота.
+        hedgeEpisodesUsed = 0;
         if (forced) {
             // Оператор принял убыток целиком и вернул бота в строй — значит и лимиты
             // риска начинают отсчёт заново, иначе кнопка была бы одноразовой:
@@ -2127,7 +2652,7 @@ public class GridStrategy implements Strategy {
         // бюджет выше потолка капитала. Действующая конфигурация при этом не тронута.
         GridSizing candidateSizing = GridValidator.validate(candidate, activeRange, ladder,
                 ctx.constraints().minPriceIncrement(), activeFees, ctx.constraints().quantityStep(),
-                ctx.execution().maxCapital(), candidateBudget).sizing();
+                ctx.execution().maxCapital(), candidateBudget, ctx.carryDailyRate()).sizing();
 
         BigDecimal previousBudget = activeBudget;
         String previousSizing = sizingSummary();
@@ -2224,8 +2749,8 @@ public class GridStrategy implements Strategy {
             log.warn("Не удалось получить последнюю цену перед ручной перестановкой: {}", e.getMessage());
         }
         // Лучший бид — цена, по которой позиция и будет закрыта. Если и его нет,
-        // bestBid() бросит понятное исключение, и команда честно не выполнится.
-        lastPrice = bestBid();
+        // unwindPrice() бросит понятное исключение, и команда честно не выполнится.
+        lastPrice = unwindPrice();
     }
 
     private void failLowerReplacement(String reason) {
@@ -2279,10 +2804,19 @@ public class GridStrategy implements Strategy {
                 || awaitingDownwardReplacement || lowerBreakoutPaused || stopScheduled;
     }
 
-    /** Снимает только покупки старой сетки; закрывающие продажи обязаны остаться. */
+    /**
+     * Снимает только ОТКРЫВАЮЩИЕ заявки старой сетки; закрывающие обязаны остаться.
+     *
+     * Ликвидация и продажа пыли исключены явно, а не через «назначение равно GRID»:
+     * в шорте закрывающая заявка — покупка, и без этого отбора ликвидационная покупка
+     * выглядела бы открытием позиции и снималась бы вместе с сеткой.
+     */
     private void cancelOpenBuys() {
         for (BotOrderView order : ctx.gateway().openOrders(ctx.botId())) {
-            if (order.side() != OrderSide.BUY) {
+            if (order.purpose() == OrderPurpose.DUST || order.purpose() == OrderPurpose.LIQUIDATION) {
+                continue;
+            }
+            if (roleOf(order) != GridRole.OPEN) {
                 continue;
             }
             try {
@@ -2330,12 +2864,12 @@ public class GridStrategy implements Strategy {
 
             // Перестройка сетки — одна из трёх точек, где размер заявки пересчитывается:
             // цены уровней изменились, значит изменилось и то, сколько лотов помещается в бюджет.
-            candidateBudget = cfg.workingBudget(ctx::realizedPnl);
+            candidateBudget = availableBudget();
 
             // До этой точки старая сетка и её checkpoint не меняются.
             candidateSizing = GridValidator.validate(cfg, candidate, candidateLadder,
                     ctx.constraints().minPriceIncrement(), activeFees, ctx.constraints().quantityStep(),
-                    ctx.execution().maxCapital(), candidateBudget).sizing();
+                    ctx.execution().maxCapital(), candidateBudget, ctx.carryDailyRate()).sizing();
 
         } catch (Exception e) {
             failUpperReplacement("Новый диапазон не прошёл проверку: " + e.getMessage());
@@ -2442,7 +2976,8 @@ public class GridStrategy implements Strategy {
         try {
             Optional<GridGenerationDto> closed = ctx.rollGridGeneration(
                     gridGeneration, activeRange.lower(), activeRange.upper(),
-                    activeRange.levels(), activeRange.origin().name(), activeRange.since());
+                    activeRange.levels(), activeRange.origin().name(), activeRange.since(),
+                    direction.name(), cfg.marginEnabled());
             return closed == null ? Optional.empty() : closed;
         } catch (Exception e) {
             ctx.error("Не удалось обновить статистику поколений сетки", e);
@@ -2466,7 +3001,8 @@ public class GridStrategy implements Strategy {
         ctx.saveState(new GridStrategyState(
                 activeRange, gridGeneration, awaitingUpperReplacement, lastReplacementAt,
                 awaitingDownwardReplacement, pendingDownwardRange, downwardReplacements,
-                realizedDownwardLoss, downwardLossBaseline, forcedReplacement, stopScheduled));
+                realizedDownwardLoss, downwardLossBaseline, forcedReplacement, stopScheduled,
+                hedgeEpisode, hedgeEpisodesUsed));
     }
 
     /**
@@ -2544,7 +3080,7 @@ public class GridStrategy implements Strategy {
             // Иначе у бота с реинвестированием прибыли объём менялся бы посреди жизни
             // сетки — между покупкой и её ещё не выставленной встречной продажей.
             GridValidator.revalidate(cfg, activeRange, ladder, ctx.constraints().minPriceIncrement(),
-                    refreshed, ctx.execution().maxCapital(), sizing);
+                    refreshed, ctx.execution().maxCapital(), sizing, ctx.carryDailyRate());
         } catch (Exception e) {
             if (!blockedByFees) {
                 blockedByFees = true;

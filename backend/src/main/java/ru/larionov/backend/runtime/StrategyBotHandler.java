@@ -17,6 +17,7 @@ import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.larionov.backend.exchange.api.model.order.OrderState;
 import ru.larionov.backend.execution.*;
 import ru.larionov.backend.service.BotEventService;
+import ru.larionov.backend.service.MarginAttributesService;
 import ru.larionov.backend.service.BotRuntimeService;
 import ru.larionov.backend.service.ExchangeHandler;
 import ru.larionov.backend.service.StrategyStateService;
@@ -72,6 +73,8 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
                        AccountingService accounting,
                        GridGenerationService gridGenerations,
                        LastPriceCache lastPriceCache,
+                       MarginAttributesService marginAttributes,
+                       java.util.function.Supplier<java.math.BigDecimal> carryDailyRate,
                        Consumer<String> onStopRequested,
                        Runnable onFatal) {
         this.botId = bot.getId();
@@ -91,7 +94,10 @@ public final class StrategyBotHandler implements BotRuntimeService.BotHandler, B
                 exchangeHandler::client, events, Clock.systemUTC(), stateService, accounting,
                 gridGenerations,
                 reason -> scheduler.executeControl(() -> onStopRequested.accept(reason)),
-                lastPriceCache);
+                lastPriceCache,
+                marginAttributes,
+                exchangeHandler.tradingAccountId(),
+                carryDailyRate);
 
         this.loop = new BotEventLoop(botId, this, QUEUE_CAPACITY, MAX_CONSECUTIVE_FAILURES, this::fatal);
     }

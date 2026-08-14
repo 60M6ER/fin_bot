@@ -46,6 +46,27 @@ public class DefaultStrategyContext implements StrategyContext {
     private final GridGenerationService gridGenerations;
     private final Consumer<String> stopRequester;
     private final ru.larionov.backend.runtime.LastPriceCache lastPriceCache;
+    private final ru.larionov.backend.service.MarginAttributesService marginAttributes;
+    /** Счёт, на котором торгует бот: обеспечение — свойство счёта, а не бота. */
+    private final ru.larionov.backend.exchange.api.model.id.AccountId accountId;
+
+    /** Тариф переноса подключения; при любой неясности — консервативное умолчание. */
+    private final java.util.function.Supplier<BigDecimal> carryDailyRateSupplier;
+
+    @Override
+    public Optional<ru.larionov.backend.exchange.api.model.account.MarginAttributes> marginAttributes() {
+        return marginAttributes.get(execution.connectionId(), accountId);
+    }
+
+    @Override
+    public BigDecimal carryDailyRate() {
+        try {
+            BigDecimal rate = carryDailyRateSupplier.get();
+            return rate == null ? BigDecimal.ZERO : rate;
+        } catch (Exception e) {
+            return BigDecimal.ZERO;
+        }
+    }
 
     @Override
     public UUID botId() {
@@ -132,9 +153,23 @@ public class DefaultStrategyContext implements StrategyContext {
     @Override
     public Optional<GridGenerationDto> rollGridGeneration(long generation, BigDecimal lowerPrice,
                                                           BigDecimal upperPrice, Integer levels,
-                                                          String origin, Instant startedAt) {
+                                                          String origin, Instant startedAt,
+                                                          String direction, boolean margin) {
         return gridGenerations.roll(execution, generation, lowerPrice, upperPrice,
-                levels, origin, startedAt);
+                levels, origin, startedAt, direction, margin);
+    }
+
+    @Override
+    public void openRecoveryEpisode(long generation, UUID episodeId, String direction,
+                                    BigDecimal entryPrice, BigDecimal targetPrice,
+                                    BigDecimal multiplier, Instant startedAt) {
+        gridGenerations.openRecovery(execution, generation, episodeId, direction,
+                entryPrice, targetPrice, multiplier, startedAt);
+    }
+
+    @Override
+    public void closeRecoveryEpisode(UUID episodeId, Instant endedAt) {
+        gridGenerations.closeRecovery(execution, episodeId, endedAt);
     }
 
     @Override

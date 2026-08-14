@@ -12,6 +12,7 @@ import ru.larionov.backend.entity.BotOrderEntity;
 import ru.larionov.backend.entity.MoneyLedgerEntity;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
+import ru.larionov.backend.enums.GridRole;
 import ru.larionov.backend.enums.LedgerEntryType;
 import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
@@ -92,6 +93,54 @@ public class AccountingService {
     }
 
     /**
+     * Списывает плату за перенос непокрытой позиции.
+     *
+     * Деньги двигает, партии — нет. Это принципиально: перенос есть реализованная
+     * издержка удержания, а не часть себестоимости позиции. Попади он в партии,
+     * и точка безубытка отъезжала бы каждую ночь сама собой, без единой сделки.
+     * Партий не касаясь, запись оставляет верным тождество
+     * {@code realizedPnl = cashFlow + costBasisOpen}.
+     *
+     * Идемпотентна в пределах суток: повторный проход (рестарт, ручной запуск,
+     * дважды сработавший планировщик) ничего не спишет второй раз. Списать перенос
+     * дважды — это не «неточность в отчёте», а выдуманный убыток, который потом
+     * не отличить от настоящего.
+     *
+     * @return true, если списание действительно записано
+     */
+    @Transactional
+    public boolean recordCarryFee(UUID botId, boolean dryRun, BigDecimal amount,
+                                  BigDecimal notional, String currency, String note) {
+        if (amount == null || amount.signum() <= 0) {
+            return false;
+        }
+        // Двадцать часов, а не календарные сутки: проход запускается по расписанию,
+        // и окно должно пережить и сдвиг запуска, и перезапуск приложения, не дав
+        // при этом списать дважды за одну ночь.
+        java.time.Instant window = java.time.Instant.now().minus(java.time.Duration.ofHours(20));
+        if (ledgerRepo.existsByBotIdAndDryRunAndEntryTypeAndTsAfter(
+                botId, dryRun, LedgerEntryType.CARRY_FEE, window)) {
+            return false;
+        }
+
+        ledgerRepo.save(MoneyLedgerEntity.builder()
+                .botId(botId)
+                .dryRun(dryRun)
+                .entryType(LedgerEntryType.CARRY_FEE)
+                .affectsCash(true)
+                .quantity(BigDecimal.ZERO)
+                .grossAmount(notional)
+                .exchangeLotSize(BigDecimal.ONE)
+                // Со знаком минус: перенос уменьшает деньги бота.
+                .amount(amount.negate())
+                .currency(currency)
+                .note(note)
+                .build());
+        publishLedgerChanged(botId, dryRun);
+        return true;
+    }
+
+    /**
      * Публикуем после коммита (слушатель подписан на AFTER_COMMIT), иначе кэш
      * успел бы наполниться из ещё не зафиксированного чтения.
      */
@@ -140,7 +189,8 @@ public class AccountingService {
                 paidCommission,
                 inventory.openQuantity(),
                 inventory.averageEntryPrice(),
-                firstCurrency(rows)
+                firstCurrency(rows),
+                inventory.shortQuantity()
         );
     }
 
@@ -236,8 +286,16 @@ public class AccountingService {
 
         // По уровню целиком, а не по каждой партии: несколько крошек одного уровня
         // вместе вполне могут составить продаваемое количество, и тогда это не пыль.
+        //
+        // Короткие партии сюда не попадают вовсе. Пыль — это непродаваемый хвост
+        // КУПЛЕННОГО: он не портится и может ждать своей цены. У шорта хвост ведёт
+        // себя ровно наоборот — он не ждёт, а копит плату за перенос, и «собрать
+        // его в корзину» значило бы спрятать растущее обязательство.
         Map<Integer, BigDecimal> remainderByLevel = new HashMap<>();
         for (OpenParcel parcel : rebuildOpenParcels(rows)) {
+            if (!parcel.isLong()) {
+                continue;
+            }
             remainderByLevel.merge(parcel.gridLevel(), nvl(parcel.quantity()), BigDecimal::add);
         }
 
@@ -351,11 +409,20 @@ public class AccountingService {
             commissionDelta = BigDecimal.ZERO;
         }
 
+        // Денежный эффект сделки. Он же — то, из чего считается результат цикла:
+        // закрытие приносит ровно эти деньги, а стоило оно съеденной себестоимости.
         BigDecimal amount = order.getSide() == OrderSide.BUY
                 ? gross.negate().subtract(commissionDelta)
                 : gross.subtract(commissionDelta);
-        BigDecimal soldCost = order.getSide() == OrderSide.SELL
-                ? costBasisForSale(order.getBotId(), order.isDryRun(), order.getGridLevel(), delta)
+
+        // Закрытие определяется РОЛЬЮ, а не стороной: в шорте цикл закрывает покупка.
+        // Для лонга роль совпадает со стороной, поэтому ветка ведёт себя как прежде.
+        boolean closes = order.getGridRole() == GridRole.CLOSE
+                || (order.getGridRole() == null && order.getSide() == OrderSide.SELL);
+        BigDecimal closedCost = closes
+                ? costBasisForClose(order.getBotId(), order.isDryRun(), order.getGridLevel(), delta,
+                        order.getSide() == OrderSide.BUY ? -1 : +1,
+                        isHedgePurpose(order.getPurpose()))
                 : BigDecimal.ZERO;
 
         boolean tradeSaved = saveIdempotent(MoneyLedgerEntity.builder()
@@ -366,6 +433,7 @@ public class AccountingService {
                 .orderId(order.getId())
                 .clientOrderId(order.getClientOrderId())
                 .side(order.getSide())
+                .gridRole(order.getGridRole())
                 .gridLevel(order.getGridLevel())
                 .purpose(order.getPurpose())
                 .quantity(delta)
@@ -379,8 +447,8 @@ public class AccountingService {
                 .currency(bookCurrency(ctx, order))
                 .build());
 
-        if (tradeSaved && order.getSide() == OrderSide.SELL) {
-            recordCycleResult(ctx, order, delta, gross, commissionDelta, soldCost);
+        if (tradeSaved && closes) {
+            recordCycleResult(ctx, order, delta, gross, commissionDelta, amount, closedCost);
         }
     }
 
@@ -567,6 +635,7 @@ public class AccountingService {
                 .orderId(order.getId())
                 .clientOrderId(order.getClientOrderId())
                 .side(order.getSide())
+                .gridRole(order.getGridRole())
                 .gridLevel(order.getGridLevel())
                 .quantity(BigDecimal.ZERO)
                 .exchangeLotSize(order.getExchangeLotSize())
@@ -579,9 +648,23 @@ public class AccountingService {
                 .build());
     }
 
-    private void recordCycleResult(BotExecutionContext ctx, BotOrderEntity order, BigDecimal soldQuantity, BigDecimal gross,
-                                   BigDecimal sellCommission, BigDecimal soldCost) {
-        BigDecimal result = gross.subtract(soldCost).subtract(sellCommission);
+    /**
+     * Результат закрытого цикла.
+     *
+     * Формула одна на оба направления: <b>деньги закрывающей сделки минус
+     * себестоимость съеденных партий</b>. Для лонга это привычное
+     * {@code выручка − комиссия − себестоимость}; для шорта — {@code полученное при
+     * открытии − потраченное на откуп − комиссия}, и получается оно само собой,
+     * потому что себестоимость шортовой партии отрицательна.
+     *
+     * @param closingAmount денежный эффект закрывающей сделки, уже за вычетом комиссии
+     * @param closedCost    себестоимость закрытых партий, знаковая
+     */
+    private void recordCycleResult(BotExecutionContext ctx, BotOrderEntity order,
+                                   BigDecimal soldQuantity, BigDecimal gross,
+                                   BigDecimal commission, BigDecimal closingAmount,
+                                   BigDecimal closedCost) {
+        BigDecimal result = closingAmount.subtract(closedCost);
         boolean saved = saveIdempotent(MoneyLedgerEntity.builder()
                 .botId(order.getBotId())
                 .dryRun(order.isDryRun())
@@ -590,11 +673,12 @@ public class AccountingService {
                 .orderId(order.getId())
                 .clientOrderId(order.getClientOrderId())
                 .side(order.getSide())
+                .gridRole(order.getGridRole())
                 .gridLevel(order.getGridLevel())
                 .quantity(soldQuantity)
                 .exchangeLotSize(order.getExchangeLotSize())
                 .grossAmount(gross)
-                .commission(sellCommission)
+                .commission(commission)
                 .commissionEstimated(!order.isFeeActual())
                 .amount(result)
                 .executedQuantityCum(order.getExecutedQuantity())
@@ -619,9 +703,10 @@ public class AccountingService {
         }
     }
 
-    private BigDecimal costBasisForSale(UUID botId, boolean dryRun, Integer gridLevel, BigDecimal sold) {
+    private BigDecimal costBasisForClose(UUID botId, boolean dryRun, Integer gridLevel,
+                                         BigDecimal closed, int expectedSign, boolean hedge) {
         List<MoneyLedgerEntity> rows = ledgerRepo.findAllByBotIdAndDryRunOrderBySeqAsc(botId, dryRun);
-        return consumeCost(rebuildOpenParcels(rows), gridLevel, sold);
+        return consumeCost(rebuildOpenParcels(rows), gridLevel, closed, expectedSign, hedge);
     }
 
     private Deque<OpenParcel> rebuildOpenParcels(List<MoneyLedgerEntity> rows) {
@@ -630,36 +715,126 @@ public class AccountingService {
         Map<UUID, BigDecimal> remainingBuyQuantity = tradeQuantities(rows, OrderSide.BUY);
 
         for (MoneyLedgerEntity row : rows) {
-            if (row.getEntryType() == LedgerEntryType.TRADE_BUY) {
-                BigDecimal cost = nvl(row.getGrossAmount())
-                        .add(nvl(row.getCommission()))
-                        .add(takeCommissionCorrection(row, remainingBuyCorrections, remainingBuyQuantity));
-                parcels.addLast(new OpenParcel(row.getGridLevel(), nvl(row.getQuantity()), cost));
-            } else if (row.getEntryType() == LedgerEntryType.DUST) {
+            if (row.getEntryType() == LedgerEntryType.DUST) {
                 // Хвост ушёл в корзину пыли: из партий сетки он изымается ровно так же,
                 // как если бы его продали, — вместе со своей долей себестоимости.
-                consumeCost(parcels, row.getGridLevel(), nvl(row.getQuantity()));
-            } else if (row.getEntryType() == LedgerEntryType.TRADE_SELL
-                    && row.getPurpose() != OrderPurpose.DUST) {
-                // Продажа пыли партий сетки не касается: её товар давно из них изъят,
-                // и списывать его отсюда во второй раз значило бы обнулить чужой уровень.
-                consumeCost(parcels, row.getGridLevel(), nvl(row.getQuantity()));
+                consumeCost(parcels, row.getGridLevel(), nvl(row.getQuantity()), +1);
+                continue;
+            }
+            if (!TRADE_TYPES.contains(row.getEntryType())) {
+                continue;
+            }
+            // Продажа пыли партий сетки не касается: её товар давно из них изъят,
+            // и списывать его отсюда во второй раз значило бы обнулить чужой уровень.
+            if (row.getPurpose() == OrderPurpose.DUST) {
+                continue;
+            }
+
+            boolean buy = row.getEntryType() == LedgerEntryType.TRADE_BUY;
+            BigDecimal quantity = nvl(row.getQuantity());
+            if (quantity.signum() <= 0) {
+                continue;
+            }
+
+            if (opens(row)) {
+                parcels.addLast(openedParcel(row, buy, quantity,
+                        remainingBuyCorrections, remainingBuyQuantity));
+                continue;
+            }
+
+            // Закрытие съедает партии ПРОТИВОПОЛОЖНОЙ стороны: продажа гасит длинные,
+            // покупка — короткие. Без этого условия закрывающая покупка шорта съела бы
+            // длинную партию соседнего уровня и обнулила чужой незакрытый цикл.
+            int expectedSign = buy ? -1 : +1;
+            // Плечо закрывает свои партии, сетка — свои: у них раздельный учёт.
+            boolean hedge = isHedgePurpose(row.getPurpose());
+            BigDecimal left = consumeMagnitude(parcels, row.getGridLevel(), quantity,
+                    expectedSign, hedge);
+
+            // Сделка прошла ЧЕРЕЗ ноль: закрыла всё, что было, и на остаток открыла
+            // позицию в другую сторону. Так выглядит переворот позиции — продажа
+            // четырёх объёмов при одном купленном. Остаток обязан стать новой партией:
+            // молча его отбросив, книга потеряла бы саму позицию.
+            if (left.signum() > 0) {
+                parcels.addLast(flippedParcel(row, buy, quantity, left,
+                        remainingBuyCorrections, remainingBuyQuantity));
             }
         }
         return parcels;
     }
 
+    /** Строка принадлежит восстановительному плечу, а не сетке. */
+    private static boolean isHedgePurpose(OrderPurpose purpose) {
+        return purpose == OrderPurpose.HEDGE || purpose == OrderPurpose.RECOVERY;
+    }
+
+    /**
+     * Открывает ли строка книги позицию.
+     *
+     * По РОЛИ, а не по стороне: в шорте позицию набирает продажа. У строк, записанных
+     * до появления роли, её проставила миграция по лонговому правилу, так что ответ
+     * на них тот же, каким был всегда.
+     */
+    private static boolean opens(MoneyLedgerEntity row) {
+        GridRole role = row.getGridRole();
+        if (role != null) {
+            return role == GridRole.OPEN;
+        }
+        return row.getEntryType() == LedgerEntryType.TRADE_BUY;
+    }
+
+    /**
+     * Партия, открытая этой сделкой.
+     *
+     * Себестоимость есть МИНУС денежный эффект сделки. Для покупки это потраченное
+     * вместе с комиссией (как и было всегда), для продажи — полученное за вычетом
+     * комиссии, взятое с минусом.
+     */
+    private OpenParcel openedParcel(MoneyLedgerEntity row, boolean buy, BigDecimal quantity,
+                                    Map<UUID, BigDecimal> corrections,
+                                    Map<UUID, BigDecimal> quantities) {
+        BigDecimal fees = nvl(row.getCommission())
+                .add(takeCommissionCorrection(row, corrections, quantities));
+        BigDecimal cost = buy
+                ? nvl(row.getGrossAmount()).add(fees)
+                : nvl(row.getGrossAmount()).subtract(fees).negate();
+        return new OpenParcel(row.getGridLevel(), buy ? quantity : quantity.negate(), cost,
+                row.getPurpose());
+    }
+
+    /** Часть сделки, ушедшая за ноль и открывшая позицию в другую сторону. */
+    private OpenParcel flippedParcel(MoneyLedgerEntity row, boolean buy, BigDecimal quantity,
+                                     BigDecimal left,
+                                     Map<UUID, BigDecimal> corrections,
+                                     Map<UUID, BigDecimal> quantities) {
+        OpenParcel whole = openedParcel(row, buy, quantity, corrections, quantities);
+        // Себестоимость делим пропорционально: за ноль ушла только часть сделки.
+        return whole.take(left);
+    }
+
     private Inventory rebuildInventory(List<MoneyLedgerEntity> rows) {
         BigDecimal openQuantity = BigDecimal.ZERO;
         BigDecimal cost = BigDecimal.ZERO;
+        BigDecimal longQuantity = BigDecimal.ZERO;
+        BigDecimal shortQuantity = BigDecimal.ZERO;
         for (OpenParcel parcel : rebuildOpenParcels(rows)) {
             openQuantity = openQuantity.add(parcel.quantity());
             cost = cost.add(parcel.costBasis());
+            if (parcel.isLong()) {
+                longQuantity = longQuantity.add(parcel.magnitude());
+            } else {
+                shortQuantity = shortQuantity.add(parcel.magnitude());
+            }
         }
+        // Средняя цена входа остаётся ПОЛОЖИТЕЛЬНОЙ и у шорта: количество и
+        // себестоимость меняют знак согласованно, и он сокращается сам.
+        // У смешанной книги её нет вовсе — усреднять длинную сторону с короткой
+        // бессмысленно, и выдать здесь число значило бы соврать убедительно.
         BigDecimal avg = openQuantity.signum() == 0
+                || (longQuantity.signum() > 0 && shortQuantity.signum() > 0)
                 ? null
                 : cost.divide(openQuantity, 9, RoundingMode.HALF_UP);
-        return new Inventory(openQuantity, cost, avg);
+        return new Inventory(openQuantity, cost, avg, longQuantity, shortQuantity);
     }
 
     private Map<UUID, BigDecimal> commissionCorrections(
@@ -716,30 +891,64 @@ public class AccountingService {
         return allocated;
     }
 
-    private BigDecimal consumeCost(Deque<OpenParcel> parcels, Integer gridLevel, BigDecimal toSell) {
-        ConsumeResult result = consumeMatching(parcels, gridLevel, toSell);
+    private BigDecimal consumeCost(Deque<OpenParcel> parcels, Integer gridLevel, BigDecimal toClose) {
+        return consumeCost(parcels, gridLevel, toClose, +1);
+    }
+
+    /**
+     * @param expectedSign какие партии разрешено съедать: +1 длинные, −1 короткие.
+     *                     Закрытие обязано гасить свою сторону и только её
+     */
+    private BigDecimal consumeCost(Deque<OpenParcel> parcels, Integer gridLevel,
+                                   BigDecimal toClose, int expectedSign) {
+        return consumeCost(parcels, gridLevel, toClose, expectedSign, false);
+    }
+
+    /** @param hedge закрывается плечо (true) или сетка (false) — партии у них раздельные */
+    private BigDecimal consumeCost(Deque<OpenParcel> parcels, Integer gridLevel,
+                                   BigDecimal toClose, int expectedSign, boolean hedge) {
+        ConsumeResult result = consumeMatching(parcels, gridLevel, toClose, expectedSign, hedge);
         BigDecimal cost = result.cost();
         if (result.left().signum() > 0) {
-            cost = cost.add(consumeMatching(parcels, null, result.left()).cost());
+            cost = cost.add(consumeMatching(parcels, null, result.left(), expectedSign, hedge).cost());
         }
         return cost;
     }
 
-    private ConsumeResult consumeMatching(Deque<OpenParcel> parcels, Integer gridLevel, BigDecimal toSell) {
-        if (toSell == null || toSell.signum() <= 0) {
+    /** Сколько закрыть не удалось: остаток означает переворот позиции через ноль. */
+    private BigDecimal consumeMagnitude(Deque<OpenParcel> parcels, Integer gridLevel,
+                                        BigDecimal toClose, int expectedSign, boolean hedge) {
+        ConsumeResult first = consumeMatching(parcels, gridLevel, toClose, expectedSign, hedge);
+        if (first.left().signum() <= 0) {
+            return BigDecimal.ZERO;
+        }
+        return consumeMatching(parcels, null, first.left(), expectedSign, hedge).left();
+    }
+
+    private ConsumeResult consumeMatching(Deque<OpenParcel> parcels, Integer gridLevel,
+                                          BigDecimal toClose, int expectedSign, boolean hedge) {
+        if (toClose == null || toClose.signum() <= 0) {
             return new ConsumeResult(BigDecimal.ZERO, BigDecimal.ZERO);
         }
         Deque<OpenParcel> rebuilt = new ArrayDeque<>();
-        BigDecimal left = toSell;
+        BigDecimal left = toClose;
         BigDecimal cost = BigDecimal.ZERO;
         while (!parcels.isEmpty()) {
             OpenParcel parcel = parcels.removeFirst();
-            boolean match = gridLevel == null || Objects.equals(gridLevel, parcel.gridLevel());
+            boolean sameSide = expectedSign >= 0 ? parcel.isLong() : !parcel.isLong();
+            // Плечо и сетка живут раздельно: закрытие одного не вправе трогать партии
+            // другого. Без этого условия закрытие плеча — а у него уровня нет, значит
+            // подходит «любая партия» — съело бы себестоимость чужого цикла сетки.
+            boolean sameOwner = hedge == parcel.isHedge();
+            boolean match = sameSide && sameOwner
+                    && (gridLevel == null || Objects.equals(gridLevel, parcel.gridLevel()));
             if (!match || left.signum() <= 0) {
                 rebuilt.addLast(parcel);
                 continue;
             }
-            BigDecimal taken = left.min(parcel.quantity());
+            // По модулю: у короткой партии количество отрицательно, а закрываем мы
+            // всегда какую-то положительную величину.
+            BigDecimal taken = left.min(parcel.magnitude());
             left = left.subtract(taken);
             cost = cost.add(parcel.take(taken).costBasis());
             OpenParcel rest = parcel.remainingAfter(taken);

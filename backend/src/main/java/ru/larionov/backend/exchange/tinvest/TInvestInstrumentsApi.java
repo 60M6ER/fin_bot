@@ -129,10 +129,18 @@ public class TInvestInstrumentsApi implements InstrumentsApi {
 
         // Целые лоты: дробить бумагу нельзя, поэтому шаг количества равен лоту,
         // а отдельного минимума по сумме заявки у брокера нет.
+        //
+        // Маржинальные сведения едут отсюда, а не из справочника инструментов,
+        // намеренно: список шортируемых бумаг и ставки риска брокер меняет, а справочник
+        // обновляется по расписанию. Ставка, протухшая в справочнике, хуже отсутствующей —
+        // она выглядит как знание, и по ней посчитается обеспечение, которого не хватит.
         return TradingConstraints.wholeLots(
                 details.lot(),
                 details.minPriceIncrement(),
-                details.brief().quoteCurrency()
+                details.brief().quoteCurrency(),
+                details.shortEnabled(),
+                details.dshort(),
+                details.dshortMin()
         );
     }
 
@@ -314,7 +322,15 @@ public class TInvestInstrumentsApi implements InstrumentsApi {
                 quotationToBigDecimal(instrument.getMinPriceIncrement()),
                 instrument.getBuyAvailableFlag(),
                 instrument.getSellAvailableFlag(),
-                instrument.getApiTradeAvailableFlag()
+                instrument.getApiTradeAvailableFlag(),
+                instrument.getShortEnabledFlag(),
+                // Через hasXxx: у protobuf отсутствующее сообщение неотличимо от нулевого,
+                // а нулевая ставка риска означала бы «обеспечения не требуется» — то есть
+                // ровно противоположное тому, что произошло на самом деле.
+                instrument.hasDshort() ? quotationToBigDecimal(instrument.getDshort()) : null,
+                instrument.hasDshortMin() ? quotationToBigDecimal(instrument.getDshortMin()) : null,
+                instrument.hasDlong() ? quotationToBigDecimal(instrument.getDlong()) : null,
+                instrument.hasDlongMin() ? quotationToBigDecimal(instrument.getDlongMin()) : null
         );
     }
 

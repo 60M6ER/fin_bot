@@ -1,6 +1,7 @@
 package ru.larionov.backend.dto;
 
 import ru.larionov.backend.execution.BotOrderView;
+import ru.larionov.backend.exchange.api.model.account.MarginAttributes;
 import ru.larionov.backend.strategy.StrategySnapshot;
 
 import java.math.BigDecimal;
@@ -11,6 +12,10 @@ import java.util.List;
  *
  * @param position     позиция по журналу: куплено минус продано, в единицах базового актива
  * @param queueSize    длина очереди событий; растущая очередь означает, что бот не успевает
+ * @param margin       обеспечение счёта, на котором торгует бот. null — площадка про маржу
+ *                     не отвечает либо подключение не поднято. Показатели общие для ВСЕГО
+ *                     счёта, а не для одного бота: обеспечение — свойство счёта, и
+ *                     соседние боты расходуют его наравне
  */
 public record BotTradingStateDto(
         boolean running,
@@ -20,5 +25,6 @@ public record BotTradingStateDto(
         int openOrdersCount,
         int queueSize,
         StrategySnapshot strategySnapshot,
-        List<BotOrderView> orders
+        List<BotOrderView> orders,
+        MarginAttributes margin
 ) {}

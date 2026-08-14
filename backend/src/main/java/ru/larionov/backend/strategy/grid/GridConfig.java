@@ -51,8 +51,66 @@ public record GridConfig(
          */
         BigDecimal budget,
         SizingMode sizingMode,
-        ProfitPolicy profitPolicy
+        ProfitPolicy profitPolicy,
+        /*
+         * Направление сетки. Лонг покупает ниже и продаёт выше, шорт — зеркально.
+         * Умолчание LONG: конфигурация бота, заведённого до появления направления,
+         * обязана означать ровно то же, что означала.
+         */
+        GridDirection direction,
+        /*
+         * Разрешена ли боту маржа. Второй уровень рубильника: первый — галка на
+         * подключении, и бот не может включить то, чего подключение не разрешило.
+         * Разделены намеренно — снятие галки на подключении обязано гасить всех
+         * его ботов разом, не полагаясь на то, что каждый выключили по отдельности.
+         */
+        Boolean marginEnabled,
+        /*
+         * Сколько суток, по ожиданию, живёт один цикл сетки. Участвует ровно в одном
+         * расчёте — в проверке, окупает ли шаг плату за перенос непокрытой позиции,
+         * и только у шортовой сетки: длинная позиция покрыта и удержание её ничего
+         * не стоит.
+         *
+         * Прогнозом это не является и являться не может: сколько цикл проживёт на
+         * самом деле, зависит от рынка. Умолчание в сутки лишь не даёт забыть про
+         * издержку целиком; кто рассчитывает на медленную сетку, обязан сказать это
+         * явно и увидеть, во что она обходится.
+         */
+        Integer expectedCycleDays,
+        /*
+         * Что делать с позицией при неблагоприятном пробое: закрыть с убытком, как
+         * было всегда, или перевернуть с множителем и отбивать убыток плечом.
+         */
+        AdverseBreakoutAction onAdverseBreakout,
+        /** Множитель переворота. Тот самый ×4. */
+        BigDecimal hedgeMultiplier,
+        /*
+         * Сколько эпизодов плеча разрешено на одно поколение.
+         *
+         * Единица по умолчанию, и это главный предохранитель всей конструкции.
+         * Каждый следующий переворот умножает экспозицию: два подряд дают
+         * девятикратную от исходной, три — двадцатисемикратную. Так проигрывают
+         * счёт целиком за конечное число шагов, и «ещё разок» здесь — самое
+         * дорогое решение из возможных.
+         */
+        Integer maxHedgeEpisodes,
+        /** Сколько суток держим плечо, прежде чем закрыть по рынку и признать результат. */
+        Integer maxHedgeHoldDays,
+        /** Насколько цена вправе уйти против плеча, прежде чем эпизод закроется с убытком. */
+        BigDecimal hedgeStopLossPct,
+        /*
+         * Работает ли новая сетка одновременно с плечом или ждёт его закрытия.
+         * По умолчанию одновременно: смысл переворота в том, чтобы не простаивать.
+         */
+        Boolean hedgeAndGridConcurrent
 ) {
+
+    public enum AdverseBreakoutAction {
+        /** Закрыть позицию и зафиксировать убыток. Прежнее и единственное поведение. */
+        LIQUIDATE,
+        /** Перевернуть позицию с множителем и отбивать убыток плечом. */
+        HEDGE_AND_RECOVER
+    }
 
     public enum SizingMode {
         /**
@@ -101,6 +159,72 @@ public record GridConfig(
                 onRangeExit, minStepToCommissionRatio, null, enabled,
                 null, null, null, null, null, null, null, null, null, null, null, null,
                 null, null, null);
+    }
+
+    /**
+     * Конфигурация без маржинальных полей: лонговая сетка, как было до их появления.
+     *
+     * Существует ради тех, кому направление безразлично, — и ради того, чтобы
+     * добавление маржинального поля не заставляло переписывать каждое место, где
+     * конфигурация собирается позиционно. Умолчания здесь те же, что в компактном
+     * конструкторе, так что смысл «как раньше» сохраняется буквально.
+     */
+    public GridConfig(BigDecimal lowerPrice, BigDecimal upperPrice, Integer levels,
+                      BigDecimal quantityPerOrder, Integer maxActiveOrders,
+                      RangeExitAction onRangeExit, BigDecimal minStepToCommissionRatio,
+                      Integer feeRefreshSeconds, Boolean enabled, Boolean autoRange,
+                      CandleInterval atrInterval, Integer atrPeriods, BigDecimal atrMultiplier,
+                      BigDecimal minHalfWidthPct, BigDecimal maxHalfWidthPct,
+                      UpperBreakoutAction onUpperBreakout, Integer breakoutConfirmSeconds,
+                      BigDecimal breakoutMarginPct, Integer replaceCooldownSeconds,
+                      Integer maxDownwardReplacements, BigDecimal maxRealizedLoss,
+                      BigDecimal budget, SizingMode sizingMode, ProfitPolicy profitPolicy) {
+        this(lowerPrice, upperPrice, levels, quantityPerOrder, maxActiveOrders, onRangeExit,
+                minStepToCommissionRatio, feeRefreshSeconds, enabled, autoRange, atrInterval,
+                atrPeriods, atrMultiplier, minHalfWidthPct, maxHalfWidthPct, onUpperBreakout,
+                breakoutConfirmSeconds, breakoutMarginPct, replaceCooldownSeconds,
+                maxDownwardReplacements, maxRealizedLoss, budget, sizingMode, profitPolicy,
+                null, null, null);
+    }
+
+    /** Конфигурация без ожидаемой длительности цикла: заведённая до её появления. */
+    public GridConfig(BigDecimal lowerPrice, BigDecimal upperPrice, Integer levels,
+                      BigDecimal quantityPerOrder, Integer maxActiveOrders,
+                      RangeExitAction onRangeExit, BigDecimal minStepToCommissionRatio,
+                      Integer feeRefreshSeconds, Boolean enabled, Boolean autoRange,
+                      CandleInterval atrInterval, Integer atrPeriods, BigDecimal atrMultiplier,
+                      BigDecimal minHalfWidthPct, BigDecimal maxHalfWidthPct,
+                      UpperBreakoutAction onUpperBreakout, Integer breakoutConfirmSeconds,
+                      BigDecimal breakoutMarginPct, Integer replaceCooldownSeconds,
+                      Integer maxDownwardReplacements, BigDecimal maxRealizedLoss,
+                      BigDecimal budget, SizingMode sizingMode, ProfitPolicy profitPolicy,
+                      GridDirection direction, Boolean marginEnabled) {
+        this(lowerPrice, upperPrice, levels, quantityPerOrder, maxActiveOrders, onRangeExit,
+                minStepToCommissionRatio, feeRefreshSeconds, enabled, autoRange, atrInterval,
+                atrPeriods, atrMultiplier, minHalfWidthPct, maxHalfWidthPct, onUpperBreakout,
+                breakoutConfirmSeconds, breakoutMarginPct, replaceCooldownSeconds,
+                maxDownwardReplacements, maxRealizedLoss, budget, sizingMode, profitPolicy,
+                direction, marginEnabled, null, null, null, null, null, null, null);
+    }
+
+    /** Конфигурация без восстановительного плеча: заведённая до его появления. */
+    public GridConfig(BigDecimal lowerPrice, BigDecimal upperPrice, Integer levels,
+                      BigDecimal quantityPerOrder, Integer maxActiveOrders,
+                      RangeExitAction onRangeExit, BigDecimal minStepToCommissionRatio,
+                      Integer feeRefreshSeconds, Boolean enabled, Boolean autoRange,
+                      CandleInterval atrInterval, Integer atrPeriods, BigDecimal atrMultiplier,
+                      BigDecimal minHalfWidthPct, BigDecimal maxHalfWidthPct,
+                      UpperBreakoutAction onUpperBreakout, Integer breakoutConfirmSeconds,
+                      BigDecimal breakoutMarginPct, Integer replaceCooldownSeconds,
+                      Integer maxDownwardReplacements, BigDecimal maxRealizedLoss,
+                      BigDecimal budget, SizingMode sizingMode, ProfitPolicy profitPolicy,
+                      GridDirection direction, Boolean marginEnabled, Integer expectedCycleDays) {
+        this(lowerPrice, upperPrice, levels, quantityPerOrder, maxActiveOrders, onRangeExit,
+                minStepToCommissionRatio, feeRefreshSeconds, enabled, autoRange, atrInterval,
+                atrPeriods, atrMultiplier, minHalfWidthPct, maxHalfWidthPct, onUpperBreakout,
+                breakoutConfirmSeconds, breakoutMarginPct, replaceCooldownSeconds,
+                maxDownwardReplacements, maxRealizedLoss, budget, sizingMode, profitPolicy,
+                direction, marginEnabled, expectedCycleDays, null, null, null, null, null, null);
     }
 
     public GridConfig {
@@ -209,6 +333,50 @@ public record GridConfig(
                         "maxDownwardReplacements должен быть больше нуля для перестановки вниз");
             }
         }
+        if (direction == null) {
+            direction = GridDirection.LONG;
+        }
+        if (marginEnabled == null) {
+            marginEnabled = false;
+        }
+        if (expectedCycleDays == null || expectedCycleDays <= 0) {
+            expectedCycleDays = 1;
+        }
+        if (onAdverseBreakout == null) {
+            onAdverseBreakout = AdverseBreakoutAction.LIQUIDATE;
+        }
+        if (hedgeMultiplier == null || hedgeMultiplier.compareTo(BigDecimal.ONE) <= 0) {
+            hedgeMultiplier = new BigDecimal("4");
+        }
+        if (maxHedgeEpisodes == null || maxHedgeEpisodes < 0) {
+            maxHedgeEpisodes = 1;
+        }
+        if (maxHedgeHoldDays == null || maxHedgeHoldDays <= 0) {
+            maxHedgeHoldDays = 3;
+        }
+        if (hedgeAndGridConcurrent == null) {
+            hedgeAndGridConcurrent = true;
+        }
+        // Переворот открывает непокрытую позицию, а она невозможна без маржи —
+        // и без потолка убытка, из которого считается срок и стоп.
+        if (onAdverseBreakout == AdverseBreakoutAction.HEDGE_AND_RECOVER) {
+            if (!marginEnabled) {
+                throw new IllegalArgumentException(
+                        "Восстановительное плечо требует включённой маржи");
+            }
+            if (maxRealizedLoss == null || maxRealizedLoss.signum() <= 0) {
+                throw new IllegalArgumentException(
+                        "Восстановительное плечо требует потолка убытка (maxRealizedLoss): "
+                                + "без него у эпизода нет предела");
+            }
+        }
+        // Шорт — это продажа того, чего нет. Без маржи такую заявку отвергнет и биржа,
+        // и риск-контроль, поэтому конфигурация обязана падать здесь, на загрузке,
+        // а не потоком отказов на каждом проходе торгового цикла.
+        if (direction == GridDirection.SHORT && !marginEnabled) {
+            throw new IllegalArgumentException(
+                    "Шортовая сетка возможна только при включённой марже (marginEnabled)");
+        }
     }
 
     /** Считает ли бот размер заявки от бюджета. */
@@ -230,7 +398,9 @@ public record GridConfig(
                 autoRange, atrInterval, atrPeriods, atrMultiplier, minHalfWidthPct,
                 maxHalfWidthPct, onUpperBreakout, breakoutConfirmSeconds, breakoutMarginPct,
                 replaceCooldownSeconds, maxDownwardReplacements, maxRealizedLoss,
-                newBudget, sizingMode, profitPolicy);
+                newBudget, sizingMode, profitPolicy, direction, marginEnabled, expectedCycleDays,
+                onAdverseBreakout, hedgeMultiplier, maxHedgeEpisodes, maxHedgeHoldDays,
+                hedgeStopLossPct, hedgeAndGridConcurrent);
     }
 
     /**

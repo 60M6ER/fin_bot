@@ -19,6 +19,14 @@ import java.math.BigDecimal;
  *                         У Poloniex это minAmount и он реально отсекает мелкие заявки
  * @param minPriceIncrement шаг цены
  * @param quoteCurrency    валюта котировки: в ней выражены цена, бюджет и весь P/L бота
+ * @param shortEnabled     разрешён ли брокером шорт по этой бумаге. Спрашивается у биржи
+ *                         в момент старта бота, а не берётся из справочника: список
+ *                         шортируемых бумаг брокер меняет, и вчерашнее «да» ничего не значит
+ * @param shortInitialMarginRate ставка риска короткой позиции (dshort): доля её стоимости,
+ *                         которую брокер требует держать обеспечением. null — брокер
+ *                         не сообщил, и открывать шорт по такому инструменту нельзя:
+ *                         посчитать требуемое обеспечение не из чего
+ * @param shortMinMarginRate минимальная ставка риска короткой позиции (dshortMin)
  */
 public record TradingConstraints(
         BigDecimal exchangeLotSize,
@@ -26,8 +34,19 @@ public record TradingConstraints(
         BigDecimal minQuantity,
         BigDecimal minNotional,
         BigDecimal minPriceIncrement,
-        String quoteCurrency
+        String quoteCurrency,
+        boolean shortEnabled,
+        BigDecimal shortInitialMarginRate,
+        BigDecimal shortMinMarginRate
 ) {
+
+    /** Ограничения без маржинальных сведений: площадка, которая их не сообщает. */
+    public TradingConstraints(BigDecimal exchangeLotSize, BigDecimal quantityStep,
+                              BigDecimal minQuantity, BigDecimal minNotional,
+                              BigDecimal minPriceIncrement, String quoteCurrency) {
+        this(exchangeLotSize, quantityStep, minQuantity, minNotional, minPriceIncrement,
+                quoteCurrency, false, null, null);
+    }
 
     public TradingConstraints {
         if (exchangeLotSize == null || exchangeLotSize.signum() <= 0) {
@@ -43,5 +62,14 @@ public record TradingConstraints(
     public static TradingConstraints wholeLots(int lot, BigDecimal minPriceIncrement, String quoteCurrency) {
         BigDecimal lotSize = BigDecimal.valueOf(Math.max(1, lot));
         return new TradingConstraints(lotSize, lotSize, lotSize, null, minPriceIncrement, quoteCurrency);
+    }
+
+    /** То же, но с маржинальными сведениями брокера. */
+    public static TradingConstraints wholeLots(int lot, BigDecimal minPriceIncrement, String quoteCurrency,
+                                               boolean shortEnabled, BigDecimal shortInitialMarginRate,
+                                               BigDecimal shortMinMarginRate) {
+        BigDecimal lotSize = BigDecimal.valueOf(Math.max(1, lot));
+        return new TradingConstraints(lotSize, lotSize, lotSize, null, minPriceIncrement, quoteCurrency,
+                shortEnabled, shortInitialMarginRate, shortMinMarginRate);
     }
 }
