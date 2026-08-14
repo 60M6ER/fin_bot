@@ -126,6 +126,42 @@ class GridStrategyHedgeEpisodeTest {
                 org.mockito.ArgumentMatchers.contains("истёк срок удержания"));
     }
 
+    /**
+     * Инцидент 14.08.2026: бот выключился навсегда с непокрытым шортом на счёте.
+     *
+     * После переворота ×4 позиция счёта стала −420 — это ЦЕЛИКОМ плечо, позицию сетки
+     * переворот уже закрыл. Но сетка работает одновременно с плечом, подтвердила
+     * следующий пробой и пошла закрывать «свою» позицию. Увидев на счёте минус,
+     * ликвидация сочла это непоправимым разъездом с биржей и остановила бота: шорт
+     * на 420 штук остался без стопа, без цели и без присмотра.
+     *
+     * Сетка обязана считать своей только свою позицию.
+     */
+    @Test
+    @DisplayName("перестановка вниз при живом плече не принимает его за разъезд с биржей")
+    void downwardReplacementIgnoresTheOpenHedgeLeg() {
+        GridStrategy strategy = startedWithPosition(true, true, true);
+        breakDownAndConfirm(strategy);
+        assertThat(saved.get().hedgeEpisode()).as("плечо открыто").isNotNull();
+
+        // Переворот исполнился: на счёте осталась только нога плеча, 30 в шорт.
+        BigDecimal hedgeLeg = saved.get().hedgeEpisode().hedgeQuantity().negate();
+        when(gateway.reconcile(any())).thenReturn(reconciled(hedgeLeg.toPlainString()));
+        strategy.onReconcile(reconciled(hedgeLeg.toPlainString()));
+
+        // Цена продолжает падать — сетка подтверждает ещё один пробой.
+        clockNow.set(clockNow.get().plusSeconds(400));
+        strategy.onPrice(price("19.5"));
+        clockNow.set(clockNow.get().plusSeconds(400));
+        strategy.onPrice(price("19.5"));
+
+        verify(ctx, never()).requestStop(
+                org.mockito.ArgumentMatchers.contains("короткую позицию во время ликвидации"));
+        assertThat(saved.get().hedgeEpisode())
+                .as("плечо продолжает жить: его ведёт эпизод, а не перестановка сетки")
+                .isNotNull();
+    }
+
     // ==============================
     // КОГДА ПЕРЕВОРАЧИВАТЬ НЕЛЬЗЯ
     // ==============================

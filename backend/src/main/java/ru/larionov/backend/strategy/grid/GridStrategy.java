@@ -1288,7 +1288,7 @@ public class GridStrategy implements Strategy {
             tryCompleteUpperReplacement();
         }
         if (!positionMismatched && awaitingDownwardReplacement
-                && reconciledPosition != null && reconciledPosition.signum() == 0) {
+                && reconciledPosition != null && gridPosition().signum() == 0) {
             tryCompleteDownwardReplacement();
         }
     }
@@ -1540,7 +1540,7 @@ public class GridStrategy implements Strategy {
         BigDecimal covered = heldByLevel.values().stream()
                 .reduce(BigDecimal.ZERO, BigDecimal::add)
                 .add(dustQuantity());
-        return reconciledPosition.subtract(covered);
+        return gridPosition().subtract(covered);
     }
 
     /** Сколько с каждого уровня уже переведено в пыль. Ошибка чтения = «нисколько». */
@@ -1933,7 +1933,7 @@ public class GridStrategy implements Strategy {
         }
 
         try {
-            if (reconciledPosition.signum() > 0) {
+            if (gridPosition().signum() > 0) {
                 enforceDownwardBudget(unwindPrice());
                 if (halted) {
                     return;
@@ -2418,15 +2418,42 @@ public class GridStrategy implements Strategy {
                                 plain(episode.lossAtEntry())));
     }
 
+    /**
+     * Позиция, за которую отвечает СЕТКА, — без открытого плеча.
+     *
+     * Сверка возвращает позицию СЧЁТА, а на нём одновременно живут две разные вещи:
+     * позиция сетки и нога восстановительного плеча. Пока плечо и сетка работают
+     * одновременно (а это режим по умолчанию), путать их нельзя.
+     *
+     * Инцидент 14.08.2026: после переворота ×4 на счёте было −420 — целиком плечо, —
+     * а сетка тем временем подтвердила ещё один пробой и пошла закрывать «свою»
+     * позицию. Увидев минус, ликвидация решила, что произошло непоправимое, и
+     * выключила бота навсегда, оставив непокрытый шорт без присмотра. Закрывать
+     * ей было нечего: переворот уже закрыл позицию сетки в ноль.
+     */
+    private BigDecimal gridPosition() {
+        if (reconciledPosition == null) {
+            return null;
+        }
+        if (hedgeEpisode == null) {
+            return reconciledPosition;
+        }
+        BigDecimal leg = hedgeEpisode.direction() == GridDirection.SHORT
+                ? hedgeEpisode.hedgeQuantity().negate()
+                : hedgeEpisode.hedgeQuantity();
+        return reconciledPosition.subtract(leg);
+    }
+
     /** Поддерживает одну агрессивную SELL на фактический остаток позиции. */
     private void manageDownwardLiquidation() {
         if (!awaitingDownwardReplacement || halted || positionMismatched
                 || reconciledPosition == null) {
             return;
         }
+        BigDecimal own = gridPosition();
         // Тот же допуск, что и при перестановке вверх: остаток, на который биржа
         // не примет заявки, ликвидации не «допродать», а ждать его — ждать вечно.
-        if (positionIsFlat(reconciledPosition)) {
+        if (positionIsFlat(own)) {
             for (BotOrderView order : gridOrders()) {
                 try {
                     ctx.gateway().cancel(ctx.execution(), order.id());
@@ -2439,9 +2466,13 @@ public class GridStrategy implements Strategy {
             }
             return;
         }
-        if (reconciledPosition.signum() < 0) {
+        if (own.signum() < 0) {
+            // Минус ПОСЛЕ вычета плеча — это уже не плечо, а разъезд с биржей.
             stopPermanently("Сверка показала короткую позицию во время ликвидации: "
-                    + reconciledPosition.toPlainString());
+                    + own.toPlainString()
+                    + (hedgeEpisode == null ? ""
+                            : " (позиция счёта " + reconciledPosition.toPlainString()
+                                    + ", из них плечо " + plainQuantity(hedgeEpisode.hedgeQuantity()) + ")"));
             return;
         }
         if (!limitOrdersAvailable) {
@@ -2558,6 +2589,12 @@ public class GridStrategy implements Strategy {
 
     private BigDecimal projectedDownwardLoss(BigDecimal bid) {
         Inventory inventory = ctx.inventory();
+        /*
+         * ЗДЕСЬ сравниваются две величины ОДНОГО масштаба — счёта: книга бота знает
+         * и заявку переворота тоже, поэтому вычитать из неё плечо нельзя. А вот
+         * продавать при ликвидации предстоит только позицию сетки, и убыток считается
+         * уже по ней.
+         */
         BigDecimal position = reconciledPosition == null ? BigDecimal.ZERO : reconciledPosition;
         // compareTo, а не !=: книга и сверка приходят с разной шкалой BigDecimal.
         if (inventory.openQuantity().compareTo(position) != 0) {
@@ -2571,7 +2608,8 @@ public class GridStrategy implements Strategy {
                 ? BigDecimal.ZERO
                 : downwardLossBaseline.subtract(ctx.realizedPnl()).max(BigDecimal.ZERO);
         // Множителя нет: позиция уже в единицах базового актива, цена — за единицу.
-        BigDecimal gross = bid.multiply(position);
+        BigDecimal own = gridPosition() == null ? BigDecimal.ZERO : gridPosition();
+        BigDecimal gross = bid.multiply(own);
         BigDecimal sellFee = gross.multiply(activeFees.makerSellRate());
         BigDecimal remainingLoss = inventory.costBasisOpen()
                 .subtract(gross).add(sellFee).max(BigDecimal.ZERO);
@@ -2595,7 +2633,7 @@ public class GridStrategy implements Strategy {
 
     private void tryCompleteDownwardReplacement() {
         if (!awaitingDownwardReplacement || positionMismatched || pendingDownwardRange == null
-                || reconciledPosition == null || reconciledPosition.signum() != 0
+                || reconciledPosition == null || gridPosition().signum() != 0
                 || !ctx.gateway().openOrders(ctx.botId()).isEmpty()) {
             return;
         }
@@ -2823,7 +2861,7 @@ public class GridStrategy implements Strategy {
                 || positionMismatched || reconciledPosition == null) {
             return;
         }
-        if (!positionIsFlat(reconciledPosition)) {
+        if (!positionIsFlat(gridPosition())) {
             return;
         }
         for (BotOrderView order : ctx.gateway().openOrders(ctx.botId())) {
@@ -3121,7 +3159,7 @@ public class GridStrategy implements Strategy {
                 || reconciledPosition == null) {
             return false;
         }
-        if (!positionIsFlat(reconciledPosition)) {
+        if (!positionIsFlat(gridPosition())) {
             reportUpperReplacementStall();
             return false;
         }
