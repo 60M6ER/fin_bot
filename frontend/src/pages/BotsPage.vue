@@ -215,7 +215,13 @@
 
               <q-separator />
 
-              <q-card-section class="q-gutter-md">
+              <!--
+                Гуттер только вертикальный. q-gutter-md вешает на секцию ещё и
+                margin-left: -16px, и вложенный row q-col-gutter-md со своим
+                отрицательным отступом уезжает за левый край карточки — поля торчали
+                наружу на 16 пикселей, а на второй вложенности на все 32.
+              -->
+              <q-card-section class="q-gutter-y-md">
                 <div class="row q-col-gutter-md">
                   <div class="col-12 col-md-6">
                     <q-select
@@ -813,7 +819,8 @@
 
         <q-separator />
 
-        <q-card-section class="q-gutter-md">
+        <!-- Тот же вертикальный гуттер: общий съедал левый отступ секции. -->
+        <q-card-section class="q-gutter-y-md">
           <q-input v-model="createForm.name" label="Имя бота" outlined dense :disable="createLoading" maxlength="120" />
 
           <q-select

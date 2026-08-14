@@ -183,7 +183,7 @@
 
               <q-separator />
 
-              <q-card-section class="q-gutter-md">
+              <q-card-section class="q-gutter-y-md">
                 <div class="row q-col-gutter-md">
                   <div class="col-12 col-md-6">
                     <div class="row items-center justify-between">

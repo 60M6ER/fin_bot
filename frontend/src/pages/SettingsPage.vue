@@ -55,7 +55,7 @@
 
         <q-separator />
 
-        <q-card-section class="q-gutter-md">
+        <q-card-section class="q-gutter-y-md">
           <div class="row q-col-gutter-md">
             <div class="col-12 col-sm-4">
               <q-select

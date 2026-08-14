@@ -1,5 +1,11 @@
 <template>
-  <div class="q-gutter-md">
+  <!--
+    Вертикальный гуттер, а не общий: горизонтальная составляющая q-gutter-md
+    складывалась с отрицательными отступами вложенных row q-col-gutter-md, и вся
+    форма съезжала влево за край карточки. Расстояние между блоками от этого
+    не меняется — оно и было вертикальным.
+  -->
+  <div class="q-gutter-y-md">
     <!-- Проверка безубытка выполняется backend тем же валидатором, что и запуск стратегии. -->
     <q-linear-progress v-if="previewLoading" indeterminate color="primary" />
     <q-banner v-if="preview.error" dense rounded class="bg-red-1 text-red-10">
