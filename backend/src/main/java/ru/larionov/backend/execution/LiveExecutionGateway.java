@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import ru.larionov.backend.accounting.AccountingService;
 import ru.larionov.backend.entity.BotOrderEntity;
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.enums.BotEventLevel;
 import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.exchange.api.ExchangeClient;
@@ -26,6 +27,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -225,10 +227,15 @@ public class LiveExecutionGateway implements ExecutionGateway {
 
     @Override
     public int cancelAll(BotExecutionContext ctx) {
+        return cancelAllExcept(ctx, Set.of());
+    }
+
+    @Override
+    public int cancelAllExcept(BotExecutionContext ctx, Set<OrderPurpose> keep) {
         List<BotOrderEntity> open = orderRepo.findAllByBotIdAndStatusIn(ctx.botId(), OPEN_STATUSES);
         int cancelled = 0;
         for (BotOrderEntity o : open) {
-            if (o.isDryRun()) {
+            if (o.isDryRun() || keep.contains(o.getPurpose())) {
                 continue;
             }
             try {

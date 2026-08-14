@@ -1,11 +1,13 @@
 package ru.larionov.backend.execution;
 
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.model.market.LastPrice;
 import ru.larionov.backend.exchange.api.model.order.OrderState;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -39,8 +41,24 @@ public interface ExecutionGateway {
 
     void cancel(BotExecutionContext ctx, UUID botOrderId);
 
-    /** Снять все живые заявки бота — например, при выходе цены из диапазона. */
+    /** Снять все живые заявки бота — например, при остановке. */
     int cancelAll(BotExecutionContext ctx);
+
+    /**
+     * Снять живые заявки бота, кроме перечисленных назначений.
+     *
+     * Нужно потому, что «все заявки бота» — это не одна корзина. Заявка выхода из
+     * восстановительного плеча ({@link OrderPurpose#RECOVERY}) принадлежит эпизоду,
+     * а не сетке, и стоит в стакане по цене безубытка непокрытой позиции. Снять её
+     * заодно с сеткой значит на время оставить шорт без выхода — а перестановка
+     * диапазона делает это ровно тогда, когда рынок идёт против позиции.
+     *
+     * Остановка бота — другое дело: там снимается всё, потому что заявка, пережившая
+     * бота, исполнится без всякого присмотра.
+     *
+     * @param keep назначения, которые трогать нельзя
+     */
+    int cancelAllExcept(BotExecutionContext ctx, Set<OrderPurpose> keep);
 
     List<BotOrderView> openOrders(UUID botId);
 

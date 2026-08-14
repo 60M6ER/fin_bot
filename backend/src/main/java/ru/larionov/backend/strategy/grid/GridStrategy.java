@@ -66,6 +66,10 @@ public class GridStrategy implements Strategy {
     /** Сколько цена вправе не приходить стримом, прежде чем спросить её у биржи. */
     private static final long PRICE_STALE_SECONDS = 120;
 
+    /** Назначения заявок, которыми распоряжается эпизод плеча, а не сетка. */
+    private static final Set<OrderPurpose> HEDGE_PURPOSES =
+            Set.of(OrderPurpose.HEDGE, OrderPurpose.RECOVERY);
+
     private static final int MISMATCH_CONFIRMATIONS = 2;
 
     /**
@@ -1017,8 +1021,22 @@ public class GridStrategy implements Strategy {
     }
 
     /** Заявки, которые считаются «нашими» для проверок сетки. Пыль живёт отдельно. */
+    /**
+     * Заявки, принадлежащие СЕТКЕ.
+     *
+     * Пыль исключена потому, что копится через поколения и живёт своей жизнью.
+     * Заявки эпизода плеча — потому что принадлежат ему, а не сетке: выход из плеча
+     * стоит в стакане по цене безубытка НЕПОКРЫТОЙ позиции и является единственной
+     * её защитой. Считать его своим значит две ошибки сразу: снять его при
+     * перестановке — и ждать, пока он «исчезнет», то есть не переставить сетку
+     * никогда, ведь пока эпизод жив, заявка стоит по построению.
+     */
     private List<BotOrderView> gridOrders() {
         return ctx.gateway().openOrders(ctx.botId()).stream()
+                // Назначение может быть не проставлено — у заявки, поднятой сверкой
+                // с биржи, его знать неоткуда. Такая заявка считается сеточной, как
+                // и раньше: снять лишнее безопаснее, чем оставить неизвестное висеть.
+                .filter(o -> o.purpose() == null || !HEDGE_PURPOSES.contains(o.purpose()))
                 .filter(o -> o.purpose() != OrderPurpose.DUST)
                 .toList();
     }
@@ -1987,7 +2005,9 @@ public class GridStrategy implements Strategy {
 
         int cancelled = 0;
         try {
-            cancelled = ctx.gateway().cancelAll(ctx.execution());
+            // Только заявки сетки: выход из плеча не наш, он защищает непокрытую
+            // позицию и обязан пережить перестановку диапазона.
+            cancelled = ctx.gateway().cancelAllExcept(ctx.execution(), HEDGE_PURPOSES);
         } catch (Exception e) {
             ctx.error("Не удалось одним запросом снять заявки перед ликвидацией", e);
         }
@@ -2634,7 +2654,7 @@ public class GridStrategy implements Strategy {
     private void tryCompleteDownwardReplacement() {
         if (!awaitingDownwardReplacement || positionMismatched || pendingDownwardRange == null
                 || reconciledPosition == null || gridPosition().signum() != 0
-                || !ctx.gateway().openOrders(ctx.botId()).isEmpty()) {
+                || !gridOrders().isEmpty()) {
             return;
         }
 
@@ -3140,6 +3160,13 @@ public class GridStrategy implements Strategy {
     private void cancelOpenBuys() {
         for (BotOrderView order : ctx.gateway().openOrders(ctx.botId())) {
             if (order.purpose() == OrderPurpose.DUST || order.purpose() == OrderPurpose.LIQUIDATION) {
+                continue;
+            }
+            // Заявки эпизода — по НАЗНАЧЕНИЮ, а не по роли. Выход из шортового плеча
+            // это покупка, и роль у неё закрывающая; но роль может и не дойти — у
+            // заявки, поднятой сверкой с биржи, её знать неоткуда. Ошибиться здесь
+            // значит снять единственную защиту непокрытой позиции.
+            if (order.purpose() != null && HEDGE_PURPOSES.contains(order.purpose())) {
                 continue;
             }
             if (roleOf(order) != GridRole.OPEN) {

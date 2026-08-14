@@ -10,7 +10,9 @@ import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.ExchangeClient;
 import ru.larionov.backend.exchange.api.MarketDataApi;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
+import ru.larionov.backend.exchange.api.enums.OrderStatus;
 import ru.larionov.backend.exchange.api.model.FeeInfo;
+import ru.larionov.backend.exchange.api.model.market.Candle;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
 import ru.larionov.backend.exchange.api.model.id.InstrumentId;
 import ru.larionov.backend.exchange.api.model.instrument.TradingConstraints;
@@ -20,6 +22,7 @@ import ru.larionov.backend.exchange.api.model.market.OrderBookLevel;
 import ru.larionov.backend.exchange.api.model.market.Price;
 import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.larionov.backend.execution.BotExecutionContext;
+import ru.larionov.backend.execution.BotOrderView;
 import ru.larionov.backend.execution.ExecutionGateway;
 import ru.larionov.backend.execution.PlaceIntent;
 import ru.larionov.backend.execution.ReconcileResult;
@@ -35,6 +38,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
@@ -160,6 +164,65 @@ class GridStrategyHedgeEpisodeTest {
         assertThat(saved.get().hedgeEpisode())
                 .as("плечо продолжает жить: его ведёт эпизод, а не перестановка сетки")
                 .isNotNull();
+    }
+
+    /**
+     * Заявка выхода из плеча обязана пережить перестановку диапазона.
+     *
+     * Она стоит в стакане по цене безубытка НЕПОКРЫТОЙ позиции и является
+     * единственной её защитой. Перестановка снимала заявки бота скопом, вместе
+     * с ней, — и шорт оставался без выхода ровно в тот момент, когда рынок идёт
+     * против позиции. Заодно проверяем обратное: ждать её исчезновения нельзя,
+     * иначе сетка не переставится никогда — пока эпизод жив, заявка стоит.
+     */
+    @Test
+    @DisplayName("перестановка не снимает заявку выхода из плеча и не ждёт её")
+    void replacementSparesTheHedgeExitOrder() {
+        GridStrategy strategy = startedWithPosition(true, true, true);
+        breakDownAndConfirm(strategy);
+        assertThat(saved.get().hedgeEpisode()).as("плечо открыто").isNotNull();
+
+        // Переворот исполнился: на счёте только нога плеча, а в стакане — её выход.
+        BotOrderView hedgeExit = hedgeExitOrder();
+        when(gateway.openOrders(botId)).thenReturn(List.of(hedgeExit));
+        BigDecimal leg = saved.get().hedgeEpisode().hedgeQuantity().negate();
+        when(gateway.reconcile(any())).thenReturn(reconciled(leg.toPlainString()));
+        strategy.onReconcile(reconciled(leg.toPlainString()));
+
+        long generationBefore = saved.get().generation();
+
+        // Падение продолжается — сетка подтверждает следующий пробой.
+        clockNow.set(clockNow.get().plusSeconds(400));
+        strategy.onPrice(price("19.5"));
+        clockNow.set(clockNow.get().plusSeconds(400));
+        strategy.onPrice(price("19.5"));
+
+        verify(gateway, never()).cancelAll(any());
+        verify(gateway).cancelAllExcept(any(), argThat(keep ->
+                keep.contains(OrderPurpose.RECOVERY) && keep.contains(OrderPurpose.HEDGE)));
+        verify(gateway, never()).cancel(any(), eq(hedgeExit.id()));
+        assertThat(saved.get().hedgeEpisode())
+                .as("эпизод продолжает жить со своей защитой в стакане")
+                .isNotNull();
+        assertThat(saved.get().generation())
+                .as("перестановка дошла до конца, а не зависла в ожидании чужой заявки")
+                .isGreaterThan(generationBefore);
+    }
+
+    /**
+     * Выход из плеча: без уровня сетки и НАМЕРЕННО без явной роли.
+     *
+     * Так выглядит заявка, поднятая сверкой с биржи: роль там взять неоткуда, и
+     * выводится она из стороны — покупка, то есть «открывающая». Защита обязана
+     * держаться на назначении, а не на роли, иначе такая заявка будет снята.
+     */
+    private BotOrderView hedgeExitOrder() {
+        UUID id = UUID.randomUUID();
+        return new BotOrderView(
+                id, id.toString(), "exch-" + id, OrderSide.BUY, OrderStatus.NEW, null,
+                OrderPurpose.RECOVERY, new BigDecimal("30"), BigDecimal.ZERO,
+                new BigDecimal("19.31"), new BigDecimal("19.31"), null, false, null, null,
+                "rub", BigDecimal.ONE, false, null, clockNow.get(), clockNow.get());
     }
 
     // ==============================
@@ -319,6 +382,8 @@ class GridStrategyHedgeEpisodeTest {
         when(marketData.getTradingStatus(instrumentId)).thenReturn(
                 new TradingStatusEvent(instrumentId, true, true, "NORMAL_TRADING", now));
         when(marketData.getLastPrice(instrumentId)).thenReturn(price("21.5"));
+        // Свечи нужны оценке нового диапазона при перестановке вниз.
+        when(marketData.getCandles(any(), any())).thenReturn(candles());
         when(marketData.getOrderBook(eq(instrumentId), org.mockito.ArgumentMatchers.anyInt()))
                 .thenAnswer(i -> new OrderBook(instrumentId, 1,
                         List.of(new OrderBookLevel(new Price(new BigDecimal("20.0"), "rub"), BigDecimal.TEN)),
@@ -357,5 +422,16 @@ class GridStrategyHedgeEpisodeTest {
                 margin ? GridConfig.AdverseBreakoutAction.HEDGE_AND_RECOVER
                         : GridConfig.AdverseBreakoutAction.LIQUIDATE,
                 new BigDecimal("4"), 1, 3, new BigDecimal("0.05"), true, margin);
+    }
+
+    private List<Candle> candles() {
+        return java.util.stream.IntStream.range(0, 6)
+                .mapToObj(i -> new Candle(instrumentId,
+                        new Price(new BigDecimal("20"), "rub"),
+                        new Price(new BigDecimal("20.4"), "rub"),
+                        new Price(new BigDecimal("19.6"), "rub"),
+                        new Price(new BigDecimal("20"), "rub"),
+                        BigDecimal.ONE, now.minusSeconds((6L - i) * 3600), null))
+                .toList();
     }
 }
