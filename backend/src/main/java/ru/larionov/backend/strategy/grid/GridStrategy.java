@@ -31,6 +31,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -65,6 +66,18 @@ public class GridStrategy implements Strategy {
 
     /** Сколько цена вправе не приходить стримом, прежде чем спросить её у биржи. */
     private static final long PRICE_STALE_SECONDS = 120;
+
+    /**
+     * Сколько дальних заявок разрешено снять ради одной ближней.
+     *
+     * Два — потому что снятие и постановка тратят лимит заявок, а отказы на быстром
+     * рынке идут подряд. Не хватило двух — значит потолок мал для этой сетки, и это
+     * разговор про настройку, а не про перестановку заявок.
+     */
+    private static final int MAX_CEILING_RELEASES = 2;
+
+    /** Сколько дальних заявок снято за текущий проход ensureOrders. */
+    private int ceilingReleasesThisPass;
 
     /** Назначения заявок, которыми распоряжается эпизод плеча, а не сетка. */
     private static final Set<OrderPurpose> HEDGE_PURPOSES =
@@ -1335,6 +1348,7 @@ public class GridStrategy implements Strategy {
             return;
         }
         refreshFeesIfNeeded();
+        ceilingReleasesThisPass = 0;
 
         List<BotOrderView> open = ctx.gateway().openOrders(ctx.botId());
         Map<Integer, BotOrderView> openBuys = new HashMap<>();
@@ -1706,25 +1720,99 @@ public class GridStrategy implements Strategy {
             // а не весь проход: остальные уровни ни в чём не виноваты.
             return true;
         }
-        try {
-            // Роль проставляем явно: гейтвей и риск-контроль обязаны знать, набирает
-            // эта заявка позицию или закрывает, а из стороны в шорте это не выводится.
-            ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
-                    side, quantity, price, level, OrderPurpose.GRID, direction.roleOf(side)));
-            clearPlacementFailure(side, level);
-            return true;
-        } catch (RiskRejectedException e) {
-            // Штатный отказ: лимит сработал так, как задумано.
-            ctx.event(BotEventType.RISK_BLOCKED, e.getMessage());
+        while (true) {
+            try {
+                // Роль проставляем явно: гейтвей и риск-контроль обязаны знать, набирает
+                // эта заявка позицию или закрывает, а из стороны в шорте это не выводится.
+                ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
+                        side, quantity, price, level, OrderPurpose.GRID, direction.roleOf(side)));
+                clearPlacementFailure(side, level);
+                return true;
+            } catch (RiskRejectedException e) {
+                if (releaseShortCeilingRoom(e, side, price)) {
+                    continue;
+                }
+                // Штатный отказ: лимит сработал так, как задумано.
+                ctx.event(BotEventType.RISK_BLOCKED, e.getMessage());
+                return false;
+            } catch (Exception e) {
+                return placementFailed(side, level, e);
+            }
+        }
+    }
+
+    /**
+     * Освобождает место под потолком короткой позиции, сняв самую дальнюю заявку.
+     *
+     * Потолок считается по ПРОГНОЗУ: позиция плюс всё уже выставленное плюс новая
+     * заявка. Значит место под ним занимают и висящие заявки — в том числе те, до
+     * которых цена не дойдёт ещё долго. При движении вниз верхние продажи шортовой
+     * сетки превращаются в застрявшую ёмкость: исполнятся нескоро, а место держат,
+     * и уровень у самой цены выставить уже нечем.
+     *
+     * Поэтому дальнюю заявку снимаем, а ближнюю ставим. Потолок при этом НЕ
+     * поднимается ни на копейку — меняется только то, какие заявки его занимают.
+     *
+     * Два условия делают это устойчивым, а не каруселью:
+     * <ul>
+     *   <li>новая заявка обязана быть БЛИЖЕ к цене, чем снимаемая. Иначе бот менял бы
+     *       хорошее на худшее и на следующем проходе возвращал бы обратно;</li>
+     *   <li>не больше {@link #MAX_CEILING_RELEASES} снятий на одну постановку: снятие
+     *       и постановка расходуют суточный и минутный лимит заявок, а на быстром
+     *       рынке отказы идут подряд.</li>
+     * </ul>
+     *
+     * Заявки закрытия не трогаем никогда: они не занимают потолок, а освобождают его,
+     * и снять их — значит оставить открытую позицию без встречной.
+     */
+    private boolean releaseShortCeilingRoom(RiskRejectedException rejection, OrderSide side,
+                                            BigDecimal price) {
+        if (!rejection.isShortCeiling() || lastPrice == null || price == null) {
             return false;
+        }
+        if (ceilingReleasesThisPass >= MAX_CEILING_RELEASES) {
+            return false;
+        }
+        if (direction.roleOf(side) != GridRole.OPEN) {
+            return false;
+        }
+
+        BigDecimal wanted = price.subtract(lastPrice).abs();
+        BotOrderView farthest = gridOrders().stream()
+                .filter(o -> roleOf(o) == GridRole.OPEN)
+                .filter(o -> o.limitPrice() != null)
+                .max(Comparator.comparing(o -> o.limitPrice().subtract(lastPrice).abs()))
+                .orElse(null);
+        if (farthest == null) {
+            return false;
+        }
+        if (wanted.compareTo(farthest.limitPrice().subtract(lastPrice).abs()) >= 0) {
+            return false;
+        }
+
+        try {
+            ctx.gateway().cancel(ctx.execution(), farthest.id());
         } catch (Exception e) {
-            notePlacementFailure(side, level, e);
+            ctx.error("Не удалось снять дальнюю заявку ради места под потолком шорта", e);
+            return false;
+        }
+        ceilingReleasesThisPass++;
+        ctx.event(BotEventType.HOUSEKEEPING,
+                ("Потолок короткой позиции занят: снял дальнюю заявку по %s, чтобы "
+                        + "выставить ближнюю по %s. Сам потолок не изменился — место "
+                        + "переехало туда, где цена сейчас.")
+                        .formatted(farthest.limitPrice().toPlainString(), price.toPlainString()));
+        return true;
+    }
+
+    /** Не риск-отказ, а сбой постановки: пауза по уровню и переспрос статуса торгов. */
+    private boolean placementFailed(OrderSide side, int level, Exception e) {
+        notePlacementFailure(side, level, e);
             // Отказ бывает не только сетевым: так же выглядит закрытие сессии,
             // о котором стрим не сообщил. Спрашиваем биржу, чтобы не повторять
             // ту же заявку каждую минуту до утра.
             refreshTradingStatusAfterRejection();
-            return false;
-        }
+        return false;
     }
 
     /**

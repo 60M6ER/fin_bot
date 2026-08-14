@@ -157,7 +157,8 @@ public class RiskGuard {
         if (shortSize.compareTo(limit) > 0) {
             throw new RiskRejectedException(
                     "Короткая позиция вышла бы за потолок: %s при пределе %s."
-                            .formatted(plain(shortSize), plain(limit)));
+                            .formatted(plain(shortSize), plain(limit)),
+                    RiskRejectedException.Reason.SHORT_QUANTITY_CEILING);
         }
     }
 
@@ -173,7 +174,8 @@ public class RiskGuard {
         if (notional.compareTo(limit) > 0) {
             throw new RiskRejectedException(
                     "Короткая позиция вышла бы за денежный потолок: %s при пределе %s."
-                            .formatted(plain(notional), plain(limit)));
+                            .formatted(plain(notional), plain(limit)),
+                    RiskRejectedException.Reason.SHORT_NOTIONAL_CEILING);
         }
     }
 
