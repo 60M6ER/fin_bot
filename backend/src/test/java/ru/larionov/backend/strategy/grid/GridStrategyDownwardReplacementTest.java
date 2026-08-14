@@ -251,6 +251,36 @@ class GridStrategyDownwardReplacementTest {
         assertThat(saved.get().realizedDownwardLoss()).isEqualByComparingTo("10");
     }
 
+    /**
+     * Пауза между перестановками откладывает подтверждение — и обязана сказать об этом.
+     *
+     * Раньше эта ветка молчала: покупки сняты, цена под границей, в журнале ничего.
+     * Снаружи бот выглядел так, будто пробоя не заметил вовсе, и отличить «жду паузу»
+     * от «ослеп» было нечем.
+     */
+    @Test
+    void pauseBetweenReplacementsIsReportedInsteadOfSilence() {
+        GridRange active = new GridRange(new BigDecimal("92"), new BigDecimal("108"), 4,
+                GridRange.Origin.ATR_REPLACED_DOWN, now);
+        // Перестановка была минуту назад при паузе в 1200 с — подтверждение начаться не может.
+        saved.set(new GridStrategyState(active, 2, false, now.minusSeconds(60),
+                false, null, 1, BigDecimal.ZERO, null));
+        GridStrategy strategy = new GridStrategy(config("50", 2));
+        strategy.onStart(ctx, reconciled(BigDecimal.ZERO));
+        strategy.onReconcile(reconciled(BigDecimal.ZERO));
+        clearInvocations(ctx);
+
+        confirmLowerBreakout(strategy);
+
+        verify(ctx).event(eq(BotEventType.HOUSEKEEPING),
+                contains("идёт пауза между перестановками"));
+        verify(ctx, never()).event(eq(BotEventType.HOUSEKEEPING),
+                contains("начато подтверждение"));
+        assertThat(strategy.snapshot().orElseThrow().buyingStopped())
+                .as("покупки при этом всё равно сняты — молчать об этом и было нельзя")
+                .isTrue();
+    }
+
     @Test
     void doesNotTouchOrdersWhenLiquidationCheckpointCannotBeSaved() {
         GridStrategy strategy = start(config("50", 2));

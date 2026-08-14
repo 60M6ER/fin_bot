@@ -114,8 +114,38 @@ public record GridConfig(
          * Требует маржи: перевернуться в шорт без неё нельзя, и у немаржинального
          * бота настройка не действует вовсе — там остаётся прежнее поведение.
          */
-        Boolean flipDirectionOnAdverse
+        Boolean flipDirectionOnAdverse,
+        /*
+         * Как эпизод плеча выходит: по расчётному безубытку или с храповиком,
+         * который тянет цель за ценой. Умолчание — прежний безубыток.
+         */
+        HedgeExitMode hedgeExitMode,
+        /*
+         * Отступ храповика: доля цены, на которой подтянутая цель следует за ней.
+         * Он же — величина отката, которую эпизод согласен отдать, прежде чем закрыться.
+         *
+         * Слишком тесный отступ выбьет эпизод на первом же шуме, слишком широкий
+         * отдаст обратно всё движение. Действует только в режиме TARGET_WITH_TRAILING.
+         */
+        BigDecimal hedgeTrailingOffsetPct
 ) {
+
+    /**
+     * Чем заканчивается эпизод плеча при движении в нашу сторону.
+     *
+     * Разница не в арифметике, а в том, чем бот платит за шанс: BREAKEVEN_TARGET
+     * держит заявку выхода в стакане и потому забирает безубыток даже между тиками,
+     * но дальше цели не идёт. TARGET_WITH_TRAILING заявку не держит — иначе она
+     * исполнилась бы ровно в тот момент, когда храповику полагалось начать работу, —
+     * и закрывается по рынку на откате. Тем самым он меняет гарантию исполнения
+     * на возможность взять больше безубытка.
+     */
+    public enum HedgeExitMode {
+        /** Выход по расчётной цене безубытка. Прежнее и единственное поведение. */
+        BREAKEVEN_TARGET,
+        /** Цель едет за ценой в выгодную сторону и никогда обратно. */
+        TARGET_WITH_TRAILING
+    }
 
     public enum AdverseBreakoutAction {
         /** Закрыть позицию и зафиксировать убыток. Прежнее и единственное поведение. */
@@ -216,7 +246,8 @@ public record GridConfig(
                 atrPeriods, atrMultiplier, minHalfWidthPct, maxHalfWidthPct, onUpperBreakout,
                 breakoutConfirmSeconds, breakoutMarginPct, replaceCooldownSeconds,
                 maxDownwardReplacements, maxRealizedLoss, budget, sizingMode, profitPolicy,
-                direction, marginEnabled, null, null, null, null, null, null, null, null);
+                direction, marginEnabled, null, null, null, null, null, null, null, null,
+                null, null);
     }
 
     /** Конфигурация без восстановительного плеча: заведённая до его появления. */
@@ -237,7 +268,38 @@ public record GridConfig(
                 breakoutConfirmSeconds, breakoutMarginPct, replaceCooldownSeconds,
                 maxDownwardReplacements, maxRealizedLoss, budget, sizingMode, profitPolicy,
                 direction, marginEnabled, expectedCycleDays,
-                null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Конфигурация без трейлинга: заведённая до его появления.
+     *
+     * Умолчание режима — BREAKEVEN_TARGET, поэтому такая конфигурация означает ровно
+     * то же, что означала: выход по расчётному безубытку заявкой в стакане.
+     */
+    public GridConfig(BigDecimal lowerPrice, BigDecimal upperPrice, Integer levels,
+                      BigDecimal quantityPerOrder, Integer maxActiveOrders,
+                      RangeExitAction onRangeExit, BigDecimal minStepToCommissionRatio,
+                      Integer feeRefreshSeconds, Boolean enabled, Boolean autoRange,
+                      CandleInterval atrInterval, Integer atrPeriods, BigDecimal atrMultiplier,
+                      BigDecimal minHalfWidthPct, BigDecimal maxHalfWidthPct,
+                      UpperBreakoutAction onUpperBreakout, Integer breakoutConfirmSeconds,
+                      BigDecimal breakoutMarginPct, Integer replaceCooldownSeconds,
+                      Integer maxDownwardReplacements, BigDecimal maxRealizedLoss,
+                      BigDecimal budget, SizingMode sizingMode, ProfitPolicy profitPolicy,
+                      GridDirection direction, Boolean marginEnabled, Integer expectedCycleDays,
+                      AdverseBreakoutAction onAdverseBreakout, BigDecimal hedgeMultiplier,
+                      Integer maxHedgeEpisodes, Integer maxHedgeHoldDays,
+                      BigDecimal hedgeStopLossPct, Boolean hedgeAndGridConcurrent,
+                      Boolean flipDirectionOnAdverse) {
+        this(lowerPrice, upperPrice, levels, quantityPerOrder, maxActiveOrders, onRangeExit,
+                minStepToCommissionRatio, feeRefreshSeconds, enabled, autoRange, atrInterval,
+                atrPeriods, atrMultiplier, minHalfWidthPct, maxHalfWidthPct, onUpperBreakout,
+                breakoutConfirmSeconds, breakoutMarginPct, replaceCooldownSeconds,
+                maxDownwardReplacements, maxRealizedLoss, budget, sizingMode, profitPolicy,
+                direction, marginEnabled, expectedCycleDays, onAdverseBreakout, hedgeMultiplier,
+                maxHedgeEpisodes, maxHedgeHoldDays, hedgeStopLossPct, hedgeAndGridConcurrent,
+                flipDirectionOnAdverse, null, null);
     }
 
     public GridConfig {
@@ -370,6 +432,16 @@ public record GridConfig(
         if (hedgeAndGridConcurrent == null) {
             hedgeAndGridConcurrent = true;
         }
+        // Умолчание — прежний выход по безубытку: бот, заведённый до трейлинга,
+        // обязан вести эпизод ровно так же, как вёл.
+        if (hedgeExitMode == null) {
+            hedgeExitMode = HedgeExitMode.BREAKEVEN_TARGET;
+        }
+        // Полпроцента отката: достаточно, чтобы обычный шум не выбивал эпизод,
+        // и достаточно мало, чтобы разворот не съел набранное.
+        if (hedgeTrailingOffsetPct == null || hedgeTrailingOffsetPct.signum() <= 0) {
+            hedgeTrailingOffsetPct = new BigDecimal("0.005");
+        }
         // По умолчанию переворачиваем: маржинальную сетку заводят именно ради того,
         // чтобы торговать движение, а не стоять к нему спиной. У немаржинального
         // бота настройка всё равно не сработает — перевернуться ему некуда.
@@ -419,7 +491,8 @@ public record GridConfig(
                 replaceCooldownSeconds, maxDownwardReplacements, maxRealizedLoss,
                 newBudget, sizingMode, profitPolicy, direction, marginEnabled, expectedCycleDays,
                 onAdverseBreakout, hedgeMultiplier, maxHedgeEpisodes, maxHedgeHoldDays,
-                hedgeStopLossPct, hedgeAndGridConcurrent, flipDirectionOnAdverse);
+                hedgeStopLossPct, hedgeAndGridConcurrent, flipDirectionOnAdverse,
+                hedgeExitMode, hedgeTrailingOffsetPct);
     }
 
     /**

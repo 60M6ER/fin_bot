@@ -29,6 +29,10 @@
         </q-item-section>
         <q-item-section side>
           <q-item-label caption>лот {{ scope.opt.lot }}</q-item-label>
+          <!-- Отметка справочная: бот всё равно переспросит право на шорт у биржи. -->
+          <q-item-label v-if="scope.opt.shortEnabled === false" caption class="text-negative">
+            без шорта
+          </q-item-label>
         </q-item-section>
       </q-item>
     </template>
@@ -150,10 +154,14 @@ async function resolve (uid) {
     console.debug(getErrorMessage(e))
     // Справочник пуст или инструмент делистнут. Показываем хотя бы uid: иначе поле
     // выглядит пустым, и пользователь решит, что настройка потерялась.
+    // shortEnabled намеренно null, а не false: «не знаем» и «брокер запретил» —
+    // разные вещи, и вторую нельзя показывать, не спросив.
     selected.value = {
       uid, ticker: uid, name: '(нет в справочнике)',
-      kind: '', venue: '', classCode: '', currency: '', lot: 1
+      kind: '', venue: '', classCode: '', currency: '', lot: 1,
+      shortEnabled: null, shortInitialMarginRate: null
     }
+    emit('instrument', selected.value)
   }
 }
 

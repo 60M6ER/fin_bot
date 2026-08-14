@@ -98,6 +98,10 @@ public class GridStrategy implements Strategy {
     private Instant upperBreakoutCandidateAt;
     private Instant lowerBreakoutCandidateAt;
     private boolean lowerBreakoutPaused;
+    /** О паузе между перестановками сообщаем один раз, а не каждым тиком. */
+    private boolean lowerBreakoutPauseReported;
+    /** То же для выхода за границу без достижения порога пробоя. */
+    private boolean lowerBreakoutApproachReported;
     private boolean awaitingUpperReplacement;
     private boolean awaitingDownwardReplacement;
     private GridRange pendingDownwardRange;
@@ -224,6 +228,9 @@ public class GridStrategy implements Strategy {
 
     /** То же для позиции, не покрытой ни одним уровнем: сообщаем раз за эпизод. */
     private boolean uncoveredPositionReported;
+    /** Когда пришла последняя сверка и когда случилось последнее исполнение. */
+    private Instant reconciledAt;
+    private Instant lastFillAt;
 
     /**
      * Бюджет изменился — выставленные покупки нужно привести к новому размеру.
@@ -649,14 +656,19 @@ public class GridStrategy implements Strategy {
         if (order.status() != OrderStatus.FILLED) {
             return;
         }
+        // Позиция на бирже только что изменилась, а последняя сверка её ещё не видела.
+        lastFillAt = ctx.clock().instant();
 
         if (order.side() == direction.openSide()) {
             placeCounterClose(order);
         } else {
-            // Цикл закрыт — прибыль зафиксирована. Уровень ниже освободился под новую покупку.
+            // Цикл закрыт — прибыль зафиксирована, и освободился ТОТ ЖЕ уровень:
+            // встречная заявка носит номер открытого уровня, а не того, по чьей цене
+            // выставлена. Прежний текст вычитал единицу и обещал «уровень −1», которого
+            // в лесенке нет вовсе.
             ctx.event(BotEventType.HOUSEKEEPING,
-                    "Цикл закрыт на уровне %d, уровень %d свободен"
-                            .formatted(order.gridLevel(), order.gridLevel() - 1));
+                    "Цикл закрыт на уровне %d — уровень снова свободен"
+                            .formatted(order.gridLevel()));
             if (awaitingUpperReplacement) {
                 tryCompleteUpperReplacement();
             } else {
@@ -1195,6 +1207,7 @@ public class GridStrategy implements Strategy {
 
         positionMismatched = mismatched;
         reconciledPosition = reconciled.position();
+        reconciledAt = ctx.clock().instant();
 
         if (!positionMismatched && awaitingUpperReplacement) {
             tryCompleteUpperReplacement();
@@ -1412,6 +1425,19 @@ public class GridStrategy implements Strategy {
      */
     private void reportUncoveredPosition(Map<Integer, BigDecimal> heldByLevel) {
         if (reconciledPosition == null || positionMismatched || lastPrice == null) {
+            return;
+        }
+        /*
+         * Сравнивать позицию биржи, снятую ДО сделки, с уровнями, пересчитанными ПОСЛЕ
+         * неё, нельзя: получится ровно размер только что исполненной заявки, и тревога
+         * поднимется на каждом закрытом цикле. Именно так это и выглядело в боевом
+         * журнале 14.08.2026 — «позиция 140, за 20 не отвечает ни один уровень» после
+         * каждой продажи, и следующая же сверка показывала ноль расхождения.
+         *
+         * Поэтому ждём сверку не старше последнего исполнения. Расхождение, которое
+         * этого дождалось, — настоящее.
+         */
+        if (reconciledAt == null || (lastFillAt != null && reconciledAt.isBefore(lastFillAt))) {
             return;
         }
         BigDecimal uncovered = uncoveredPosition(heldByLevel);
@@ -1705,8 +1731,10 @@ public class GridStrategy implements Strategy {
         Instant now = ctx.clock().instant();
         if (!direction.beyondAdverse(lastPrice, adverseBound)) {
             lowerBreakoutCandidateAt = null;
+            lowerBreakoutApproachReported = false;
             if (lowerBreakoutPaused) {
                 lowerBreakoutPaused = false;
+                lowerBreakoutPauseReported = false;
                 buyingStopped = shouldStopBuying();
                 updateSnapshot();
             }
@@ -1721,6 +1749,21 @@ public class GridStrategy implements Strategy {
                 .max(ladder.effectiveStep().divide(BigDecimal.valueOf(2)));
         BigDecimal threshold = direction.adverseThreshold(adverseBound, margin);
         if (!direction.beyondAdverse(lastPrice, threshold)) {
+            /*
+             * Полоса между границей и порогом — самое непонятное снаружи состояние.
+             * Цена уже вышла из диапазона: покупать не на чем (уровня за границей нет),
+             * продавать нечего (позиция закрыта встречными заявками), а пробоем это ещё
+             * не считается — на то и запас. Раньше бот проходил её молча, и выглядело
+             * это как «цена под сеткой, а он её не видит».
+             */
+            if (!lowerBreakoutApproachReported) {
+                lowerBreakoutApproachReported = true;
+                ctx.event(BotEventType.HOUSEKEEPING,
+                        ("GRID: цена %s вышла за границу %s, но запаса до порога пробоя %s "
+                                + "ещё не хватает. Ниже границы покупок нет — жду порога.")
+                                .formatted(lastPrice.toPlainString(), adverseBound.toPlainString(),
+                                        threshold.toPlainString()));
+            }
             return false;
         }
 
@@ -1729,10 +1772,24 @@ public class GridStrategy implements Strategy {
         cancelOpenBuys();
         updateSnapshot();
 
+        // Пауза между перестановками откладывает не только замену диапазона, но и сам
+        // отсчёт подтверждения. Раньше эта ветка молчала, и снаружи это выглядело так,
+        // будто пробой не замечен вовсе: покупки сняты, цена под границей, в журнале
+        // пусто. Сообщение здесь — единственный способ отличить «жду паузу» от «не вижу».
         if (lastReplacementAt != null
                 && now.isBefore(lastReplacementAt.plusSeconds(cfg.replaceCooldownSeconds()))) {
+            if (!lowerBreakoutPauseReported) {
+                lowerBreakoutPauseReported = true;
+                Instant readyAt = lastReplacementAt.plusSeconds(cfg.replaceCooldownSeconds());
+                ctx.event(BotEventType.HOUSEKEEPING,
+                        ("GRID: цена %s ниже порога пробоя %s, покупки сняты. Подтверждение "
+                                + "не начато: идёт пауза между перестановками, осталось %d с.")
+                                .formatted(lastPrice.toPlainString(), threshold.toPlainString(),
+                                        Duration.between(now, readyAt).getSeconds()));
+            }
             return true;
         }
+        lowerBreakoutPauseReported = false;
         if (lowerBreakoutCandidateAt == null) {
             lowerBreakoutCandidateAt = now;
             ctx.event(BotEventType.HOUSEKEEPING,
@@ -2091,9 +2148,12 @@ public class GridStrategy implements Strategy {
     /**
      * Ведёт открытый эпизод: цель, стоп, срок.
      *
-     * Порядок проверок намеренный. Сначала цель — если её достигли, закрываемся
-     * в плюс и остальное неважно. Потом стоп: он означает, что расчёт не сбылся,
-     * и признать это лучше раньше. Срок последним: он крайний рубеж, а не план.
+     * Порядок проверок намеренный. Сначала храповик — цель обязана быть подтянута
+     * ДО проверки достижения, иначе движение, случившееся между тиками, закрыло бы
+     * эпизод по старой цели, ради ухода от которой трейлинг и заведён. Потом сама
+     * цель: если её достигли, закрываемся в плюс и остальное неважно. Потом стоп:
+     * он означает, что расчёт не сбылся, и признать это лучше раньше. Срок
+     * последним: он крайний рубеж, а не план.
      */
     private void manageHedgeLeg() {
         if (hedgeEpisode == null || halted || positionMismatched || lastPrice == null) {
@@ -2102,6 +2162,8 @@ public class GridStrategy implements Strategy {
         if (!limitOrdersAvailable) {
             return;
         }
+
+        trailHedgeTarget();
 
         if (hedgeEpisode.targetReached(lastPrice)) {
             closeHedge("цель достигнута", lastPrice);
@@ -2115,7 +2177,64 @@ public class GridStrategy implements Strategy {
             closeHedge("истёк срок удержания", lastPrice);
             return;
         }
+        // В режиме трейлинга заявки выхода в стакане нет и быть не может: она стоит
+        // ровно на цели безубытка и исполнилась бы в ту секунду, когда цена дошла
+        // туда, откуда храповику полагалось начать работу. Ценой этому — выход по
+        // рынку на откате вместо гарантированного исполнения по расчётной цене.
+        if (cfg.hedgeExitMode() == GridConfig.HedgeExitMode.TARGET_WITH_TRAILING) {
+            // Режим могли переключить при живом эпизоде — тогда прежняя заявка ещё
+            // висит в стакане и сработает раньше храповика. Снимаем её.
+            cancelHedgeExitOrders();
+            return;
+        }
         ensureHedgeExitOrder();
+    }
+
+    /**
+     * Подтягивает цель эпизода за ценой, если режим этого требует.
+     *
+     * Сохраняется каждый сдвиг: непокрытая позиция переживает рестарт, и цель, по
+     * которой её закрывать, обязана пережить его вместе с ней. Порог сдвига — шаг
+     * цены, иначе запись в базу случалась бы на каждом тике идущего движения.
+     */
+    private void trailHedgeTarget() {
+        if (cfg.hedgeExitMode() != GridConfig.HedgeExitMode.TARGET_WITH_TRAILING) {
+            return;
+        }
+        HedgeEpisode trailed = hedgeEpisode.trailedTo(
+                lastPrice, cfg.hedgeTrailingOffsetPct(), ctx.constraints().minPriceIncrement());
+        if (trailed == hedgeEpisode) {
+            return;
+        }
+        boolean armed = !hedgeEpisode.trailing();
+        hedgeEpisode = trailed;
+        persistState();
+        updateSnapshot();
+        // Событие только на взведении: дальше храповик щёлкает на каждом новом
+        // экстремуме, и журнал состоял бы из этого целиком. Итоговая цель видна
+        // в сообщении о закрытии эпизода.
+        if (armed) {
+            ctx.event(BotEventType.HOUSEKEEPING,
+                    ("Цена дошла до безубытка %s, но эпизод не закрываю: цель пошла за ней "
+                            + "и сейчас стоит на %s. Дальше выходим по откату к ней, а не "
+                            + "по расчётной цене — хуже безубытка цель не встанет.")
+                            .formatted(hedgeEpisode.targetPrice().toPlainString(),
+                                    hedgeEpisode.effectiveTarget().toPlainString()));
+        }
+    }
+
+    /** Снимает заявку выхода из плеча: в трейлинге ей в стакане не место. */
+    private void cancelHedgeExitOrders() {
+        for (BotOrderView order : ctx.gateway().openOrders(ctx.botId())) {
+            if (order.purpose() != OrderPurpose.RECOVERY) {
+                continue;
+            }
+            try {
+                ctx.gateway().cancel(ctx.execution(), order.id());
+            } catch (Exception e) {
+                ctx.error("Не удалось снять заявку выхода из плеча перед трейлингом", e);
+            }
+        }
     }
 
     /**
@@ -2185,9 +2304,14 @@ public class GridStrategy implements Strategy {
             ctx.error("Плечо закрыто, но строку эпизода закрыть не удалось", e);
         }
         ctx.event(BotEventType.RANGE_EXIT,
-                ("Плечо закрывается по %s: %s. Убыток входа был %s — окупился он или нет, "
+                ("Плечо закрывается по %s: %s.%s Убыток входа был %s — окупился он или нет, "
                         + "видно по результату эпизода в таблице поколений.")
-                        .formatted(exitPrice.toPlainString(), reason, plain(episode.lossAtEntry())));
+                        .formatted(exitPrice.toPlainString(), reason,
+                                episode.trailing() ? " Храповик довёл цель с безубытка %s до %s."
+                                        .formatted(episode.targetPrice().toPlainString(),
+                                                episode.trailingTarget().toPlainString())
+                                        : "",
+                                plain(episode.lossAtEntry())));
     }
 
     /** Поддерживает одну агрессивную SELL на фактический остаток позиции. */
@@ -2440,6 +2564,8 @@ public class GridStrategy implements Strategy {
         pendingDownwardRange = null;
         downwardLossBaseline = null;
         lowerBreakoutPaused = false;
+        lowerBreakoutPauseReported = false;
+        lowerBreakoutApproachReported = false;
         buyingStopped = shouldStopBuying();
         halted = false;
         try {

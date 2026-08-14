@@ -191,6 +191,41 @@ class GridStrategyLevelReuseTest {
                 contains("не покрыта уровнями сетки"));
     }
 
+    /**
+     * Инцидент 14.08.2026: тревога о непокрытой позиции на каждом закрытом цикле.
+     *
+     * Позиция биржи берётся из последней СВЕРКИ, уровни — из журнала. Продажа исполнилась,
+     * журнал уже без неё, а сверка ещё со старой позицией — разница ровно в размер только
+     * что проданного лота. Боевой журнал состоял из этих ложных тревог: «позиция 140, за 20
+     * не отвечает ни один уровень», и следующая сверка неизменно показывала ноль.
+     */
+    @Test
+    void closedCycleDoesNotRaiseUncoveredAlarmBeforeTheNextReconcile() {
+        GridStrategy strategy = start();
+        // Уровень 0 куплен и закрыт встречной продажей: за позицию отвечает уровень.
+        strategy.onReconcile(reconciled(new BigDecimal("2")));
+        BotOrderView sell = view(OrderSide.SELL, 0, new BigDecimal("50.10"),
+                BigDecimal.valueOf(2), BigDecimal.valueOf(2), OrderStatus.FILLED);
+        journal.add(sell);
+
+        // Продажа исполнилась: журнал уровней уже пуст, а сверка — ещё нет.
+        currentTime.set(now.plusSeconds(1));
+        strategy.onOrderUpdate(sell);
+        strategy.onPrice(price("50.25"));
+
+        verify(ctx, never()).event(eq(BotEventType.RISK_BLOCKED),
+                contains("не покрыта уровнями сетки"));
+
+        // Пришла свежая сверка, и позиция действительно ни за одним уровнем не числится —
+        // вот теперь это настоящее расхождение, и молчать о нём нельзя.
+        currentTime.set(now.plusSeconds(2));
+        strategy.onReconcile(reconciled(new BigDecimal("2")));
+        strategy.onPrice(price("50.26"));
+
+        verify(ctx, times(1)).event(eq(BotEventType.RISK_BLOCKED),
+                contains("не покрыта уровнями сетки"));
+    }
+
     private GridStrategy start() {
         GridStrategy strategy = new GridStrategy(new GridConfig(
                 new BigDecimal("50.00"), new BigDecimal("50.50"),

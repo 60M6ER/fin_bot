@@ -49,8 +49,30 @@
           :disable="disable"
           label="Инструмент"
           hint="Начните вводить тикер или название"
+          @instrument="instrument = $event"
         />
         <field-hint :text="hints.instrumentUid" />
+        <!--
+          Справка по бумаге, а не настройка: на торговлю ничего из этого не влияет —
+          право на шорт и ставку риска бот всё равно спрашивает у биржи на старте.
+          Смысл в том, чтобы отказ «брокер не шортит эту бумагу» встречался в форме,
+          где сетку ещё можно перенастроить, а не в журнале уже запущенного бота.
+        -->
+        <div v-if="instrument" class="text-caption text-grey q-mt-xs">
+          Лот {{ instrument.lot }}
+          <template v-if="instrument.minPriceIncrement != null">
+            · шаг цены {{ formatDecimal(instrument.minPriceIncrement, 9) }}
+          </template>
+          · шорт
+          <span :class="shortAvailability.color">{{ shortAvailability.label }}</span>
+          <template v-if="instrument.shortInitialMarginRate != null">
+            · ставка риска dshort {{ formatDecimal(instrument.shortInitialMarginRate * 100, 2) }}%
+            — столько от стоимости короткой позиции брокер держит обеспечением
+          </template>
+        </div>
+        <div v-if="shortRefused" class="text-caption text-negative q-mt-xs">
+          Шортовая сетка по этой бумаге не запустится: брокер не даёт по ней короткую позицию.
+        </div>
       </div>
       <div class="col-12 col-md-4 flex items-center">
         <q-toggle v-model="model.autoRange" label="Границы по волатильности" :disable="disable">
@@ -363,6 +385,22 @@
             <q-toggle v-model="model.hedgeAndGridConcurrent"
                       label="Сетка работает одновременно с плечом" :disable="disable" />
           </div>
+          <div class="col-6 col-md-3">
+            <q-select
+              v-model="model.hedgeExitMode"
+              :options="hedgeExitModeOptions"
+              option-value="value" option-label="label"
+              emit-value map-options
+              label="Выход из плеча"
+              outlined dense :disable="disable"
+            />
+            <field-hint :text="hints.hedgeExitMode" />
+          </div>
+          <div v-if="model.hedgeExitMode === 'TARGET_WITH_TRAILING'" class="col-6 col-md-3">
+            <q-input v-model.number="hedgeTrailingOffsetPercent" label="Отступ храповика"
+                     type="number" min="0.1" step="0.1" suffix="%" outlined dense :disable="disable" />
+            <field-hint :text="hints.hedgeTrailingOffsetPct" />
+          </div>
         </template>
       </div>
     </template>
@@ -664,6 +702,17 @@ const hints = {
     'Насколько цена вправе уйти против плеча, прежде чем эпизод закроется с убытком. '
     + 'Пусто — стоп не задан, и эпизод держится до цели или до срока.',
 
+  hedgeExitMode:
+    'Чем заканчивается эпизод при движении в нашу сторону. «По безубытку» — прежнее '
+    + 'поведение: заявка стоит в стакане и заберёт расчётную цену даже между тиками, '
+    + 'но дальше неё эпизод не пойдёт. «С храповиком» — цель едет за ценой и никогда '
+    + 'обратно, зато заявки в стакане нет: выход происходит по рынку на откате.',
+
+  hedgeTrailingOffsetPct:
+    'На сколько подтянутая цель отстаёт от цены — он же размер отката, который эпизод '
+    + 'согласен отдать. Тесный отступ выбьет эпизод на первом же шуме, широкий отдаст '
+    + 'обратно всё движение. Хуже безубытка цель не встанет ни при каком отступе.',
+
   maxCapital:
     'Потолок денег, одновременно занятых заявками и позицией. Проверяется перед каждой '
     + 'заявкой и считается по журналу, поэтому переживает перезапуск. Пусто — без '
@@ -736,6 +785,11 @@ const adverseBreakoutOptions = [
   { value: 'HEDGE_AND_RECOVER', label: 'Перевернуть с множителем и отбивать плечом' }
 ]
 
+const hedgeExitModeOptions = [
+  { value: 'BREAKEVEN_TARGET', label: 'По расчётному безубытку' },
+  { value: 'TARGET_WITH_TRAILING', label: 'С храповиком — цель идёт за ценой' }
+]
+
 const directionOptions = [
   { value: 'LONG', label: 'Лонг — покупаем ниже, продаём выше' },
   { value: 'SHORT', label: 'Шорт — продаём выше, откупаем ниже' }
@@ -784,6 +838,9 @@ const defaults = {
   maxHedgeHoldDays: 3,
   hedgeStopLossPct: null,
   hedgeAndGridConcurrent: true,
+  // Прежний выход по безубытку: трейлинг включают осознанно, он меняет способ выхода.
+  hedgeExitMode: 'BREAKEVEN_TARGET',
+  hedgeTrailingOffsetPct: 0.005,
   dryRun: false,
   enabled: true
 }
@@ -892,6 +949,25 @@ watch(() => model.autoRange, (enabled, previous) => {
 const hedgeStopLossPercent = computed({
   get: () => model.hedgeStopLossPct == null ? null : Number(model.hedgeStopLossPct) * 100,
   set: v => { model.hedgeStopLossPct = (v == null || v === '') ? null : Number(v) / 100 }
+})
+
+/** Выбранная бумага целиком: нужна только карточке-справке под селектом. */
+const instrument = ref(null)
+
+const shortAvailability = computed(() => {
+  const enabled = instrument.value?.shortEnabled
+  if (enabled == null) return { label: 'неизвестно', color: 'text-grey' }
+  return enabled
+    ? { label: 'разрешён', color: 'text-positive' }
+    : { label: 'запрещён', color: 'text-negative' }
+})
+
+const shortRefused = computed(() =>
+  model.direction === 'SHORT' && instrument.value?.shortEnabled === false)
+
+const hedgeTrailingOffsetPercent = computed({
+  get: () => model.hedgeTrailingOffsetPct == null ? null : Number(model.hedgeTrailingOffsetPct) * 100,
+  set: v => { model.hedgeTrailingOffsetPct = (v == null || v === '') ? null : Number(v) / 100 }
 })
 
 watch(() => model.marginEnabled, enabled => {

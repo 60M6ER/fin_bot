@@ -78,7 +78,7 @@ public class InstrumentCatalogService {
                 : repo.findByExchangeAndInstrumentUid(exchange, uid);
 
         if (row.isPresent()) {
-            return toDto(row.get());
+            return withLiveShortMargin(exchange, toDto(row.get()));
         }
 
         // Справочник может быть ещё не синхронизирован: свежая база, подключение только
@@ -102,6 +102,34 @@ public class InstrumentCatalogService {
                     + "вызывающему стоит передавать exchange", uid, found.size());
         }
         return found.stream().findFirst();
+    }
+
+    /**
+     * Дописывает к справочной карточке маржинальные ставки брокера.
+     *
+     * Ставки риска в нашей таблице не лежат: брокер пересматривает их чаще, чем идёт
+     * синхронизация справочника, и сохранённая вчерашняя ставка вводила бы в заблуждение
+     * убедительнее, чем прочерк. Поэтому спрашиваем живьём и только для одной карточки —
+     * в списке автокомплита такой запрос стоил бы двадцати походов к брокеру на букву.
+     *
+     * Сбой брокера здесь ничего не ломает: карточка отдаётся без ставки, а short_enabled
+     * в ней и так свой, из справочника.
+     */
+    private InstrumentDto withLiveShortMargin(ExchangeType exchange, InstrumentDto dto) {
+        if (exchange == null) {
+            return dto;
+        }
+        return runtimeService.findRunningByExchange(exchange).map(handler -> {
+            try {
+                InstrumentDetails details = handler.client().instruments()
+                        .get(new InstrumentId(dto.uid(), dto.figi()));
+                return dto.withShortMargin(details.shortEnabled(), details.dshort());
+            } catch (Exception e) {
+                log.debug("Ставку риска для {} по {} узнать не удалось: {}",
+                        dto.uid(), exchange, e.toString());
+                return dto;
+            }
+        }).orElse(dto);
     }
 
     private Optional<InstrumentDto> tryResolveLive(ExchangeType exchange, String uid) {
@@ -148,7 +176,10 @@ public class InstrumentCatalogService {
                 e.getMinPriceIncrement(),
                 e.isApiTradeAvailable(),
                 e.isActive(),
-                e.getExpiresAt()
+                e.getExpiresAt(),
+                e.isShortEnabled(),
+                // Ставки риска в справочнике нет: она приходит только живым запросом.
+                null
         );
     }
 
@@ -169,7 +200,9 @@ public class InstrumentCatalogService {
                 d.minPriceIncrement(),
                 d.apiTradeAvailable(),
                 true,
-                null
+                null,
+                d.shortEnabled(),
+                d.dshort()
         );
     }
 }
