@@ -48,18 +48,32 @@ public record GridStrategyState(
          * рекурсивным. Каждый следующий эпизод умножает экспозицию, и два подряд
          * дают девятикратную от исходной — так проигрывают счёт за конечное число шагов.
          */
-        int hedgeEpisodesUsed
+        int hedgeEpisodesUsed,
+
+        /**
+         * Направление ДЕЙСТВУЮЩЕГО поколения.
+         *
+         * Переживать рестарт обязано с тех пор, как направление перестало быть
+         * настройкой и стало решением бота: при неблагоприятном пробое сетка
+         * разворачивается. Возьми бот направление из конфигурации заново — он
+         * поднялся бы лонговым поверх открытой КОРОТКОЙ позиции и начал бы
+         * закрывать её как длинную, то есть удваивать.
+         *
+         * null у состояний, записанных до появления направления: там оно лонговое
+         * по построению, шорта тогда не существовало.
+         */
+        GridDirection direction
 ) {
 
     public GridStrategyState(GridRange activeRange, long generation) {
         this(activeRange, generation, false, null,
-                false, null, 0, BigDecimal.ZERO, null, false, false, null, 0);
+                false, null, 0, BigDecimal.ZERO, null, false, false, null, 0, null);
     }
 
     public GridStrategyState(GridRange activeRange, long generation,
                              boolean awaitingUpperReplacement, Instant lastReplacementAt) {
         this(activeRange, generation, awaitingUpperReplacement, lastReplacementAt,
-                false, null, 0, BigDecimal.ZERO, null, false, false, null, 0);
+                false, null, 0, BigDecimal.ZERO, null, false, false, null, 0, null);
     }
 
     /** Без признака ручной перестановки: состояние, записанное до её появления. */
@@ -70,7 +84,7 @@ public record GridStrategyState(
                              BigDecimal downwardLossBaseline) {
         this(activeRange, generation, awaitingUpperReplacement, lastReplacementAt,
                 awaitingDownwardReplacement, pendingRange, downwardReplacements,
-                realizedDownwardLoss, downwardLossBaseline, false, false, null, 0);
+                realizedDownwardLoss, downwardLossBaseline, false, false, null, 0, null);
     }
 
     /** Без признака плановой остановки: состояние, записанное до её появления. */
@@ -81,7 +95,21 @@ public record GridStrategyState(
                              BigDecimal downwardLossBaseline, boolean forcedReplacement) {
         this(activeRange, generation, awaitingUpperReplacement, lastReplacementAt,
                 awaitingDownwardReplacement, pendingRange, downwardReplacements,
-                realizedDownwardLoss, downwardLossBaseline, forcedReplacement, false, null, 0);
+                realizedDownwardLoss, downwardLossBaseline, forcedReplacement, false, null, 0, null);
+    }
+
+    /** Без направления: состояние, записанное до того, как бот стал его выбирать. */
+    public GridStrategyState(GridRange activeRange, long generation,
+                             boolean awaitingUpperReplacement, Instant lastReplacementAt,
+                             boolean awaitingDownwardReplacement, GridRange pendingRange,
+                             int downwardReplacements, BigDecimal realizedDownwardLoss,
+                             BigDecimal downwardLossBaseline, boolean forcedReplacement,
+                             boolean stopScheduled, HedgeEpisode hedgeEpisode,
+                             int hedgeEpisodesUsed) {
+        this(activeRange, generation, awaitingUpperReplacement, lastReplacementAt,
+                awaitingDownwardReplacement, pendingRange, downwardReplacements,
+                realizedDownwardLoss, downwardLossBaseline, forcedReplacement, stopScheduled,
+                hedgeEpisode, hedgeEpisodesUsed, null);
     }
 
     /** Без эпизода плеча: состояние, записанное до его появления. */
@@ -94,7 +122,7 @@ public record GridStrategyState(
         this(activeRange, generation, awaitingUpperReplacement, lastReplacementAt,
                 awaitingDownwardReplacement, pendingRange, downwardReplacements,
                 realizedDownwardLoss, downwardLossBaseline, forcedReplacement, stopScheduled,
-                null, 0);
+                null, 0, null);
     }
 
     public GridStrategyState {

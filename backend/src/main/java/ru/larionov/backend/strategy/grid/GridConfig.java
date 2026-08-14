@@ -102,7 +102,19 @@ public record GridConfig(
          * Работает ли новая сетка одновременно с плечом или ждёт его закрытия.
          * По умолчанию одновременно: смысл переворота в том, чтобы не простаивать.
          */
-        Boolean hedgeAndGridConcurrent
+        Boolean hedgeAndGridConcurrent,
+        /*
+         * Переворачивать ли НАПРАВЛЕНИЕ САМОЙ СЕТКИ при неблагоприятном пробое.
+         *
+         * В этом и был замысел: пробили вниз — дальше торгуем падение шортом, пробили
+         * вверх из шорта — возвращаемся в лонг. Без переворота новое поколение снова
+         * встаёт лицом к тому движению, которое только что стоило денег, и покупает
+         * в падение ровно так же, как покупало до пробоя.
+         *
+         * Требует маржи: перевернуться в шорт без неё нельзя, и у немаржинального
+         * бота настройка не действует вовсе — там остаётся прежнее поведение.
+         */
+        Boolean flipDirectionOnAdverse
 ) {
 
     public enum AdverseBreakoutAction {
@@ -204,7 +216,7 @@ public record GridConfig(
                 atrPeriods, atrMultiplier, minHalfWidthPct, maxHalfWidthPct, onUpperBreakout,
                 breakoutConfirmSeconds, breakoutMarginPct, replaceCooldownSeconds,
                 maxDownwardReplacements, maxRealizedLoss, budget, sizingMode, profitPolicy,
-                direction, marginEnabled, null, null, null, null, null, null, null);
+                direction, marginEnabled, null, null, null, null, null, null, null, null);
     }
 
     /** Конфигурация без восстановительного плеча: заведённая до его появления. */
@@ -224,7 +236,8 @@ public record GridConfig(
                 atrPeriods, atrMultiplier, minHalfWidthPct, maxHalfWidthPct, onUpperBreakout,
                 breakoutConfirmSeconds, breakoutMarginPct, replaceCooldownSeconds,
                 maxDownwardReplacements, maxRealizedLoss, budget, sizingMode, profitPolicy,
-                direction, marginEnabled, expectedCycleDays, null, null, null, null, null, null);
+                direction, marginEnabled, expectedCycleDays,
+                null, null, null, null, null, null, null);
     }
 
     public GridConfig {
@@ -357,6 +370,12 @@ public record GridConfig(
         if (hedgeAndGridConcurrent == null) {
             hedgeAndGridConcurrent = true;
         }
+        // По умолчанию переворачиваем: маржинальную сетку заводят именно ради того,
+        // чтобы торговать движение, а не стоять к нему спиной. У немаржинального
+        // бота настройка всё равно не сработает — перевернуться ему некуда.
+        if (flipDirectionOnAdverse == null) {
+            flipDirectionOnAdverse = marginEnabled;
+        }
         // Переворот открывает непокрытую позицию, а она невозможна без маржи —
         // и без потолка убытка, из которого считается срок и стоп.
         if (onAdverseBreakout == AdverseBreakoutAction.HEDGE_AND_RECOVER) {
@@ -400,7 +419,7 @@ public record GridConfig(
                 replaceCooldownSeconds, maxDownwardReplacements, maxRealizedLoss,
                 newBudget, sizingMode, profitPolicy, direction, marginEnabled, expectedCycleDays,
                 onAdverseBreakout, hedgeMultiplier, maxHedgeEpisodes, maxHedgeHoldDays,
-                hedgeStopLossPct, hedgeAndGridConcurrent);
+                hedgeStopLossPct, hedgeAndGridConcurrent, flipDirectionOnAdverse);
     }
 
     /**

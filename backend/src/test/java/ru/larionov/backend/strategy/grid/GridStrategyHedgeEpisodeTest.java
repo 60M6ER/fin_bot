@@ -314,6 +314,6 @@ class GridStrategyHedgeEpisodeTest {
                 GridDirection.LONG, margin, 1,
                 margin ? GridConfig.AdverseBreakoutAction.HEDGE_AND_RECOVER
                         : GridConfig.AdverseBreakoutAction.LIQUIDATE,
-                new BigDecimal("4"), 1, 3, new BigDecimal("0.05"), true);
+                new BigDecimal("4"), 1, 3, new BigDecimal("0.05"), true, margin);
     }
 }

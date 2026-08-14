@@ -271,7 +271,6 @@ public class GridStrategy implements Strategy {
             return;
         }
         this.direction = cfg.direction();
-        requireShortIsAllowed();
         TradingConstraints constraints = ctx.constraints();
         RangeResolution resolution = resolveActiveRange(initialState, constraints);
         GridStrategyState restored = resolution.state();
@@ -289,6 +288,17 @@ public class GridStrategy implements Strategy {
         this.stopScheduled = restored != null && restored.stopScheduled();
         this.hedgeEpisode = restored == null ? null : restored.hedgeEpisode();
         this.hedgeEpisodesUsed = restored == null ? 0 : restored.hedgeEpisodesUsed();
+        /*
+         * Направление берём из СОХРАНЁННОГО состояния, а из конфигурации — только если
+         * сохранённого нет. Конфигурация задаёт направление СТАРТОВОЕ; дальше его
+         * выбирает сам бот, разворачиваясь на неблагоприятных пробоях. Читай мы здесь
+         * конфигурацию всегда, перезапуск после разворота поднял бы лонговую сетку
+         * поверх открытой короткой позиции.
+         */
+        if (restored != null && restored.direction() != null) {
+            this.direction = restored.direction();
+        }
+        requireShortIsAllowed();
         boolean restoredStateCleared = false;
         if (awaitingUpperReplacement
                 && cfg.onUpperBreakout() != GridConfig.UpperBreakoutAction.REPLACE_UPPER) {
@@ -1611,9 +1621,10 @@ public class GridStrategy implements Strategy {
             return awaitingUpperReplacement;
         }
 
+        BigDecimal favourableBound = direction.favourableBound(activeRange);
         Instant now = ctx.clock().instant();
         if (awaitingUpperReplacement) {
-            if (lastPrice.compareTo(activeRange.upper()) <= 0) {
+            if (!direction.beyondFavourable(lastPrice, favourableBound)) {
                 awaitingUpperReplacement = false;
                 upperBreakoutCandidateAt = null;
                 upperReplacementStallReported = false;
@@ -1638,14 +1649,16 @@ public class GridStrategy implements Strategy {
             return false;
         }
 
-        BigDecimal margin = activeRange.upper().multiply(cfg.breakoutMarginPct())
+        // Граница берётся по НАПРАВЛЕНИЮ, а не «верхняя»: у шортовой сетки в её пользу
+        // работает пробой ВНИЗ — позиция откуплена, диапазон пора двигать следом.
+        BigDecimal margin = favourableBound.multiply(cfg.breakoutMarginPct())
                 .max(ladder.effectiveStep().divide(BigDecimal.valueOf(2)));
-        BigDecimal threshold = activeRange.upper().add(margin);
-        if (lastPrice.compareTo(activeRange.upper()) <= 0) {
+        BigDecimal threshold = direction.favourableThreshold(favourableBound, margin);
+        if (!direction.beyondFavourable(lastPrice, favourableBound)) {
             upperBreakoutCandidateAt = null;
             return false;
         }
-        if (lastPrice.compareTo(threshold) < 0) {
+        if (!direction.beyondFavourable(lastPrice, threshold)) {
             return false;
         }
 
@@ -1688,8 +1701,9 @@ public class GridStrategy implements Strategy {
             return false;
         }
 
+        BigDecimal adverseBound = direction.adverseBound(activeRange);
         Instant now = ctx.clock().instant();
-        if (lastPrice.compareTo(activeRange.lower()) >= 0) {
+        if (!direction.beyondAdverse(lastPrice, adverseBound)) {
             lowerBreakoutCandidateAt = null;
             if (lowerBreakoutPaused) {
                 lowerBreakoutPaused = false;
@@ -1699,10 +1713,14 @@ public class GridStrategy implements Strategy {
             return false;
         }
 
-        BigDecimal margin = activeRange.lower().multiply(cfg.breakoutMarginPct())
+        // Против нас работает та граница, которую задаёт направление: лонгу вредит
+        // падение под нижнюю, шорту — рост над верхней. Пока это было зашито как
+        // «нижняя», шортовая сетка в беде запускала бы машинерию, написанную для
+        // противоположного случая.
+        BigDecimal margin = adverseBound.multiply(cfg.breakoutMarginPct())
                 .max(ladder.effectiveStep().divide(BigDecimal.valueOf(2)));
-        BigDecimal threshold = activeRange.lower().subtract(margin);
-        if (lastPrice.compareTo(threshold) > 0) {
+        BigDecimal threshold = direction.adverseThreshold(adverseBound, margin);
+        if (!direction.beyondAdverse(lastPrice, threshold)) {
             return false;
         }
 
@@ -1824,6 +1842,38 @@ public class GridStrategy implements Strategy {
     // ==============================
     // ВОССТАНОВИТЕЛЬНОЕ ПЛЕЧО
     // ==============================
+
+    /**
+     * Разворачивает сетку лицом к движению, которое только что стоило денег.
+     *
+     * В этом и состоял замысел: пробили вниз — дальше торгуем падение шортом; пробили
+     * вверх из шорта — возвращаемся в лонг. Без этого новое поколение встаёт к тренду
+     * спиной и покупает в падение ровно так же, как покупало до пробоя, — то есть
+     * перестановка диапазона лечит симптом, а не причину.
+     *
+     * Переворот требует маржи: шортовая сетка продаёт то, чего нет. Немаржинальному
+     * боту переворачиваться некуда, и он сохраняет прежнее поведение целиком.
+     * Живьём — только с явного разрешения, как и всё остальное маржинальное.
+     */
+    private void flipDirectionIfAllowed() {
+        if (!cfg.flipDirectionOnAdverse()) {
+            return;
+        }
+        GridDirection next = direction.opposite();
+        if (next == GridDirection.SHORT) {
+            if (!ctx.execution().marginEnabled()
+                    || !ctx.execution().shortEnabledByInstrument()
+                    || (!ctx.execution().dryRun() && !ctx.execution().allowLiveMargin())) {
+                // Развернуться нельзя — остаёмся лонгом. Сказать об этом надо: бот
+                // продолжит покупать в падение, и человек должен понимать почему.
+                ctx.event(BotEventType.RISK_BLOCKED,
+                        "Развернуть сетку в шорт нельзя (маржа не разрешена или бумага "
+                                + "не шортится) — новое поколение снова лонговое.");
+                return;
+            }
+        }
+        direction = next;
+    }
 
     /**
      * Рабочий бюджет за вычетом обеспечения, занятого плечом.
@@ -2370,6 +2420,8 @@ public class GridStrategy implements Strategy {
         // Лимит переворотов принадлежит ПОКОЛЕНИЮ: новая сетка начинает с чистого
         // счётчика, иначе он был бы одноразовым на всю жизнь бота.
         hedgeEpisodesUsed = 0;
+        GridDirection previousDirection = direction;
+        flipDirectionIfAllowed();
         if (forced) {
             // Оператор принял убыток целиком и вернул бота в строй — значит и лимиты
             // риска начинают отсчёт заново, иначе кнопка была бы одноразовой:
@@ -2410,6 +2462,11 @@ public class GridStrategy implements Strategy {
         }
 
         updateSnapshot();
+        if (direction != previousDirection) {
+            ctx.event(BotEventType.GRID_REPLACED,
+                    "Сетка развёрнута: %s → %s. Дальше торгуем движение, а не против него."
+                            .formatted(previousDirection, direction));
+        }
         String note = forced
                 ? ("GRID поколение %d: сетка перестроена по команде оператора. Позиция закрыта "
                         + "по рынку, зафиксирован убыток %s; диапазон %s..%s заменён на %s..%s. "
@@ -3002,7 +3059,7 @@ public class GridStrategy implements Strategy {
                 activeRange, gridGeneration, awaitingUpperReplacement, lastReplacementAt,
                 awaitingDownwardReplacement, pendingDownwardRange, downwardReplacements,
                 realizedDownwardLoss, downwardLossBaseline, forcedReplacement, stopScheduled,
-                hedgeEpisode, hedgeEpisodesUsed));
+                hedgeEpisode, hedgeEpisodesUsed, direction));
     }
 
     /**
@@ -3015,7 +3072,7 @@ public class GridStrategy implements Strategy {
         if (cfg.onRangeExit() == GridConfig.RangeExitAction.REPLACE_LOWER) {
             return false;
         }
-        if (lastPrice.compareTo(activeRange.lower()) >= 0) {
+        if (!direction.beyondAdverse(lastPrice, direction.adverseBound(activeRange))) {
             return false;
         }
         if (buyingStopped) {
