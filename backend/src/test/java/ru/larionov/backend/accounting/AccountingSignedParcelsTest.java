@@ -148,17 +148,29 @@ class AccountingSignedParcelsTest {
         BotExecutionContext ctx = ctx();
         // Сетка купила на уровне 1 и цикл ещё не закрыла.
         fill(ctx, OrderSide.BUY, GridRole.OPEN, OrderPurpose.GRID, 1, "10", "100", "1");
-        // Плечо открыло свою короткую позицию — без уровня, своим назначением.
+
+        /*
+         * Переворот. Одной заявкой: 10 закрывают позицию сетки, 20 открывают плечо —
+         * именно так его и выставляет beginHedge, на сумму позиции ПЛЮС ногу.
+         * Отдельной «просто продажи плеча», которая оставила бы лонг сетки нетронутым,
+         * в боте не существует: плечо всегда рождается из переворота.
+         */
         fill(ctx, OrderSide.SELL, GridRole.OPEN, OrderPurpose.HEDGE, null, "30", "100", "3");
 
-        var afterOpen = accounting.summary(botId, true);
-        assertThat(afterOpen.openQuantity())
-                .as("нетто: длинная десятка сетки минус короткая тридцатка плеча")
+        var afterFlip = accounting.summary(botId, true);
+        assertThat(afterFlip.openQuantity())
+                .as("на счёте остаётся только нога плеча")
                 .isEqualByComparingTo("-20");
+        assertThat(afterFlip.averageEntryPrice())
+                .as("книга не смешанная: длинных партий переворот не оставил")
+                .isNotNull();
         assertIdentity();
 
-        // Плечо закрывается целиком.
-        fill(ctx, OrderSide.BUY, GridRole.CLOSE, OrderPurpose.RECOVERY, null, "30", "90", "2.7");
+        // Сетка работает одновременно с плечом и открывает НОВЫЙ цикл.
+        fill(ctx, OrderSide.BUY, GridRole.OPEN, OrderPurpose.GRID, 1, "10", "95", "0.95");
+
+        // Плечо закрывается целиком — своей ногой, не трогая свежий цикл сетки.
+        fill(ctx, OrderSide.BUY, GridRole.CLOSE, OrderPurpose.RECOVERY, null, "20", "90", "1.8");
 
         var afterClose = accounting.summary(botId, true);
         assertThat(afterClose.openQuantity())
@@ -166,7 +178,7 @@ class AccountingSignedParcelsTest {
                 .isEqualByComparingTo("10");
         assertThat(afterClose.costBasisOpen())
                 .as("и её себестоимость тоже — плечо к ней не притрагивалось")
-                .isEqualByComparingTo("1001");
+                .isEqualByComparingTo("950.95");
         assertIdentity();
     }
 

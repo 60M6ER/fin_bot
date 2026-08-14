@@ -7,7 +7,9 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.transaction.annotation.Transactional;
 import ru.larionov.backend.entity.BotOrderEntity;
 import ru.larionov.backend.entity.MoneyLedgerEntity;
+import ru.larionov.backend.enums.GridRole;
 import ru.larionov.backend.enums.LedgerEntryType;
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderSide;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
@@ -458,10 +460,62 @@ class AccountingServiceTest {
         assertThat(accounting.dust(botId, false).quantity()).isEqualByComparingTo("0.0004");
     }
 
+    /**
+     * Переворот: одна продажа закрывает лонг и открывает плечо.
+     *
+     * Боевой случай MAGN 14.08.2026, числа те же с точностью до масштаба: держали
+     * 140, продали 560 (×4), на счёте осталось −420. Заявка помечена ролью OPEN и
+     * назначением HEDGE — по отношению к плечу она действительно открывающая.
+     *
+     * Раньше книга принимала её целиком за новую короткую партию: длинные 140
+     * оставались висеть, и получалась смешанная книга — 560 коротких и 140 длинных
+     * одновременно. Нетто выходило верное, а всё остальное врало: средней цены входа
+     * у смешанной книги нет, занятое обеспечение считалось от 560 вместо 420, убыток
+     * закрытой части не признавался вовсе.
+     */
+    @Test
+    void flipClosesTheGridPositionAndOpensOnlyTheRemainderAsHedge() {
+        BotOrderEntity buy = saveOrder(OrderSide.BUY, 0, "20", "0.10", "140");
+        accounting.recordOrderState(ctx, buy);
+
+        BotOrderEntity flip = orderRepo.save(order(OrderSide.SELL, null, "20", "0.28")
+                .requestedQuantity(new BigDecimal("560"))
+                .executedQuantity(new BigDecimal("560"))
+                .exchangeLotSize(LOT)
+                .purpose(OrderPurpose.HEDGE)
+                .gridRole(GridRole.OPEN)
+                .build());
+        accounting.recordOrderState(ctx, flip);
+
+        var inventory = accounting.inventory(botId, false);
+        assertThat(inventory.openQuantity())
+                .as("нетто как было верным, так и осталось")
+                .isEqualByComparingTo("-420");
+        assertThat(inventory.longQuantity())
+                .as("длинных партий не осталось: переворот их закрыл")
+                .isEqualByComparingTo("0");
+        assertThat(inventory.shortQuantity())
+                .as("короткая часть — только плечо, а не вся проданная заявка")
+                .isEqualByComparingTo("420");
+        assertThat(inventory.averageEntryPrice())
+                .as("книга больше не смешанная, средняя цена входа существует")
+                .isNotNull();
+    }
+
     private BotOrderEntity saveOrder(OrderSide side, int level, String price, String fee) {
         return orderRepo.save(order(side, level, price, fee)
                 .requestedQuantity(LOT)
                 .executedQuantity(LOT)
+                .exchangeLotSize(LOT)
+                .build());
+    }
+
+    /** То же, но с явным количеством: перевороту нужны не круглые лоты. */
+    private BotOrderEntity saveOrder(OrderSide side, Integer level, String price, String fee,
+                                     String quantity) {
+        return orderRepo.save(order(side, level, price, fee)
+                .requestedQuantity(new BigDecimal(quantity))
+                .executedQuantity(new BigDecimal(quantity))
                 .exchangeLotSize(LOT)
                 .build());
     }

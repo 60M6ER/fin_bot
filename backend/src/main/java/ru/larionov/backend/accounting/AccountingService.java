@@ -736,7 +736,23 @@ public class AccountingService {
                 continue;
             }
 
-            if (opens(row)) {
+            /*
+             * Переворот — единственная сделка, которая закрывает ЧУЖИЕ партии.
+             *
+             * Одной заявкой он делает две вещи: гасит позицию сетки и на остаток
+             * открывает плечо. Роль у неё «открывающая» — по отношению к плечу это
+             * правда, — и раньше этого было достаточно, чтобы вся заявка целиком
+             * легла новой короткой партией, а партии сетки остались висеть.
+             *
+             * Что из этого выходило, видно на боевом MAGN 14.08.2026: продали 560
+             * при 140 в лонге, книга получила 560 коротких И 140 длинных сразу.
+             * Нетто верное (−420), а разбивка врёт: средней цены входа у смешанной
+             * книги нет вовсе, занятое обеспечение считается от 560 вместо 420,
+             * и убыток закрытой части не признан — он сидит в открытой себестоимости.
+             */
+            boolean flip = isHedgePurpose(row.getPurpose()) && opens(row);
+
+            if (opens(row) && !flip) {
                 parcels.addLast(openedParcel(row, buy, quantity,
                         remainingBuyCorrections, remainingBuyQuantity));
                 continue;
@@ -747,7 +763,9 @@ public class AccountingService {
             // длинную партию соседнего уровня и обнулила чужой незакрытый цикл.
             int expectedSign = buy ? -1 : +1;
             // Плечо закрывает свои партии, сетка — свои: у них раздельный учёт.
-            boolean hedge = isHedgePurpose(row.getPurpose());
+            // Переворот — исключение ровно потому, что он и есть переход от одних
+            // к другим: гасит партии СЕТКИ, а остаток станет партией плеча.
+            boolean hedge = !flip && isHedgePurpose(row.getPurpose());
             BigDecimal left = consumeMagnitude(parcels, row.getGridLevel(), quantity,
                     expectedSign, hedge);
 
