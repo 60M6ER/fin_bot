@@ -76,3 +76,4 @@ services:
 volumes:
   # Keep the original volume key so an existing Compose database is reused.
   pgdata:
+  pgadmin_data:
