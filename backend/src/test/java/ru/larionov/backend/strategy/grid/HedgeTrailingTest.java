@@ -9,6 +9,7 @@ import ru.larionov.backend.accounting.Inventory;
 import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.ExchangeClient;
 import ru.larionov.backend.exchange.api.MarketDataApi;
+import ru.larionov.backend.exchange.api.enums.OrderStatus;
 import ru.larionov.backend.exchange.api.model.FeeInfo;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
 import ru.larionov.backend.exchange.api.model.id.InstrumentId;
@@ -19,6 +20,7 @@ import ru.larionov.backend.exchange.api.model.market.OrderBookLevel;
 import ru.larionov.backend.exchange.api.model.market.Price;
 import ru.larionov.backend.exchange.api.model.market.TradingStatusEvent;
 import ru.larionov.backend.execution.BotExecutionContext;
+import ru.larionov.backend.execution.BotOrderView;
 import ru.larionov.backend.execution.ExecutionGateway;
 import ru.larionov.backend.execution.PlaceIntent;
 import ru.larionov.backend.execution.ReconcileResult;
@@ -28,6 +30,7 @@ import tools.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -270,7 +273,33 @@ class HedgeTrailingTest {
             HedgeEpisode restored = mapper.readValue(json, HedgeEpisode.class);
 
             assertThat(restored.trailing()).isFalse();
+            assertThat(restored.phase()).isEqualTo(HedgeEpisode.Phase.ACTIVE);
             assertThat(restored.effectiveTarget()).isEqualByComparingTo("90");
+        }
+
+        @Test
+        @DisplayName("фазы входа и выхода переживают сохранение состояния")
+        void lifecyclePhasesSurviveRoundTrip() {
+            ObjectMapper mapper = new ObjectMapper();
+            HedgeMath.Plan plan = HedgeMath.plan(
+                    GridDirection.LONG, BigDecimal.TEN, new BigDecimal("220"),
+                    new BigDecimal("20"), new BigDecimal("0.0005"),
+                    new BigDecimal("4"), BigDecimal.ZERO, 3);
+            HedgeEpisode opening = HedgeEpisode.opening(
+                    UUID.randomUUID(), GridDirection.SHORT, OPENED, plan,
+                    BigDecimal.TEN, new BigDecimal("220"), OPENED.plusSeconds(86400),
+                    new BigDecimal("21"), new BigDecimal("40"));
+
+            HedgeEpisode restoredOpening = mapper.readValue(
+                    mapper.writeValueAsString(opening), HedgeEpisode.class);
+            HedgeEpisode restoredClosing = mapper.readValue(
+                    mapper.writeValueAsString(shortLeg().startClosing("цена ушла за стоп")),
+                    HedgeEpisode.class);
+
+            assertThat(restoredOpening.phase()).isEqualTo(HedgeEpisode.Phase.OPENING);
+            assertThat(restoredOpening.originalCostBasis()).isEqualByComparingTo("220");
+            assertThat(restoredClosing.phase()).isEqualTo(HedgeEpisode.Phase.CLOSING);
+            assertThat(restoredClosing.closingReason()).isEqualTo("цена ушла за стоп");
         }
 
         @Test
@@ -321,12 +350,14 @@ class HedgeTrailingTest {
         private ExecutionGateway gateway;
         private AtomicReference<Instant> clockNow;
         private AtomicReference<GridStrategyState> saved;
+        private List<BotOrderView> hedgeOrderHistory;
 
         @BeforeEach
         void setUp() {
             botId = UUID.randomUUID();
             clockNow = new AtomicReference<>(now);
             saved = new AtomicReference<>();
+            hedgeOrderHistory = new ArrayList<>();
         }
 
         @Test
@@ -484,6 +515,32 @@ class HedgeTrailingTest {
                             null, null, now));
             when(gateway.openOrders(botId)).thenReturn(List.of());
             when(gateway.levelOrders(eq(botId), any())).thenReturn(List.of());
+            when(gateway.purposeOrders(eq(botId), any(), any())).thenAnswer(invocation -> {
+                OrderPurpose purpose = invocation.getArgument(1);
+                return hedgeOrderHistory.stream().filter(o -> o.purpose() == purpose).toList();
+            });
+            org.mockito.Mockito.doAnswer(invocation -> {
+                PlaceIntent intent = invocation.getArgument(1);
+                OrderStatus status = intent.purpose() == OrderPurpose.HEDGE
+                        || (intent.purpose() == OrderPurpose.RECOVERY
+                        && intent.limitPrice().compareTo(new BigDecimal("20")) >= 0)
+                        ? OrderStatus.FILLED : OrderStatus.NEW;
+                BigDecimal executed = status == OrderStatus.FILLED
+                        ? intent.quantity() : BigDecimal.ZERO;
+                UUID id = UUID.randomUUID();
+                BotOrderView order = new BotOrderView(
+                        id, id.toString(), "exch-" + id, intent.side(), status,
+                        intent.gridLevel(), intent.purpose(), intent.role(), intent.quantity(),
+                        executed, intent.limitPrice(), status == OrderStatus.FILLED
+                                ? intent.limitPrice() : null,
+                        null, false, null, null, "rub", BigDecimal.ONE,
+                        true, null, clockNow.get(), clockNow.get());
+                if (intent.purpose() == OrderPurpose.HEDGE
+                        || intent.purpose() == OrderPurpose.RECOVERY) {
+                    hedgeOrderHistory.add(order);
+                }
+                return order;
+            }).when(gateway).placeLimit(any(), any());
             when(gateway.reconcile(any())).thenReturn(reconciled("10"));
 
             GridStrategy strategy = new GridStrategy(config(mode));

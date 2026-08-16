@@ -5,6 +5,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 import ru.larionov.backend.entity.BotOrderEntity;
+import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.enums.OrderStatus;
 
 import java.math.BigDecimal;
@@ -24,6 +25,9 @@ public interface BotOrderRepository extends JpaRepository<BotOrderEntity, UUID> 
             UUID botId, boolean dryRun, BigDecimal executedQuantity);
 
     List<BotOrderEntity> findTop200ByBotIdOrderByCreatedAtDesc(UUID botId);
+
+    List<BotOrderEntity> findAllByBotIdAndPurposeAndCreatedAtGreaterThanEqualOrderByCreatedAtAsc(
+            UUID botId, OrderPurpose purpose, Instant since);
 
     boolean existsByBotIdAndStatusIn(UUID botId, List<OrderStatus> statuses);
 

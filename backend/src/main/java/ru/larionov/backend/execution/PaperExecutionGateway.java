@@ -134,6 +134,17 @@ public class PaperExecutionGateway implements ExecutionGateway {
     }
 
     @Override
+    public List<BotOrderView> purposeOrders(UUID botId, OrderPurpose purpose, Instant since) {
+        return orderRepo
+                .findAllByBotIdAndPurposeAndCreatedAtGreaterThanEqualOrderByCreatedAtAsc(
+                        botId, purpose, since == null ? Instant.EPOCH : since)
+                .stream()
+                .filter(BotOrderEntity::isDryRun)
+                .map(BotOrderView::of)
+                .toList();
+    }
+
+    @Override
     public List<BotOrderView> levelOrders(UUID botId, Instant since) {
         return orderRepo.findLevelOrders(botId, true, since == null ? Instant.EPOCH : since).stream()
                 .map(BotOrderView::of)

@@ -713,7 +713,10 @@ public class GridStrategy implements Strategy {
             ctx.event(BotEventType.HOUSEKEEPING,
                     "Торги открыты (%s) — сверяюсь и расставляю сетку".formatted(event.rawStatus()));
             ReconcileResult reconciled = reconcileAndCheck();
-            if (awaitingDownwardReplacement) {
+            manageHedgeLeg();
+            if (hedgeBlocksGrid()) {
+                return;
+            } else if (awaitingDownwardReplacement) {
                 manageDownwardLiquidation();
             } else {
                 ensureOrders(reconciled);
@@ -732,6 +735,15 @@ public class GridStrategy implements Strategy {
     @Override
     public void onOrderUpdate(BotOrderView order) {
         if (!isReady() || order == null) {
+            return;
+        }
+        if (HEDGE_PURPOSES.contains(order.purpose())) {
+            // HEDGE и RECOVERY не имеют уровня сетки, но именно их исполнения
+            // двигают автомат восстановительного плеча. Раньше общий return ниже
+            // выбрасывал эти события целиком, и принятая заявка ошибочно считалась
+            // уже исполненной.
+            reconcileAndCheck();
+            manageHedgeLeg();
             return;
         }
         if (awaitingDownwardReplacement) {
@@ -1138,6 +1150,9 @@ public class GridStrategy implements Strategy {
 
         // Плечо ведём первым: непокрытая позиция не ждёт своей очереди.
         manageHedgeLeg();
+        if (hedgeBlocksGrid()) {
+            return;
+        }
 
         if (awaitingDownwardReplacement) {
             manageDownwardLiquidation();
@@ -1162,6 +1177,10 @@ public class GridStrategy implements Strategy {
     @Override
     public void onStreamReconnect() {
         if (!isReady()) {
+            return;
+        }
+        manageHedgeLeg();
+        if (hedgeBlocksGrid()) {
             return;
         }
         if (awaitingDownwardReplacement) {
@@ -1192,6 +1211,10 @@ public class GridStrategy implements Strategy {
 
         checkMarginHealth();
         manageHedgeLeg();
+
+        if (hedgeBlocksGrid()) {
+            return;
+        }
 
         // Отдельно от ensureOrders: та выходит раньше на закрытой бирже и при
         // расхождении позиции, а плановая остановка вполне может завершиться и там —
@@ -2180,7 +2203,7 @@ public class GridStrategy implements Strategy {
         if (budget == null || hedgeEpisode == null) {
             return budget;
         }
-        BigDecimal notional = hedgeEpisode.hedgeQuantity().multiply(hedgeEpisode.entryPrice());
+        BigDecimal notional = currentHedgeLegQuantity().multiply(hedgeEpisode.entryPrice());
         BigDecimal rate = ctx.constraints().shortInitialMarginRate();
         BigDecimal locked = rate == null || rate.signum() <= 0
                 ? notional
@@ -2287,49 +2310,54 @@ public class GridStrategy implements Strategy {
         }
 
         UUID episodeId = UUID.randomUUID();
+        Instant now = ctx.clock().instant();
+        BigDecimal plannedEntryQuantity = ctx.execution().quantizeDown(plan.totalQuantity());
+        if (plannedEntryQuantity.compareTo(fresh.position().abs()) <= 0) {
+            ctx.event(BotEventType.RISK_BLOCKED,
+                    "Переворот после округления к шагу биржи не создаёт противоположного плеча");
+            return false;
+        }
+        hedgeEpisode = HedgeEpisode.opening(
+                episodeId, direction.opposite(), now, plan,
+                fresh.position().abs(), inventory.costBasisOpen(),
+                now.plus(Duration.ofDays(cfg.maxHedgeHoldDays())),
+                stopPriceFor(direction.opposite(), price), plannedEntryQuantity);
+        hedgeEpisodesUsed++;
+        persistState();
+        updateSnapshot();
+
+        BotOrderView entryOrder;
         try {
             // Одной заявкой: часть закрывает старую позицию, остаток открывает плечо.
             // Двумя заявками этого делать нельзя — между ними позиция оказалась бы
             // закрытой, и рынок успел бы уйти ровно в тот момент, ради которого
             // переворот и затевался.
-            ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
+            entryOrder = ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
                     direction.closeSide(), plan.totalQuantity(), price, null,
                     OrderPurpose.HEDGE, GridRole.OPEN));
         } catch (Exception e) {
-            ctx.error("Заявку переворота выставить не удалось", e);
-            return false;
+            // Сетевой вызов мог дойти до биржи и оборваться до ответа. OPENING уже
+            // сохранён: сверка найдёт PENDING либо безопасно дозаявит остаток.
+            // Запускать обычную ликвидацию поверх возможного HEDGE нельзя.
+            ctx.error("Ответ на заявку переворота не получен — эпизод оставлен в OPENING", e);
+            return true;
         }
 
-        Instant now = ctx.clock().instant();
-        hedgeEpisode = new HedgeEpisode(
-                episodeId, direction.opposite(), now, price, plan.hedgeQuantity(),
-                plan.targetPrice(), cfg.hedgeMultiplier(), plan.realizedOnClose(),
-                now.plus(Duration.ofDays(cfg.maxHedgeHoldDays())),
-                stopPriceFor(price));
-        hedgeEpisodesUsed++;
-        persistState();
-        updateSnapshot();
-
-        // Отчёт не должен мешать торговле: сорвавшаяся запись — повод для строки
-        // в журнале, но не для отката переворота, который уже случился на бирже.
-        try {
-            ctx.openRecoveryEpisode(gridGeneration, episodeId, direction.opposite().name(),
-                    price, plan.targetPrice(), cfg.hedgeMultiplier(), now);
-        } catch (Exception e) {
-            ctx.error("Переворот выполнен, но строку эпизода записать не удалось", e);
+        if (entryOrder == null) {
+            ctx.error("Шлюз принял заявку переворота, но не вернул её состояние",
+                    new IllegalStateException("placeLimit returned null"));
+            return true;
         }
 
         ctx.event(BotEventType.RANGE_EXIT,
-                ("Позиция перевёрнута ×%s по %s: закрыто с убытком %s, открыто плечо %s. "
-                        + "Цель безубытка %s, срок до %s%s. Плечо и сетка %s.")
-                        .formatted(cfg.hedgeMultiplier().toPlainString(), price.toPlainString(),
-                                plain(plan.realizedOnClose()), plainQuantity(plan.hedgeQuantity()),
-                                plan.targetPrice().toPlainString(),
-                                hedgeEpisode.deadline(),
-                                hedgeEpisode.stopPrice() == null ? ""
-                                        : ", стоп " + hedgeEpisode.stopPrice().toPlainString(),
-                                cfg.hedgeAndGridConcurrent() ? "работают одновременно"
-                                        : "работают по очереди"));
+                ("Переворот ×%s начат: выставлена %s %s по %s. До полного исполнения "
+                        + "позицию и цену безубытка не считаю подтверждёнными.")
+                        .formatted(cfg.hedgeMultiplier().toPlainString(), entryOrder.side(),
+                                plainQuantity(entryOrder.requestedQuantity()), price.toPlainString()));
+
+        // Рыночная лимитная заявка может вернуться уже исполненной. В таком случае
+        // незачем ждать следующего стрима, но всё равно используем фактическую цену.
+        manageHedgeOpening(List.of(entryOrder));
         return true;
     }
 
@@ -2362,14 +2390,14 @@ public class GridStrategy implements Strategy {
     }
 
     /** Цена, за которой эпизод признаётся неудавшимся. Null — стоп не задан. */
-    private BigDecimal stopPriceFor(BigDecimal entryPrice) {
+    private BigDecimal stopPriceFor(GridDirection hedgeDirection, BigDecimal entryPrice) {
         BigDecimal pct = cfg.hedgeStopLossPct();
         if (pct == null || pct.signum() <= 0) {
             return null;
         }
         // Стоп всегда по ту сторону входа, в которую мы НЕ рассчитывали: плечо
         // после лонга — это шорт, и губит его рост.
-        return direction == GridDirection.LONG
+        return hedgeDirection == GridDirection.SHORT
                 ? entryPrice.multiply(BigDecimal.ONE.add(pct))
                 : entryPrice.multiply(BigDecimal.ONE.subtract(pct));
     }
@@ -2385,25 +2413,41 @@ public class GridStrategy implements Strategy {
      * последним: он крайний рубеж, а не план.
      */
     private void manageHedgeLeg() {
-        if (hedgeEpisode == null || halted || positionMismatched || lastPrice == null) {
+        if (hedgeEpisode == null || halted || positionMismatched) {
             return;
         }
-        if (!limitOrdersAvailable) {
+
+        if (hedgeEpisode.opening()) {
+            manageHedgeOpening(hedgeOrders(OrderPurpose.HEDGE));
+            return;
+        }
+        if (hedgeEpisode.closing()) {
+            manageHedgeClosing();
+            return;
+        }
+
+        if (finishHedgeIfFullyExited()) {
+            return;
+        }
+        if (lastPrice == null) {
             return;
         }
 
         trailHedgeTarget();
 
         if (hedgeEpisode.targetReached(lastPrice)) {
-            closeHedge("цель достигнута", lastPrice);
+            startHedgeClosing("цель достигнута");
             return;
         }
         if (hedgeEpisode.stopped(lastPrice)) {
-            closeHedge("цена ушла за стоп", lastPrice);
+            startHedgeClosing("цена ушла за стоп");
             return;
         }
         if (hedgeEpisode.expired(ctx.clock().instant())) {
-            closeHedge("истёк срок удержания", lastPrice);
+            startHedgeClosing("истёк срок удержания");
+            return;
+        }
+        if (!limitOrdersAvailable) {
             return;
         }
         // В режиме трейлинга заявки выхода в стакане нет и быть не может: она стоит
@@ -2417,6 +2461,124 @@ public class GridStrategy implements Strategy {
             return;
         }
         ensureHedgeExitOrder();
+    }
+
+    /** До полного входа сетка не вмешивается: сначала доводим переворот до конца. */
+    private void manageHedgeOpening(List<BotOrderView> knownOrders) {
+        if (hedgeEpisode == null || !hedgeEpisode.opening()) {
+            return;
+        }
+        List<BotOrderView> orders = knownOrders == null ? List.of() : knownOrders;
+        HedgeOrderProgress progress = hedgeProgress(orders);
+        BigDecimal planned = hedgeEpisode.plannedEntryQuantity();
+
+        if (planned != null && progress.executedQuantity().compareTo(planned) >= 0) {
+            activateFilledHedge(progress);
+            return;
+        }
+        if (!limitOrdersAvailable || planned == null) {
+            return;
+        }
+
+        OrderSide side = hedgeEpisode.direction().openSide();
+        BigDecimal aggressive;
+        try {
+            aggressive = aggressivePrice(side);
+        } catch (Exception e) {
+            ctx.error("Не удалось получить цену для продолжения переворота", e);
+            return;
+        }
+
+        if (progress.hasOpenOrder()) {
+            boolean marketable = progress.openOrders().stream()
+                    .allMatch(order -> isMarketable(order, aggressive));
+            if (marketable) {
+                return;
+            }
+            for (BotOrderView order : progress.openOrders()) {
+                try {
+                    ctx.gateway().cancel(ctx.execution(), order.id());
+                } catch (Exception e) {
+                    ctx.error("Не удалось снять ушедший от рынка остаток переворота", e);
+                    return;
+                }
+            }
+            orders = hedgeOrders(OrderPurpose.HEDGE);
+            progress = hedgeProgress(orders);
+            if (progress.hasOpenOrder()) {
+                return;
+            }
+        }
+
+        BigDecimal remaining = planned.subtract(progress.executedQuantity());
+        if (remaining.signum() <= 0) {
+            return;
+        }
+        try {
+            BotOrderView retry = ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
+                    side, remaining, aggressive, null,
+                    OrderPurpose.HEDGE, GridRole.OPEN));
+            ctx.event(BotEventType.HOUSEKEEPING,
+                    "Довыставлен переворот после частичного или истёкшего исполнения: %s %s"
+                            .formatted(retry.side(), plainQuantity(retry.requestedQuantity())));
+            if (retry.status() == OrderStatus.FILLED) {
+                activateFilledHedge(hedgeProgress(appendOrder(orders, retry)));
+            }
+        } catch (RiskRejectedException e) {
+            ctx.event(BotEventType.RISK_BLOCKED,
+                    "Остаток переворота пока запрещён: " + e.getMessage());
+        } catch (Exception e) {
+            ctx.error("Не удалось довыставить остаток переворота", e);
+        }
+    }
+
+    private void activateFilledHedge(HedgeOrderProgress progress) {
+        if (progress.averagePrice() == null || hedgeEpisode.originalQuantity() == null
+                || hedgeEpisode.originalQuantity().signum() <= 0) {
+            ctx.error("Переворот исполнен, но фактическую среднюю цену рассчитать нельзя",
+                    new IllegalStateException("HEDGE fill has no average price"));
+            return;
+        }
+
+        BigDecimal actualMultiplier = progress.executedQuantity().divide(
+                hedgeEpisode.originalQuantity(), 12, RoundingMode.HALF_UP);
+        GridDirection originalDirection = hedgeEpisode.direction().opposite();
+        HedgeMath.Plan actual = HedgeMath.plan(
+                originalDirection, hedgeEpisode.originalQuantity(),
+                hedgeEpisode.originalCostBasis(), progress.averagePrice(),
+                activeFees.makerRateFor(originalDirection.closeSide()), actualMultiplier,
+                ctx.carryDailyRate(), cfg.maxHedgeHoldDays());
+        if (!actual.accepted()) {
+            stopPermanently("Исполненный переворот не удалось перевести в план восстановления: "
+                    + actual.refusal());
+            return;
+        }
+
+        hedgeEpisode = hedgeEpisode.activated(actual, actualMultiplier,
+                stopPriceFor(hedgeEpisode.direction(), progress.averagePrice()));
+        persistState();
+        updateSnapshot();
+
+        try {
+            ctx.openRecoveryEpisode(gridGeneration, hedgeEpisode.episodeId(),
+                    hedgeEpisode.direction().name(), hedgeEpisode.entryPrice(),
+                    hedgeEpisode.targetPrice(), hedgeEpisode.multiplier(), hedgeEpisode.openedAt());
+        } catch (Exception e) {
+            ctx.error("Переворот исполнен, но строку эпизода записать не удалось", e);
+        }
+
+        ctx.event(BotEventType.RANGE_EXIT,
+                ("Позиция перевёрнута ×%s по фактической средней %s: закрыто с результатом %s, "
+                        + "открыто плечо %s. Цель безубытка %s, срок до %s%s. Плечо и сетка %s.")
+                        .formatted(hedgeEpisode.multiplier().stripTrailingZeros().toPlainString(),
+                                hedgeEpisode.entryPrice().toPlainString(),
+                                plain(hedgeEpisode.lossAtEntry()),
+                                plainQuantity(hedgeEpisode.hedgeQuantity()),
+                                hedgeEpisode.targetPrice().toPlainString(), hedgeEpisode.deadline(),
+                                hedgeEpisode.stopPrice() == null ? ""
+                                        : ", стоп " + hedgeEpisode.stopPrice().toPlainString(),
+                                cfg.hedgeAndGridConcurrent() ? "работают одновременно"
+                                        : "работают по очереди"));
     }
 
     /**
@@ -2454,10 +2616,7 @@ public class GridStrategy implements Strategy {
 
     /** Снимает заявку выхода из плеча: в трейлинге ей в стакане не место. */
     private void cancelHedgeExitOrders() {
-        for (BotOrderView order : ctx.gateway().openOrders(ctx.botId())) {
-            if (order.purpose() != OrderPurpose.RECOVERY) {
-                continue;
-            }
+        for (BotOrderView order : openHedgeOrders(OrderPurpose.RECOVERY)) {
             try {
                 ctx.gateway().cancel(ctx.execution(), order.id());
             } catch (Exception e) {
@@ -2474,18 +2633,22 @@ public class GridStrategy implements Strategy {
      * означало бы упустить ровно то движение, ради которого всё затевалось.
      */
     private void ensureHedgeExitOrder() {
-        boolean alreadyPlaced = ctx.gateway().openOrders(ctx.botId()).stream()
-                .anyMatch(o -> o.purpose() == OrderPurpose.RECOVERY);
-        if (alreadyPlaced) {
+        HedgeOrderProgress progress = hedgeProgress(hedgeOrders(OrderPurpose.RECOVERY));
+        BigDecimal remaining = hedgeEpisode.hedgeQuantity().subtract(progress.executedQuantity());
+        if (remaining.signum() <= 0) {
+            finishHedgeIfFullyExited();
+            return;
+        }
+        if (progress.hasOpenOrder()) {
             return;
         }
         try {
             ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
-                    hedgeEpisode.direction().closeSide(), hedgeEpisode.hedgeQuantity(),
+                    hedgeEpisode.direction().closeSide(), remaining,
                     hedgeEpisode.targetPrice(), null, OrderPurpose.RECOVERY, GridRole.CLOSE));
             ctx.event(BotEventType.HOUSEKEEPING,
                     "Выставлен выход из плеча: %s по %s"
-                            .formatted(plainQuantity(hedgeEpisode.hedgeQuantity()),
+                            .formatted(plainQuantity(remaining),
                                     hedgeEpisode.targetPrice().toPlainString()));
         } catch (RiskRejectedException e) {
             ctx.event(BotEventType.RISK_BLOCKED, "Выход из плеча пока запрещён: " + e.getMessage());
@@ -2494,53 +2657,232 @@ public class GridStrategy implements Strategy {
         }
     }
 
-    /** Закрывает эпизод по рынку и признаёт результат, каким бы он ни был. */
-    private void closeHedge(String reason, BigDecimal price) {
-        HedgeEpisode episode = hedgeEpisode;
-        for (BotOrderView order : ctx.gateway().openOrders(ctx.botId())) {
-            if (order.purpose() != OrderPurpose.RECOVERY) {
-                continue;
+    /** Сохраняет решение о выходе; сама заявка ещё не означает закрытую позицию. */
+    private void startHedgeClosing(String reason) {
+        if (hedgeEpisode == null || hedgeEpisode.closing()) {
+            return;
+        }
+        hedgeEpisode = hedgeEpisode.startClosing(reason);
+        persistState();
+        updateSnapshot();
+        ctx.event(BotEventType.RANGE_EXIT,
+                "Начинаю закрытие плеча: %s. Эпизод останется активным до полного исполнения."
+                        .formatted(reason));
+        manageHedgeClosing();
+    }
+
+    /** Доводит RECOVERY до полного исполнения, переоценивая ушедшую от рынка заявку. */
+    private void manageHedgeClosing() {
+        if (hedgeEpisode == null || !hedgeEpisode.closing()) {
+            return;
+        }
+        List<BotOrderView> orders = hedgeOrders(OrderPurpose.RECOVERY);
+        HedgeOrderProgress progress = hedgeProgress(orders);
+        BigDecimal remaining = hedgeEpisode.hedgeQuantity().subtract(progress.executedQuantity());
+        if (remaining.signum() <= 0) {
+            finishHedge(progress);
+            return;
+        }
+        if (!limitOrdersAvailable) {
+            return;
+        }
+
+        OrderSide side = hedgeEpisode.direction().closeSide();
+        BigDecimal aggressive;
+        try {
+            aggressive = aggressivePrice(side);
+        } catch (Exception e) {
+            ctx.error("Не удалось получить цену для закрытия плеча", e);
+            return;
+        }
+
+        List<BotOrderView> open = progress.openOrders();
+        if (!open.isEmpty()) {
+            boolean marketable = open.stream().allMatch(o -> isMarketable(o, aggressive));
+            if (marketable) {
+                return;
             }
-            try {
-                ctx.gateway().cancel(ctx.execution(), order.id());
-            } catch (Exception e) {
-                ctx.error("Не удалось снять прежний выход из плеча", e);
+            for (BotOrderView order : open) {
+                try {
+                    ctx.gateway().cancel(ctx.execution(), order.id());
+                } catch (Exception e) {
+                    ctx.error("Не удалось снять ушедший от рынка выход из плеча", e);
+                    return;
+                }
+            }
+
+            progress = hedgeProgress(hedgeOrders(OrderPurpose.RECOVERY));
+            remaining = hedgeEpisode.hedgeQuantity().subtract(progress.executedQuantity());
+            if (remaining.signum() <= 0) {
+                finishHedge(progress);
+                return;
+            }
+            if (progress.hasOpenOrder()) {
                 return;
             }
         }
 
-        BigDecimal exitPrice;
         try {
-            exitPrice = unwindPrice();
+            BotOrderView placed = ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
+                    side, remaining, aggressive, null, OrderPurpose.RECOVERY, GridRole.CLOSE));
+            ctx.event(BotEventType.HOUSEKEEPING,
+                    "Выход из плеча: %s %s по %s, жду полного исполнения"
+                            .formatted(side, plainQuantity(remaining), aggressive.toPlainString()));
+            if (placed.status() == OrderStatus.FILLED) {
+                HedgeOrderProgress after = hedgeProgress(appendOrder(orders, placed));
+                if (after.executedQuantity().compareTo(hedgeEpisode.hedgeQuantity()) >= 0) {
+                    finishHedge(after);
+                }
+            }
+        } catch (RiskRejectedException e) {
+            ctx.event(BotEventType.RISK_BLOCKED,
+                    "Закрытие плеча пока запрещено: " + e.getMessage());
         } catch (Exception e) {
-            exitPrice = price;
+            ctx.error("Не удалось выставить закрытие плеча", e);
         }
-        try {
-            ctx.gateway().placeLimit(ctx.execution(), new PlaceIntent(
-                    episode.direction().closeSide(), episode.hedgeQuantity(), exitPrice, null,
-                    OrderPurpose.RECOVERY, GridRole.CLOSE));
-        } catch (Exception e) {
-            ctx.error("Не удалось закрыть плечо по рынку", e);
+    }
+
+    private boolean finishHedgeIfFullyExited() {
+        if (hedgeEpisode == null || hedgeEpisode.opening()) {
+            return false;
+        }
+        HedgeOrderProgress progress = hedgeProgress(hedgeOrders(OrderPurpose.RECOVERY));
+        if (progress.executedQuantity().compareTo(hedgeEpisode.hedgeQuantity()) < 0) {
+            return false;
+        }
+        finishHedge(progress);
+        return true;
+    }
+
+    /** Единственная точка, где эпизод действительно перестаёт существовать. */
+    private void finishHedge(HedgeOrderProgress progress) {
+        HedgeEpisode episode = hedgeEpisode;
+        if (episode == null) {
             return;
+        }
+        // Журнал уже получил исполнение; сверка обновляет позицию до того, как сетка
+        // снова начнёт принимать решения без вычитаемой ноги плеча.
+        reconcileAndCheck();
+
+        try {
+            ctx.closeRecoveryEpisode(episode.episodeId(), ctx.clock().instant());
+        } catch (Exception e) {
+            ctx.error("Плечо исполнено, но строку эпизода закрыть не удалось", e);
         }
 
         hedgeEpisode = null;
         persistState();
         updateSnapshot();
-        try {
-            ctx.closeRecoveryEpisode(episode.episodeId(), ctx.clock().instant());
-        } catch (Exception e) {
-            ctx.error("Плечо закрыто, но строку эпизода закрыть не удалось", e);
-        }
+        String reason = episode.closingReason() == null
+                ? "цель безубытка исполнена"
+                : episode.closingReason();
         ctx.event(BotEventType.RANGE_EXIT,
-                ("Плечо закрывается по %s: %s.%s Убыток входа был %s — окупился он или нет, "
-                        + "видно по результату эпизода в таблице поколений.")
-                        .formatted(exitPrice.toPlainString(), reason,
-                                episode.trailing() ? " Храповик довёл цель с безубытка %s до %s."
+                ("Плечо полностью закрыто по фактической средней %s: %s.%s "
+                        + "Исполнено %s; результат виден в строке восстановительного эпизода.")
+                        .formatted(progress.averagePrice() == null
+                                        ? "—" : progress.averagePrice().toPlainString(),
+                                reason,
+                                episode.trailing() ? " Храповик довёл цель с %s до %s."
                                         .formatted(episode.targetPrice().toPlainString(),
-                                                episode.trailingTarget().toPlainString())
-                                        : "",
-                                plain(episode.lossAtEntry())));
+                                                episode.trailingTarget().toPlainString()) : "",
+                                plainQuantity(progress.executedQuantity())));
+    }
+
+    /** История текущего эпизода, включая терминальные и частично исполненные заявки. */
+    private List<BotOrderView> hedgeOrders(OrderPurpose purpose) {
+        if (hedgeEpisode == null) {
+            return List.of();
+        }
+        Instant since = hedgeEpisode.openedAt() == null
+                ? Instant.EPOCH
+                : hedgeEpisode.openedAt();
+        return ctx.gateway().purposeOrders(ctx.botId(), purpose, since);
+    }
+
+    private List<BotOrderView> openHedgeOrders(OrderPurpose purpose) {
+        return hedgeOrders(purpose).stream().filter(o -> o.status().isOpen()).toList();
+    }
+
+    private HedgeOrderProgress hedgeProgress(List<BotOrderView> orders) {
+        BigDecimal quantity = BigDecimal.ZERO;
+        BigDecimal notional = BigDecimal.ZERO;
+        List<BotOrderView> open = new java.util.ArrayList<>();
+        for (BotOrderView order : orders) {
+            if (order.status().isOpen()) {
+                open.add(order);
+            }
+            BigDecimal executed = order.executedQuantity() == null
+                    ? BigDecimal.ZERO : order.executedQuantity();
+            if (executed.signum() <= 0) {
+                continue;
+            }
+            BigDecimal price = order.avgPrice() == null ? order.limitPrice() : order.avgPrice();
+            if (price == null || price.signum() <= 0) {
+                continue;
+            }
+            quantity = quantity.add(executed);
+            notional = notional.add(executed.multiply(price));
+        }
+        return new HedgeOrderProgress(quantity, notional, List.copyOf(open));
+    }
+
+    private List<BotOrderView> appendOrder(List<BotOrderView> orders, BotOrderView order) {
+        if (order == null || orders.stream().anyMatch(existing -> existing.id().equals(order.id()))) {
+            return orders;
+        }
+        java.util.ArrayList<BotOrderView> result = new java.util.ArrayList<>(orders);
+        result.add(order);
+        return result;
+    }
+
+    /** Лучшая исполнимая сейчас цена для заданной стороны, независимо от сетки. */
+    private BigDecimal aggressivePrice(OrderSide side) {
+        OrderBook book = ctx.exchange().marketData()
+                .getOrderBook(ctx.execution().instrumentId(), 1);
+        BigDecimal price = side == OrderSide.SELL
+                ? book.bids().stream().findFirst().map(level -> level.price().value()).orElse(null)
+                : book.asks().stream().findFirst().map(level -> level.price().value()).orElse(null);
+        if (price == null || price.signum() <= 0) {
+            throw new IllegalStateException("Биржа не вернула исполнимую цену для " + side);
+        }
+        return price;
+    }
+
+    /** Останется ли лимитная заявка исполнимой по текущему лучшему уровню стакана. */
+    private boolean isMarketable(BotOrderView order, BigDecimal aggressivePrice) {
+        if (order.limitPrice() == null || aggressivePrice == null) {
+            return false;
+        }
+        return order.side() == OrderSide.BUY
+                ? order.limitPrice().compareTo(aggressivePrice) >= 0
+                : order.limitPrice().compareTo(aggressivePrice) <= 0;
+    }
+
+    /**
+     * OPENING и CLOSING всегда имеют приоритет над сеткой. ACTIVE может работать
+     * одновременно только когда это явно разрешено конфигурацией.
+     */
+    private boolean hedgeBlocksGrid() {
+        return hedgeEpisode != null
+                && (!hedgeEpisode.active() || !cfg.hedgeAndGridConcurrent());
+    }
+
+    private record HedgeOrderProgress(
+            BigDecimal executedQuantity,
+            BigDecimal executedNotional,
+            List<BotOrderView> openOrders
+    ) {
+        boolean hasOpenOrder() {
+            return !openOrders.isEmpty();
+        }
+
+        BigDecimal averagePrice() {
+            if (executedQuantity == null || executedQuantity.signum() <= 0
+                    || executedNotional == null) {
+                return null;
+            }
+            return executedNotional.divide(executedQuantity, 9, RoundingMode.HALF_UP);
+        }
     }
 
     /**
@@ -2563,10 +2905,26 @@ public class GridStrategy implements Strategy {
         if (hedgeEpisode == null) {
             return reconciledPosition;
         }
+        BigDecimal hedgeQuantity = currentHedgeLegQuantity();
         BigDecimal leg = hedgeEpisode.direction() == GridDirection.SHORT
-                ? hedgeEpisode.hedgeQuantity().negate()
-                : hedgeEpisode.hedgeQuantity();
+                ? hedgeQuantity.negate()
+                : hedgeQuantity;
         return reconciledPosition.subtract(leg);
+    }
+
+    /** Фактически открытый остаток ноги по исполненным HEDGE минус RECOVERY. */
+    private BigDecimal currentHedgeLegQuantity() {
+        if (hedgeEpisode == null) {
+            return BigDecimal.ZERO;
+        }
+        if (hedgeEpisode.opening()) {
+            BigDecimal entered = hedgeProgress(hedgeOrders(OrderPurpose.HEDGE)).executedQuantity();
+            BigDecimal original = hedgeEpisode.originalQuantity() == null
+                    ? BigDecimal.ZERO : hedgeEpisode.originalQuantity();
+            return entered.subtract(original).max(BigDecimal.ZERO);
+        }
+        BigDecimal exited = hedgeProgress(hedgeOrders(OrderPurpose.RECOVERY)).executedQuantity();
+        return hedgeEpisode.hedgeQuantity().subtract(exited).max(BigDecimal.ZERO);
     }
 
     /** Поддерживает одну агрессивную SELL на фактический остаток позиции. */

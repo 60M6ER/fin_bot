@@ -256,6 +256,17 @@ public class LiveExecutionGateway implements ExecutionGateway {
     }
 
     @Override
+    public List<BotOrderView> purposeOrders(UUID botId, OrderPurpose purpose, Instant since) {
+        return orderRepo
+                .findAllByBotIdAndPurposeAndCreatedAtGreaterThanEqualOrderByCreatedAtAsc(
+                        botId, purpose, since == null ? Instant.EPOCH : since)
+                .stream()
+                .filter(o -> !o.isDryRun())
+                .map(BotOrderView::of)
+                .toList();
+    }
+
+    @Override
     public List<BotOrderView> levelOrders(UUID botId, Instant since) {
         // dryRun отсекает сам запрос. Раньше фильтр стоял ПОСЛЕ выборки, и бумажные
         // строки съедали место в её пределе, вытесняя живые.

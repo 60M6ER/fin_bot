@@ -31,6 +31,7 @@ import ru.larionov.backend.strategy.StrategyContext;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -66,12 +67,18 @@ class GridStrategyHedgeEpisodeTest {
     private MarketDataApi marketData;
     private AtomicReference<Instant> clockNow;
     private AtomicReference<GridStrategyState> saved;
+    private List<BotOrderView> hedgeOrderHistory;
+    private boolean fillHedgeImmediately;
+    private boolean fillAggressiveRecoveryImmediately;
 
     @BeforeEach
     void setUp() {
         botId = UUID.randomUUID();
         clockNow = new AtomicReference<>(now);
         saved = new AtomicReference<>();
+        hedgeOrderHistory = new ArrayList<>();
+        fillHedgeImmediately = true;
+        fillAggressiveRecoveryImmediately = true;
     }
 
     @Test
@@ -106,6 +113,118 @@ class GridStrategyHedgeEpisodeTest {
                 .isEqualTo(OrderSide.BUY);
         assertThat(exit.quantity()).isEqualByComparingTo("30");
         assertThat(exit.limitPrice()).isLessThan(new BigDecimal("22"));
+    }
+
+    @Test
+    @DisplayName("принятая HEDGE не открывает эпизод до фактического исполнения")
+    void acceptedEntryWaitsForFill() {
+        fillHedgeImmediately = false;
+        GridStrategy strategy = startedWithPosition(true, true, true);
+
+        breakDownAndConfirm(strategy);
+
+        assertThat(saved.get().hedgeEpisode().opening()).isTrue();
+        assertThat(lastIntentWithPurpose(OrderPurpose.RECOVERY)).isNull();
+
+        BotOrderView entry = lastOrder(OrderPurpose.HEDGE);
+        BotOrderView filled = withExecution(entry, OrderStatus.FILLED,
+                entry.requestedQuantity(), new BigDecimal("19.95"));
+        replaceOrder(filled);
+        strategy.onOrderUpdate(filled);
+
+        assertThat(saved.get().hedgeEpisode().active()).isTrue();
+        assertThat(saved.get().hedgeEpisode().entryPrice()).isEqualByComparingTo("19.95");
+    }
+
+    @Test
+    @DisplayName("частичный HEDGE дозаявляет остаток и считает вход по взвешенной цене")
+    void partialEntryIsCompletedAtActualWeightedPrice() {
+        fillHedgeImmediately = false;
+        GridStrategy strategy = startedWithPosition(true, true, true);
+        breakDownAndConfirm(strategy);
+
+        BotOrderView first = lastOrder(OrderPurpose.HEDGE);
+        BotOrderView partial = withExecution(first, OrderStatus.EXPIRED,
+                new BigDecimal("15"), new BigDecimal("19.90"));
+        replaceOrder(partial);
+        strategy.onOrderUpdate(partial);
+
+        BotOrderView retry = lastOrder(OrderPurpose.HEDGE);
+        assertThat(retry.id()).isNotEqualTo(first.id());
+        assertThat(retry.requestedQuantity()).isEqualByComparingTo("25");
+        assertThat(saved.get().hedgeEpisode().opening()).isTrue();
+
+        BotOrderView filled = withExecution(retry, OrderStatus.FILLED,
+                new BigDecimal("25"), new BigDecimal("20.00"));
+        replaceOrder(filled);
+        strategy.onOrderUpdate(filled);
+
+        assertThat(saved.get().hedgeEpisode().active()).isTrue();
+        assertThat(saved.get().hedgeEpisode().entryPrice()).isEqualByComparingTo("19.962500000");
+        assertThat(saved.get().hedgeEpisode().hedgeQuantity()).isEqualByComparingTo("30");
+    }
+
+    @Test
+    @DisplayName("частичный и истёкший RECOVERY дозакрывается, эпизод живёт до FILLED")
+    void partialExpiredExitIsRetriedUntilFullyFilled() {
+        fillAggressiveRecoveryImmediately = false;
+        GridStrategy strategy = startedWithPosition(true, true, true);
+        breakDownAndConfirm(strategy);
+
+        strategy.onPrice(price("21.10"));
+        assertThat(saved.get().hedgeEpisode().closing()).isTrue();
+
+        BotOrderView firstExit = lastOrder(OrderPurpose.RECOVERY);
+        BotOrderView partial = withExecution(firstExit, OrderStatus.PARTIALLY_FILLED,
+                new BigDecimal("10"), firstExit.limitPrice());
+        replaceOrder(partial);
+        strategy.onOrderUpdate(partial);
+        assertThat(saved.get().hedgeEpisode()).isNotNull();
+
+        BotOrderView expired = withExecution(partial, OrderStatus.EXPIRED,
+                new BigDecimal("10"), firstExit.limitPrice());
+        replaceOrder(expired);
+        strategy.onOrderUpdate(expired);
+
+        BotOrderView retry = lastOrder(OrderPurpose.RECOVERY);
+        assertThat(retry.id()).isNotEqualTo(firstExit.id());
+        assertThat(retry.requestedQuantity()).isEqualByComparingTo("20");
+        assertThat(saved.get().hedgeEpisode().closing()).isTrue();
+
+        BotOrderView filled = withExecution(retry, OrderStatus.FILLED,
+                retry.requestedQuantity(), retry.limitPrice());
+        replaceOrder(filled);
+        strategy.onOrderUpdate(filled);
+
+        assertThat(saved.get().hedgeEpisode()).isNull();
+    }
+
+    @Test
+    @DisplayName("рестарт в CLOSING восстанавливает выход по оставшемуся объёму")
+    void restartWhileClosingRestoresExit() {
+        fillAggressiveRecoveryImmediately = false;
+        GridStrategy strategy = startedWithPosition(true, true, true);
+        breakDownAndConfirm(strategy);
+        strategy.onPrice(price("21.10"));
+
+        BotOrderView firstExit = lastOrder(OrderPurpose.RECOVERY);
+        replaceOrder(withExecution(firstExit, OrderStatus.EXPIRED,
+                BigDecimal.ZERO, null));
+        GridStrategyState closingState = saved.get();
+        int exitsBeforeRestart = countIntentsWithPurpose(OrderPurpose.RECOVERY);
+
+        when(ctx.loadState(GridStrategyState.class)).thenReturn(Optional.of(closingState));
+        when(gateway.reconcile(any())).thenReturn(reconciled("-30"));
+        GridStrategy restarted = new GridStrategy(config(true));
+        restarted.onStart(ctx, reconciled("-30"));
+        restarted.onReconcile(reconciled("-30"));
+        restarted.onTick();
+
+        assertThat(saved.get().hedgeEpisode().closing()).isTrue();
+        assertThat(countIntentsWithPurpose(OrderPurpose.RECOVERY))
+                .isGreaterThan(exitsBeforeRestart);
+        assertThat(lastOrder(OrderPurpose.RECOVERY).requestedQuantity())
+                .isEqualByComparingTo("30");
     }
 
     /** Истёк срок — эпизод закрывается по рынку, каким бы ни был результат. */
@@ -184,6 +303,7 @@ class GridStrategyHedgeEpisodeTest {
 
         // Переворот исполнился: на счёте только нога плеча, а в стакане — её выход.
         BotOrderView hedgeExit = hedgeExitOrder();
+        hedgeOrderHistory.add(hedgeExit);
         when(gateway.openOrders(botId)).thenReturn(List.of(hedgeExit));
         BigDecimal leg = saved.get().hedgeEpisode().hedgeQuantity().negate();
         when(gateway.reconcile(any())).thenReturn(reconciled(leg.toPlainString()));
@@ -391,6 +511,34 @@ class GridStrategyHedgeEpisodeTest {
                         null, null, now));
         when(gateway.openOrders(botId)).thenReturn(List.of());
         when(gateway.levelOrders(eq(botId), any())).thenReturn(List.of());
+        when(gateway.purposeOrders(eq(botId), any(), any())).thenAnswer(invocation -> {
+            OrderPurpose purpose = invocation.getArgument(1);
+            return hedgeOrderHistory.stream().filter(o -> o.purpose() == purpose).toList();
+        });
+        org.mockito.Mockito.doAnswer(invocation -> {
+            PlaceIntent intent = invocation.getArgument(1);
+            OrderStatus status = (intent.purpose() == OrderPurpose.HEDGE
+                    && fillHedgeImmediately)
+                    || (intent.purpose() == OrderPurpose.RECOVERY
+                    && fillAggressiveRecoveryImmediately
+                    && intent.limitPrice().compareTo(new BigDecimal("20")) >= 0)
+                    ? OrderStatus.FILLED : OrderStatus.NEW;
+            BigDecimal executed = status == OrderStatus.FILLED
+                    ? intent.quantity() : BigDecimal.ZERO;
+            UUID id = UUID.randomUUID();
+            BotOrderView order = new BotOrderView(
+                    id, id.toString(), "exch-" + id, intent.side(), status,
+                    intent.gridLevel(), intent.purpose(), intent.role(), intent.quantity(),
+                    executed, intent.limitPrice(), status == OrderStatus.FILLED
+                            ? intent.limitPrice() : null,
+                    null, false, null, null, "rub", BigDecimal.ONE,
+                    true, null, clockNow.get(), clockNow.get());
+            if (intent.purpose() == OrderPurpose.HEDGE
+                    || intent.purpose() == OrderPurpose.RECOVERY) {
+                hedgeOrderHistory.add(order);
+            }
+            return order;
+        }).when(gateway).placeLimit(any(), any());
         when(gateway.reconcile(any())).thenReturn(reconciled("10"));
 
         GridStrategy strategy = new GridStrategy(config(margin));
@@ -404,6 +552,28 @@ class GridStrategyHedgeEpisodeTest {
             saved.set(i.getArgument(0));
             return null;
         }).when(ctx).saveState(any());
+    }
+
+    private BotOrderView lastOrder(OrderPurpose purpose) {
+        return hedgeOrderHistory.stream()
+                .filter(o -> o.purpose() == purpose)
+                .reduce((first, second) -> second)
+                .orElseThrow();
+    }
+
+    private void replaceOrder(BotOrderView replacement) {
+        hedgeOrderHistory.replaceAll(existing -> existing.id().equals(replacement.id())
+                ? replacement : existing);
+    }
+
+    private BotOrderView withExecution(BotOrderView order, OrderStatus status,
+                                       BigDecimal executed, BigDecimal averagePrice) {
+        return new BotOrderView(order.id(), order.clientOrderId(), order.exchangeOrderId(),
+                order.side(), status, order.gridLevel(), order.purpose(), order.gridRole(),
+                order.requestedQuantity(), executed, order.limitPrice(), averagePrice,
+                order.fee(), order.feeActual(), order.feeRate(), order.feeSource(),
+                order.feeCurrency(), order.exchangeLotSize(), order.dryRun(), order.lastError(),
+                order.createdAt(), clockNow.get());
     }
 
     private ReconcileResult reconciled(String position) {

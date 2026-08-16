@@ -35,6 +35,14 @@ import java.util.UUID;
  *                     переживает рестарт вместе с эпизодом; потеряй мы его, цель
  *                     вернулась бы к безубытку — не опасно, но всю набранную
  *                     прибыль эпизода это бы отдало обратно
+ * @param phase         фактическая стадия биржевого исполнения. Эпизод нельзя считать
+ *                      открытым по одной лишь принятой заявке и нельзя считать
+ *                      закрытым, пока RECOVERY не исполнена целиком
+ * @param originalQuantity размер позиции сетки до переворота. Нужен, чтобы после
+ *                      исполнения HEDGE пересчитать плечо по фактической средней цене
+ * @param originalCostBasis себестоимость исходной позиции до переворота
+ * @param plannedEntryQuantity сколько всего должна исполнить заявка переворота
+ * @param closingReason почему начат выход. Сохраняется до подтверждённого исполнения
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record HedgeEpisode(
@@ -48,8 +56,29 @@ public record HedgeEpisode(
         BigDecimal lossAtEntry,
         Instant deadline,
         BigDecimal stopPrice,
-        BigDecimal trailingTarget
+        BigDecimal trailingTarget,
+        Phase phase,
+        BigDecimal originalQuantity,
+        BigDecimal originalCostBasis,
+        BigDecimal plannedEntryQuantity,
+        String closingReason
 ) {
+
+    public enum Phase {
+        /** Заявка переворота ещё не исполнена целиком. */
+        OPENING,
+        /** Противоположная нога открыта и ведётся по цели, стопу и сроку. */
+        ACTIVE,
+        /** Выход отправлен, но фактический остаток ещё не закрыт полностью. */
+        CLOSING
+    }
+
+    public HedgeEpisode {
+        // Состояния, записанные до появления автомата фаз, были активными эпизодами.
+        if (phase == null) {
+            phase = Phase.ACTIVE;
+        }
+    }
 
     /** Эпизод без храповика: заведённый до появления трейлинга или в режиме безубытка. */
     public HedgeEpisode(UUID episodeId, GridDirection direction, Instant openedAt,
@@ -57,7 +86,51 @@ public record HedgeEpisode(
                         BigDecimal multiplier, BigDecimal lossAtEntry, Instant deadline,
                         BigDecimal stopPrice) {
         this(episodeId, direction, openedAt, entryPrice, hedgeQuantity, targetPrice,
-                multiplier, lossAtEntry, deadline, stopPrice, null);
+                multiplier, lossAtEntry, deadline, stopPrice, null,
+                Phase.ACTIVE, null, null, null, null);
+    }
+
+    /** Эпизод перед отправкой HEDGE: состояние существует раньше сетевого вызова. */
+    public static HedgeEpisode opening(UUID episodeId, GridDirection direction, Instant openedAt,
+                                       HedgeMath.Plan plan, BigDecimal originalQuantity,
+                                       BigDecimal originalCostBasis, Instant deadline,
+                                       BigDecimal stopPrice, BigDecimal plannedEntryQuantity) {
+        return new HedgeEpisode(episodeId, direction, openedAt, plan.entryPrice(),
+                plan.hedgeQuantity(), plan.targetPrice(),
+                plan.totalQuantity().divide(originalQuantity, 12, java.math.RoundingMode.HALF_UP),
+                plan.realizedOnClose(), deadline, stopPrice, null, Phase.OPENING,
+                originalQuantity, originalCostBasis, plannedEntryQuantity, null);
+    }
+
+    @JsonIgnore
+    public boolean opening() {
+        return phase == Phase.OPENING;
+    }
+
+    @JsonIgnore
+    public boolean active() {
+        return phase == Phase.ACTIVE;
+    }
+
+    @JsonIgnore
+    public boolean closing() {
+        return phase == Phase.CLOSING;
+    }
+
+    /** Подтверждённый HEDGE: все денежные параметры заменяются фактическими. */
+    public HedgeEpisode activated(HedgeMath.Plan plan, BigDecimal actualMultiplier,
+                                  BigDecimal actualStopPrice) {
+        return new HedgeEpisode(episodeId, direction, openedAt, plan.entryPrice(),
+                plan.hedgeQuantity(), plan.targetPrice(), actualMultiplier,
+                plan.realizedOnClose(), deadline, actualStopPrice, null, Phase.ACTIVE,
+                originalQuantity, originalCostBasis, plannedEntryQuantity, null);
+    }
+
+    /** Решение о выходе сохранено, но эпизод остаётся жив до полного исполнения. */
+    public HedgeEpisode startClosing(String reason) {
+        return new HedgeEpisode(episodeId, direction, openedAt, entryPrice, hedgeQuantity,
+                targetPrice, multiplier, lossAtEntry, deadline, stopPrice, trailingTarget,
+                Phase.CLOSING, originalQuantity, originalCostBasis, plannedEntryQuantity, reason);
     }
 
     /** Пора ли закрывать по сроку: держать дольше согласованного нельзя. */
@@ -195,6 +268,7 @@ public record HedgeEpisode(
 
     private HedgeEpisode withTrailingTarget(BigDecimal target) {
         return new HedgeEpisode(episodeId, direction, openedAt, entryPrice, hedgeQuantity,
-                targetPrice, multiplier, lossAtEntry, deadline, stopPrice, target);
+                targetPrice, multiplier, lossAtEntry, deadline, stopPrice, target,
+                phase, originalQuantity, originalCostBasis, plannedEntryQuantity, closingReason);
     }
 }
