@@ -196,7 +196,8 @@ public final class GridValidator {
                                     pct(buyFeePct),
                                     pct(sellFeePct),
                                     carryPct.signum() > 0
-                                            ? ", перенос за цикл %s%%".formatted(pct(carryPct))
+                                            ? ", перенос за цикл %s%% (оценка из настроек, не dshort)"
+                                            .formatted(pct(carryPct))
                                             : "",
                                     pct(required),
                                     cfg.minStepToCommissionRatio().toPlainString()));

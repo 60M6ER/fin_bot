@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import ru.larionov.backend.exchange.api.model.CarryFeeSchedule;
 import ru.larionov.backend.exchange.api.model.ExchangeConnectionSettings;
 import ru.larionov.backend.exchange.api.model.FeeInfo;
+import ru.larionov.backend.service.CarryFeeResolver;
 import ru.larionov.backend.strategy.grid.GridConfig;
 import ru.larionov.backend.strategy.grid.GridDirection;
 import ru.larionov.backend.strategy.grid.GridLadder;
@@ -158,6 +159,23 @@ class CarryFeeTest {
         assertThatThrownBy(() -> validate(GridDirection.SHORT, 4, new BigDecimal("0.003")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("перенос за цикл");
+    }
+
+    @Test
+    @DisplayName("десятидневный цикл T-Invest по мягкому дефолту даёт 0.1000% переноса")
+    void tInvestSoftDefaultForTenDayCycleIsOneTenthPercent() {
+        GridConfig cfg = config(GridDirection.SHORT, 10);
+        GridRange range = new GridRange(new BigDecimal("100"), new BigDecimal("110"), 100,
+                GridRange.Origin.MANUAL, Instant.EPOCH);
+        GridLadder ladder = GridLadder.build(range, new BigDecimal("0.01"));
+
+        assertThatThrownBy(() -> GridValidator.validate(cfg, range, ladder, new BigDecimal("0.01"),
+                new FeeInfo(new BigDecimal("0.0005"), new BigDecimal("0.0005")),
+                BigDecimal.ONE, null, new BigDecimal("100000"),
+                CarryFeeResolver.T_INVEST_DEFAULT_DAILY_RATE))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("перенос за цикл 0.1000%")
+                .hasMessageContaining("не dshort");
     }
 
     /** Нулевая ставка означает «тариф не задан» и требование не меняет. */
