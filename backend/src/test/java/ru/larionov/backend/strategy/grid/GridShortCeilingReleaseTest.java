@@ -2,6 +2,7 @@ package ru.larionov.backend.strategy.grid;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import ru.larionov.backend.enums.BotEventType;
 import ru.larionov.backend.enums.GridRole;
 import ru.larionov.backend.enums.OrderPurpose;
 import ru.larionov.backend.exchange.api.ExchangeClient;
@@ -33,8 +34,12 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -62,6 +67,7 @@ class GridShortCeilingReleaseTest {
 
     /** Потолок пускает ровно две открывающие заявки: третья обязана кого-то подвинуть. */
     private int ceiling = 2;
+    private int maxActiveOrders = 10;
 
     @Test
     @DisplayName("ближняя заявка вытесняет дальнюю, когда потолок занят")
@@ -113,6 +119,41 @@ class GridShortCeilingReleaseTest {
         assertThat(cancelled)
                 .as("это защита непокрытой позиции, а не ёмкость под потолком")
                 .doesNotContain(exit.id());
+    }
+
+    @Test
+    @DisplayName("повторный риск-отказ того же уровня не шумит на каждом тике")
+    void repeatedRiskRejectionOnTheSameLevelIsReportedOnce() {
+        ceiling = 0;
+        GridStrategy strategy = started();
+        clearInvocations(ctx);
+
+        strategy.onPrice(price("20.15"));
+        strategy.onPrice(price("20.15"));
+        strategy.onPrice(price("20.15"));
+
+        verify(ctx, times(1)).event(eq(BotEventType.RISK_BLOCKED), contains("денежный потолок"));
+    }
+
+    @Test
+    @DisplayName("успешная постановка очищает молчание для уровня")
+    void successfulPlacementClearsRiskRejectionSilence() {
+        ceiling = 0;
+        maxActiveOrders = 1;
+        GridStrategy strategy = started();
+        clearInvocations(ctx);
+
+        strategy.onPrice(price("20.15"));
+        strategy.onPrice(price("20.15"));
+
+        ceiling = 1;
+        strategy.onPrice(price("20.15"));
+        open.clear();
+
+        ceiling = 0;
+        strategy.onPrice(price("20.15"));
+
+        verify(ctx, times(2)).event(eq(BotEventType.RISK_BLOCKED), contains("денежный потолок"));
     }
 
     // ==============================
@@ -209,7 +250,7 @@ class GridShortCeilingReleaseTest {
     /** Шортовая сетка 20.0..21.0: продажи открывают позицию, покупки её закрывают. */
     private GridConfig shortConfig() {
         return new GridConfig(
-                new BigDecimal("20.0"), new BigDecimal("21.0"), 10, new BigDecimal("10"), 10,
+                new BigDecimal("20.0"), new BigDecimal("21.0"), 10, new BigDecimal("10"), maxActiveOrders,
                 GridConfig.RangeExitAction.STOP_BUYING, null, null, true, false,
                 null, 6, new BigDecimal("2"), new BigDecimal("0.01"), new BigDecimal("0.15"),
                 null, 300, new BigDecimal("0.002"), 1200, 0, null,

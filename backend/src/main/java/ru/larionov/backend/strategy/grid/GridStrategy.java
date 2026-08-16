@@ -285,6 +285,9 @@ public class GridStrategy implements Strategy {
      */
     private final Map<String, Instant> placementCooldowns = new HashMap<>();
 
+    /** Уровни, по которым лимит уже объяснён человеку и повторно подтверждается. */
+    private final Set<String> riskRejectedPlacements = new HashSet<>();
+
     public GridStrategy(GridConfig cfg) {
         this.cfg = cfg;
     }
@@ -706,6 +709,7 @@ public class GridStrategy implements Strategy {
         if (!was && limitOrdersAvailable) {
             // Новая сессия — новый коридор цен: прошлые отказы к ней отношения не имеют.
             placementCooldowns.clear();
+            riskRejectedPlacements.clear();
             ctx.event(BotEventType.HOUSEKEEPING,
                     "Торги открыты (%s) — сверяюсь и расставляю сетку".formatted(event.rawStatus()));
             ReconcileResult reconciled = reconcileAndCheck();
@@ -995,6 +999,19 @@ public class GridStrategy implements Strategy {
 
     private void clearPlacementFailure(OrderSide side, int level) {
         placementCooldowns.remove(placementKey(side, level));
+        riskRejectedPlacements.remove(placementKey(side, level));
+    }
+
+    /**
+     * Риск-отказ отличается от сбоя биржи: проверку нужно выполнять каждый проход,
+     * но одинаковое подтверждение по тому же уровню не должно шуметь в журнале.
+     */
+    private void reportRiskRejectedPlacement(OrderSide side, int level, RiskRejectedException e) {
+        if (riskRejectedPlacements.add(placementKey(side, level))) {
+            ctx.event(BotEventType.RISK_BLOCKED, e.getMessage());
+        } else {
+            log.debug("Уровень {} снова запрещён риск-лимитом: {}", level, e.getMessage());
+        }
     }
 
     /**
@@ -1733,7 +1750,7 @@ public class GridStrategy implements Strategy {
                     continue;
                 }
                 // Штатный отказ: лимит сработал так, как задумано.
-                ctx.event(BotEventType.RISK_BLOCKED, e.getMessage());
+                reportRiskRejectedPlacement(side, level, e);
                 return false;
             } catch (Exception e) {
                 return placementFailed(side, level, e);
