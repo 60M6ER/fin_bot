@@ -22,6 +22,7 @@ import ru.larionov.backend.strategy.StrategyContext;
 
 import java.math.BigDecimal;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -220,6 +221,32 @@ class GridStrategyAutoRangeTest {
         verify(marketData, times(1)).getLastPrice(instrumentId);
     }
 
+    @Test
+    void favourableShortBreakoutMovesRangeDownAndSaysSo() {
+        when(ctx.execution()).thenReturn(new BotExecutionContext(
+                botId, UUID.randomUUID(), new AccountId("acc"), instrumentId,
+                true, BigDecimal.ONE, BigDecimal.ONE, null, null, null, null, null, "rub",
+                true, true, new BigDecimal("1000"), new BigDecimal("1000000")));
+        GridStrategy strategy = new GridStrategy(replaceShortFavourableConfig());
+        strategy.onStart(ctx, reconciled("0"));
+        strategy.onReconcile(reconciled("0"));
+
+        strategy.onPrice(lastPrice("89"));
+        currentTime.set(now.plusSeconds(11));
+        strategy.onPrice(lastPrice("89"));
+
+        GridStrategyState state = saved.get();
+        assertThat(state.generation()).isEqualTo(2);
+        assertThat(state.direction()).isEqualTo(GridDirection.SHORT);
+        assertThat(state.activeRange().origin()).isEqualTo(GridRange.Origin.ATR_REPLACED_DOWN);
+        assertThat(state.activeRange().lower()).isEqualByComparingTo("81");
+        assertThat(state.activeRange().upper()).isEqualByComparingTo("97");
+        verify(ctx).event(eq(ru.larionov.backend.enums.BotEventType.RANGE_EXIT),
+                org.mockito.ArgumentMatchers.contains("нижней границы"));
+        verify(ctx).event(eq(ru.larionov.backend.enums.BotEventType.GRID_REPLACED),
+                org.mockito.ArgumentMatchers.contains("заменён вниз"));
+    }
+
     /**
      * Инцидент 08.08.2026, SOL/USDT на Poloniex.
      *
@@ -369,6 +396,32 @@ class GridStrategyAutoRangeTest {
                 .isPositive();
     }
 
+    @Test
+    void temporaryMarginShortageIsRetriedAfterOneMinute() {
+        when(marketData.getTradingStatus(instrumentId)).thenReturn(
+                new TradingStatusEvent(instrumentId, true, true, "NORMAL_TRADING", now));
+        when(gateway.placeLimit(any(), any())).thenThrow(
+                new IllegalStateException("INVALID_ARGUMENT: 30042 Not enough assets for a margin trade"));
+
+        GridStrategy strategy = new GridStrategy(autoConfig());
+        strategy.onStart(ctx, reconciled("0"));
+        strategy.onPrice(lastPrice("100"));
+        int rejectedLevel = firstAttemptedLevel();
+        long firstAttempts = attemptsAtLevel(rejectedLevel);
+
+        currentTime.set(now.plusSeconds(59));
+        strategy.onPrice(lastPrice("100"));
+        assertThat(attemptsAtLevel(rejectedLevel)).isEqualTo(firstAttempts);
+
+        currentTime.set(now.plusSeconds(61));
+        strategy.onPrice(lastPrice("100"));
+        assertThat(attemptsAtLevel(rejectedLevel)).isGreaterThan(firstAttempts);
+        assertThat(GridStrategy.placementCooldown(new IllegalStateException("30042")))
+                .isEqualTo(Duration.ofMinutes(1));
+        assertThat(GridStrategy.placementCooldown(new IllegalStateException("30049")))
+                .isEqualTo(Duration.ofMinutes(15));
+    }
+
     /** Сколько раз стратегия дошла до биржи с постановкой на этом уровне. */
     private long attemptsAtLevel(int level) {
         return org.mockito.Mockito.mockingDetails(gateway).getInvocations().stream()
@@ -377,6 +430,18 @@ class GridStrategyAutoRangeTest {
                         && i.getArguments()[1] instanceof ru.larionov.backend.execution.PlaceIntent intent
                         && Integer.valueOf(level).equals(intent.gridLevel()))
                 .count();
+    }
+
+    private int firstAttemptedLevel() {
+        return org.mockito.Mockito.mockingDetails(gateway).getInvocations().stream()
+                .filter(i -> "placeLimit".equals(i.getMethod().getName()))
+                .filter(i -> i.getArguments().length > 1
+                        && i.getArguments()[1] instanceof ru.larionov.backend.execution.PlaceIntent)
+                .map(i -> (ru.larionov.backend.execution.PlaceIntent) i.getArguments()[1])
+                .map(ru.larionov.backend.execution.PlaceIntent::gridLevel)
+                .filter(java.util.Objects::nonNull)
+                .findFirst()
+                .orElseThrow();
     }
 
     /** Сколько раз про отказ написано в журнал событий. */
@@ -537,6 +602,20 @@ class GridStrategyAutoRangeTest {
                 GridConfig.UpperBreakoutAction.REPLACE_UPPER, 10, new BigDecimal("0.002"),
                 1200, 0, null,
                 null, null, null);
+    }
+
+    private GridConfig replaceShortFavourableConfig() {
+        return new GridConfig(
+                null, null, 4, new BigDecimal("1"), 4,
+                GridConfig.RangeExitAction.REPLACE_LOWER, null, 3600, true,
+                true, CandleInterval.H1, 6, new BigDecimal("2"),
+                new BigDecimal("0.01"), new BigDecimal("0.15"),
+                GridConfig.UpperBreakoutAction.REPLACE_UPPER, 10, new BigDecimal("0.002"),
+                1200, 3, new BigDecimal("10000"),
+                null, GridConfig.SizingMode.FIXED_QUANTITY, null,
+                GridDirection.SHORT, true, 1,
+                GridConfig.AdverseBreakoutAction.HEDGE_AND_RECOVER,
+                new BigDecimal("4"), 1, 3, new BigDecimal("0.05"), true, true);
     }
 
     private LastPrice lastPrice(String value) {

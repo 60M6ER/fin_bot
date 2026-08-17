@@ -243,7 +243,7 @@ class GridStrategyDownwardReplacementTest {
 
         confirmLowerBreakout(strategy);
 
-        verify(ctx).requestStop(contains("Исчерпан лимит перестановок вниз"));
+        verify(ctx).requestStop(contains("Исчерпан лимит неблагоприятных перестановок вниз"));
         verify(gateway).cancelAll(any());
         verify(gateway, never()).placeLimit(any(), any());
         verify(marketData, never()).getCandles(any(), any());
@@ -274,7 +274,7 @@ class GridStrategyDownwardReplacementTest {
         currentTime.set(now.plusSeconds(11));
         strategy.onPrice(lastPrice("89"));           // снова ниже порога: 11 с > 10 с
 
-        verify(ctx).requestStop(contains("Исчерпан лимит перестановок вниз"));
+        verify(ctx).requestStop(contains("Исчерпан лимит неблагоприятных перестановок вниз"));
         verify(ctx, times(1)).event(eq(BotEventType.HOUSEKEEPING),
                 contains("начато подтверждение"));
     }

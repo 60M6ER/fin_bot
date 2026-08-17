@@ -14,6 +14,7 @@ import ru.larionov.backend.exchange.api.model.FeeInfo;
 import ru.larionov.backend.exchange.api.model.id.AccountId;
 import ru.larionov.backend.exchange.api.model.id.InstrumentId;
 import ru.larionov.backend.exchange.api.model.instrument.TradingConstraints;
+import ru.larionov.backend.exchange.api.model.market.Candle;
 import ru.larionov.backend.exchange.api.model.market.LastPrice;
 import ru.larionov.backend.exchange.api.model.market.OrderBook;
 import ru.larionov.backend.exchange.api.model.market.OrderBookLevel;
@@ -505,6 +506,16 @@ class HedgeTrailingTest {
             when(marketData.getTradingStatus(instrumentId)).thenReturn(
                     new TradingStatusEvent(instrumentId, true, true, "NORMAL_TRADING", now));
             when(marketData.getLastPrice(instrumentId)).thenReturn(price("21.5"));
+            when(marketData.getCandles(any(), any())).thenReturn(
+                    java.util.stream.IntStream.range(0, 6)
+                            .mapToObj(i -> new Candle(instrumentId,
+                                    new Price(new BigDecimal("20"), "rub"),
+                                    new Price(new BigDecimal("20.4"), "rub"),
+                                    new Price(new BigDecimal("19.6"), "rub"),
+                                    new Price(new BigDecimal("20"), "rub"),
+                                    BigDecimal.ONE,
+                                    now.minusSeconds((6L - i) * 3600), null))
+                            .toList());
             // Стакан вокруг двадцати: по нему считается цена переворота, и от неё —
             // безубыток эпизода. Двигать его вслед за тиками не нужно: храповик смотрит
             // на цену, а не на стакан.

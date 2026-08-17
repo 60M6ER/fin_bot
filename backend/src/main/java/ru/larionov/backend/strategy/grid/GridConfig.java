@@ -495,6 +495,20 @@ public record GridConfig(
                 hedgeExitMode, hedgeTrailingOffsetPct);
     }
 
+    /** Копия для проверки фактического направления текущего поколения. */
+    public GridConfig withDirection(GridDirection newDirection) {
+        return new GridConfig(
+                lowerPrice, upperPrice, levels, quantityPerOrder, maxActiveOrders,
+                onRangeExit, minStepToCommissionRatio, feeRefreshSeconds, enabled,
+                autoRange, atrInterval, atrPeriods, atrMultiplier, minHalfWidthPct,
+                maxHalfWidthPct, onUpperBreakout, breakoutConfirmSeconds, breakoutMarginPct,
+                replaceCooldownSeconds, maxDownwardReplacements, maxRealizedLoss,
+                budget, sizingMode, profitPolicy, newDirection, marginEnabled, expectedCycleDays,
+                onAdverseBreakout, hedgeMultiplier, maxHedgeEpisodes, maxHedgeHoldDays,
+                hedgeStopLossPct, hedgeAndGridConcurrent, flipDirectionOnAdverse,
+                hedgeExitMode, hedgeTrailingOffsetPct);
+    }
+
     /**
      * Деньги, которыми бот вправе распоряжаться на момент расчёта размера заявки.
      *

@@ -96,6 +96,52 @@ class GridStrategyHedgeEpisodeTest {
                 .isEqualByComparingTo("40");
         assertThat(saved.get().hedgeEpisode()).isNotNull();
         assertThat(saved.get().hedgeEpisodesUsed()).isEqualTo(1);
+        assertThat(saved.get().direction())
+                .as("вместе с позицией разворачивается сама сетка")
+                .isEqualTo(GridDirection.SHORT);
+        assertThat(saved.get().generation()).isEqualTo(2);
+        assertThat(saved.get().activeRange().origin())
+                .as("лонг пробит вниз — новое поколение физически ниже")
+                .isEqualTo(GridRange.Origin.ATR_REPLACED_DOWN);
+    }
+
+    @Test
+    @DisplayName("пробой шорта вверх переворачивает сетку в лонг без разрешения на шорт")
+    void shortBreakoutFlipsToLongWithoutShortPermission() {
+        GridStrategy strategy = startedWithPosition(
+                GridDirection.SHORT, true, true, true);
+        // Шорт уже открыт законно, но перед пробоем брокер снял флаг доступности.
+        // Это не должно запрещать BUY, который закрывает шорт и открывает лонг.
+        when(ctx.execution()).thenReturn(executionContext(true, false, true));
+
+        breakUpAndConfirm(strategy);
+
+        PlaceIntent flip = lastIntentWithPurpose(OrderPurpose.HEDGE);
+        assertThat(flip).as("шорт закрывается и переворачивается одной покупкой").isNotNull();
+        assertThat(flip.side()).isEqualTo(OrderSide.BUY);
+        assertThat(flip.quantity()).isEqualByComparingTo("40");
+        assertThat(saved.get().direction()).isEqualTo(GridDirection.LONG);
+        assertThat(saved.get().generation()).isEqualTo(2);
+        assertThat(saved.get().activeRange().origin())
+                .as("шорт пробит вверх — новое поколение физически выше")
+                .isEqualTo(GridRange.Origin.ATR_REPLACED_UP);
+        verify(ctx, never()).event(eq(BotEventType.RISK_BLOCKED),
+                org.mockito.ArgumentMatchers.contains("Брокер не шортит"));
+    }
+
+    @Test
+    @DisplayName("если переворот шорта запрещён, аварийное закрытие выставляет BUY")
+    void shortFallbackLiquidationBuysToClose() {
+        GridStrategy strategy = startedWithPosition(
+                GridDirection.SHORT, true, true, true, 0);
+
+        breakUpAndConfirm(strategy);
+
+        assertThat(lastIntentWithPurpose(OrderPurpose.HEDGE)).isNull();
+        PlaceIntent liquidation = lastIntentWithPurpose(OrderPurpose.LIQUIDATION);
+        assertThat(liquidation).as("короткую позицию закрывает зеркальная заявка").isNotNull();
+        assertThat(liquidation.side()).isEqualTo(OrderSide.BUY);
+        assertThat(liquidation.quantity()).isEqualByComparingTo("10");
     }
 
     @Test
@@ -311,7 +357,8 @@ class GridStrategyHedgeEpisodeTest {
 
         long generationBefore = saved.get().generation();
 
-        // Падение продолжается — сетка подтверждает следующий пробой.
+        // Падение продолжается. После переворота сетка уже шортовая, поэтому это
+        // благоприятное движение, а не ещё одна аварийная перестановка.
         clockNow.set(clockNow.get().plusSeconds(400));
         strategy.onPrice(price("19.5"));
         clockNow.set(clockNow.get().plusSeconds(400));
@@ -325,8 +372,8 @@ class GridStrategyHedgeEpisodeTest {
                 .as("эпизод продолжает жить со своей защитой в стакане")
                 .isNotNull();
         assertThat(saved.get().generation())
-                .as("перестановка дошла до конца, а не зависла в ожидании чужой заявки")
-                .isGreaterThan(generationBefore);
+                .as("сетку перевернули вместе с хеджем; лишней перестановки больше нет")
+                .isEqualTo(generationBefore);
     }
 
     /**
@@ -435,6 +482,13 @@ class GridStrategyHedgeEpisodeTest {
         strategy.onPrice(price("20.0"));
     }
 
+    /** Доводит цену до подтверждённого пробоя верхней границы шортовой сетки. */
+    private void breakUpAndConfirm(GridStrategy strategy) {
+        strategy.onPrice(price("20.0"));
+        clockNow.set(clockNow.get().plusSeconds(400));
+        strategy.onPrice(price("20.0"));
+    }
+
     private LastPrice price(String value) {
         return new LastPrice(instrumentId, new Price(new BigDecimal(value), "rub"), clockNow.get());
     }
@@ -464,10 +518,37 @@ class GridStrategyHedgeEpisodeTest {
 
     /** Бот с позицией 10 по себестоимости 220, то есть уже в убытке при цене 21. */
     private GridStrategy startedWithPosition(boolean margin, boolean shortEnabled, boolean dryRun) {
+        return startedWithPosition(GridDirection.LONG, margin, shortEnabled, dryRun);
+    }
+
+    /**
+     * Лонг хранится как +10/+220 в диапазоне 21..23, шорт — как -10/-180 в 17..19.
+     * В обоих случаях цена 20 находится за неблагоприятной границей и даёт реальный
+     * убыток, который может отбить противоположная нога ×4.
+     */
+    private GridStrategy startedWithPosition(GridDirection initialDirection,
+                                             boolean margin,
+                                             boolean shortEnabled,
+                                             boolean dryRun) {
+        return startedWithPosition(initialDirection, margin, shortEnabled, dryRun, 1);
+    }
+
+    private GridStrategy startedWithPosition(GridDirection initialDirection,
+                                             boolean margin,
+                                             boolean shortEnabled,
+                                             boolean dryRun,
+                                             int maxHedgeEpisodes) {
         ctx = mock(StrategyContext.class);
         ExchangeClient exchange = mock(ExchangeClient.class);
         marketData = mock(MarketDataApi.class);
         gateway = mock(ExecutionGateway.class);
+
+        boolean longPosition = initialDirection == GridDirection.LONG;
+        BigDecimal lower = new BigDecimal(longPosition ? "21.0" : "17.0");
+        BigDecimal upper = new BigDecimal(longPosition ? "23.0" : "19.0");
+        BigDecimal position = new BigDecimal(longPosition ? "10" : "-10");
+        BigDecimal costBasis = new BigDecimal(longPosition ? "220" : "-180");
+        BigDecimal averagePrice = new BigDecimal(longPosition ? "22" : "18");
 
         when(ctx.botId()).thenReturn(botId);
         Clock clock = mock(Clock.class);
@@ -476,10 +557,7 @@ class GridStrategyHedgeEpisodeTest {
         when(ctx.gateway()).thenReturn(gateway);
         when(ctx.constraints()).thenReturn(
                 TradingConstraints.wholeLots(1, new BigDecimal("0.01"), "rub"));
-        when(ctx.execution()).thenReturn(new BotExecutionContext(
-                botId, UUID.randomUUID(), new AccountId("acc"), instrumentId,
-                dryRun, BigDecimal.ONE, BigDecimal.ONE, null, null, null, null, null, "rub",
-                margin, shortEnabled, new BigDecimal("1000"), new BigDecimal("1000000")));
+        when(ctx.execution()).thenReturn(executionContext(margin, shortEnabled, dryRun));
         when(ctx.exchange()).thenReturn(exchange);
         when(ctx.realizedPnl()).thenReturn(BigDecimal.ZERO);
         when(ctx.carryDailyRate()).thenReturn(BigDecimal.ZERO);
@@ -489,11 +567,12 @@ class GridStrategyHedgeEpisodeTest {
         // как после рестарта.
         when(ctx.loadState(GridStrategyState.class)).thenReturn(Optional.of(
                 new GridStrategyState(
-                        new GridRange(new BigDecimal("21.0"), new BigDecimal("23.0"), 10,
+                        new GridRange(lower, upper, 10,
                                 GridRange.Origin.ATR_INITIAL, now),
-                        1)));
+                        1, false, null, false, null, 0, BigDecimal.ZERO, null,
+                        false, false, null, 0, initialDirection)));
         when(ctx.inventory()).thenReturn(new Inventory(
-                new BigDecimal("10"), new BigDecimal("220"), new BigDecimal("22")));
+                position, costBasis, averagePrice));
         doSaveState();
 
         when(exchange.marketData()).thenReturn(marketData);
@@ -539,12 +618,21 @@ class GridStrategyHedgeEpisodeTest {
             }
             return order;
         }).when(gateway).placeLimit(any(), any());
-        when(gateway.reconcile(any())).thenReturn(reconciled("10"));
+        when(gateway.reconcile(any())).thenReturn(reconciled(position.toPlainString()));
 
-        GridStrategy strategy = new GridStrategy(config(margin));
-        strategy.onStart(ctx, reconciled("10"));
-        strategy.onReconcile(reconciled("10"));
+        GridStrategy strategy = new GridStrategy(config(
+                margin, initialDirection, lower, upper, maxHedgeEpisodes));
+        strategy.onStart(ctx, reconciled(position.toPlainString()));
+        strategy.onReconcile(reconciled(position.toPlainString()));
         return strategy;
+    }
+
+    private BotExecutionContext executionContext(boolean margin, boolean shortEnabled,
+                                                 boolean dryRun) {
+        return new BotExecutionContext(
+                botId, UUID.randomUUID(), new AccountId("acc"), instrumentId,
+                dryRun, BigDecimal.ONE, BigDecimal.ONE, null, null, null, null, null, "rub",
+                margin, shortEnabled, new BigDecimal("1000"), new BigDecimal("1000000"));
     }
 
     private void doSaveState() {
@@ -582,16 +670,29 @@ class GridStrategyHedgeEpisodeTest {
     }
 
     private GridConfig config(boolean margin) {
+        return config(margin, GridDirection.LONG,
+                new BigDecimal("21.0"), new BigDecimal("23.0"));
+    }
+
+    private GridConfig config(boolean margin, GridDirection direction,
+                              BigDecimal lower, BigDecimal upper) {
+        return config(margin, direction, lower, upper, 1);
+    }
+
+    private GridConfig config(boolean margin, GridDirection direction,
+                              BigDecimal lower, BigDecimal upper,
+                              int maxHedgeEpisodes) {
         return new GridConfig(
-                new BigDecimal("21.0"), new BigDecimal("23.0"), 10, new BigDecimal("1"), 10,
+                lower, upper, 10, new BigDecimal("1"), 10,
                 GridConfig.RangeExitAction.REPLACE_LOWER, null, null, true, true,
                 null, 6, new BigDecimal("2"), new BigDecimal("0.01"), new BigDecimal("0.15"),
                 null, 300, new BigDecimal("0.002"), 1200, 3, new BigDecimal("10000"),
                 null, GridConfig.SizingMode.FIXED_QUANTITY, null,
-                GridDirection.LONG, margin, 1,
+                direction, margin, 1,
                 margin ? GridConfig.AdverseBreakoutAction.HEDGE_AND_RECOVER
                         : GridConfig.AdverseBreakoutAction.LIQUIDATE,
-                new BigDecimal("4"), 1, 3, new BigDecimal("0.05"), true, margin);
+                new BigDecimal("4"), maxHedgeEpisodes, 3,
+                new BigDecimal("0.05"), true, margin);
     }
 
     private List<Candle> candles() {
