@@ -19,5 +19,8 @@ public interface BotRepository extends JpaRepository<BotEntity, UUID> {
     /** Все боты подключения независимо от desired-state — каскад остановки и UI. */
     List<BotEntity> findAllByExchangeConnectionIdOrderByNameAsc(UUID exchangeConnectionId);
 
+    /** Есть ли у подключения боты, которые пользователь хочет держать запущенными. */
+    boolean existsByExchangeConnectionIdAndActiveTrue(UUID exchangeConnectionId);
+
     boolean existsByExchangeConnectionId(UUID exchangeConnectionId);
 }

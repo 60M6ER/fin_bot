@@ -30,6 +30,7 @@ class RuntimeSupervisorStreamTest {
     private final UUID connectionId = UUID.randomUUID();
 
     private ExchangeConnectionRepository connectionRepo;
+    private BotRepository botRepo;
     private ExchangeRuntimeService exchangeRuntime;
     private BotRuntimeService botRuntime;
     private ExchangeHandler handler;
@@ -38,7 +39,7 @@ class RuntimeSupervisorStreamTest {
     @BeforeEach
     void setUp() {
         connectionRepo = mock(ExchangeConnectionRepository.class);
-        BotRepository botRepo = mock(BotRepository.class);
+        botRepo = mock(BotRepository.class);
         exchangeRuntime = mock(ExchangeRuntimeService.class);
         botRuntime = mock(BotRuntimeService.class);
         handler = mock(ExchangeHandler.class);
@@ -52,6 +53,7 @@ class RuntimeSupervisorStreamTest {
 
         when(connectionRepo.findAllByActiveTrueOrderByNameAsc()).thenReturn(List.of(conn));
         when(botRepo.findAllByActiveTrueOrderByNameAsc()).thenReturn(List.of());
+        when(botRepo.existsByExchangeConnectionIdAndActiveTrue(connectionId)).thenReturn(true);
         when(exchangeRuntime.isRunning(connectionId)).thenReturn(true);
         when(exchangeRuntime.get(connectionId)).thenReturn(Optional.of(handler));
 
@@ -66,6 +68,21 @@ class RuntimeSupervisorStreamTest {
         supervisor.reconcileDesiredState();
 
         verify(exchangeRuntime).restart(connectionId);
+    }
+
+    /**
+     * Подключение может быть нужно само по себе: REST, баланс, UI. Если активных
+     * ботов нет, market-data websocket не обязан быть подписан и подключен.
+     */
+    @Test
+    void idleConnectionWithoutActiveBotsDoesNotRestartForMissingStream() {
+        when(botRepo.existsByExchangeConnectionIdAndActiveTrue(connectionId)).thenReturn(false);
+        when(handler.marketDataStreamHealth()).thenReturn(
+                new StreamHealth(false, null, null, 0, null));
+
+        supervisor.reconcileDesiredState();
+
+        verify(exchangeRuntime, never()).restart(any());
     }
 
     /**
@@ -91,5 +108,19 @@ class RuntimeSupervisorStreamTest {
         supervisor.reconcileDesiredState();
 
         verify(exchangeRuntime, never()).deactivate(eq(connectionId));
+    }
+
+    @Test
+    void successfulStreamRestartClearsBackoff() {
+        when(handler.marketDataStreamHealth()).thenReturn(
+                new StreamHealth(false, Instant.now().minusSeconds(600), null, 1, "socket closed"),
+                new StreamHealth(true, Instant.now(), Instant.now(), 1, null),
+                new StreamHealth(false, Instant.now().minusSeconds(600), null, 2, "socket closed"),
+                new StreamHealth(true, Instant.now(), Instant.now(), 2, null));
+
+        supervisor.reconcileDesiredState();
+        supervisor.reconcileDesiredState();
+
+        verify(exchangeRuntime, times(2)).restart(connectionId);
     }
 }

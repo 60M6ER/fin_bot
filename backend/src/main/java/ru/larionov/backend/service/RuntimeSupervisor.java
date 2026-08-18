@@ -114,7 +114,7 @@ public class RuntimeSupervisor {
     }
 
     /**
-     * Оборвавшийся стрим рыночных данных при живом подключении.
+     * Оборвавшийся стрим рыночных данных при живом подключении и активных ботах.
      *
      * Подключение считается работающим, пока живы его REST-вызовы, и молчащий
      * стрим этому не мешает — а бот при этом ослеп: цен нет, решений нет, заявок нет.
@@ -125,8 +125,15 @@ public class RuntimeSupervisor {
      * Смотрим ИМЕННО на флаг соединения, а не на тишину. Тишина — нормальное
      * состояние стрима закрытой биржи: у брокера ночью не проходит ни одной сделки,
      * и перезапуск по тишине означал бы перезапуск каждые несколько минут до утра.
+     *
+     * У подключения без активных ботов стрима может не быть вовсе: подписка создаётся
+     * ботом, а REST/UI-балансам market-data websocket не нужен. Такое подключение
+     * считается idle, а не мёртвым.
      */
     private boolean marketDataStreamIsDead(UUID connectionId) {
+        if (!botRepo.existsByExchangeConnectionIdAndActiveTrue(connectionId)) {
+            return false;
+        }
         try {
             return exchangeRuntimeService.get(connectionId)
                     .map(h -> !h.marketDataStreamHealth().connected())
